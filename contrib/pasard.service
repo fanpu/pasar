@@ -1,0 +1,11 @@
+[Unit]
+Description=pasar GPU job scheduler
+After=default.target
+
+[Service]
+ExecStart=%h/.local/bin/pasard
+Restart=on-failure
+RestartSec=3
+
+[Install]
+WantedBy=default.target
