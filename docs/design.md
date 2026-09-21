@@ -53,7 +53,7 @@ It is built for a small, cooperative group (people and the agents they steer) sh
 ```
 
 - **pasard** is the single daemon: HTTP API, scheduler loop, watchdog, and storage. It runs as a systemd user service (`pasard.service`) with lingering enabled so it starts on boot.
-- **Executor** is a small interface (`launch`, `stop`, `kill`, `status`, `list`, `pids`, `memory`). The first backend uses transient systemd user units. The scheduler never talks to systemd directly, so it can be unit-tested with a fake executor and ported later.
+- **Executor** is a small interface (`launch`, `status`, `stop`, `kill`, `cleanup`, `list_units`). The first backend uses transient systemd user units. The scheduler never talks to systemd directly, so it can be unit-tested with a fake executor and ported later.
 - **Jobs survive pasard restarts.** Each attempt is its own systemd unit that writes its log straight to a file. On startup pasard lists `pasar-job-*` units and reconciles them with the database.
 - **pasar CLI** is a thin HTTP client.
 - **pasar-job** is a separate, dependency-free Python package installed into job venvs. It provides the job-side protocol helpers.
@@ -65,16 +65,19 @@ Python ≥ 3.11 (FastAPI, uvicorn, pydantic, nvidia-ml-py, httpx), SQLite (WAL m
 
 ### Launching an attempt
 
-pasard runs roughly:
+pasard writes `jobs/<id>/launch.json` (mode 0600: command, working directory, full environment
+including `PASAR_*`) and runs roughly:
 
 ```
 systemd-run --user --unit=pasar-job-42-3 \
-  -p WorkingDirectory=<cwd> -p EnvironmentFile=<jobdir>/env \
   -p StandardOutput=append:<jobdir>/output.log -p StandardError=append:<jobdir>/output.log \
-  -p MemoryMax=<limit> -p MemorySwapMax=0 \
-  -p KillSignal=SIGTERM -p TimeoutStopSec=<grace> -p RemainAfterExit=yes \
-  bash -c '<command>'
+  -p RemainAfterExit=yes -p KillMode=control-group -p KillSignal=SIGTERM \
+  -p TimeoutStopSec=<grace> -p MemoryMax=<limit> -p MemorySwapMax=0 \
+  <python> -m pasar.launch <jobdir>
 ```
+
+`pasar.launch` changes to the working directory and execs `bash -c '<command>'` with exactly
+that environment, so no quoting rules of systemd environment files apply.
 
 - `RemainAfterExit=yes` keeps the unit around after the process exits, so pasard can read `Result`, `ExecMainCode` and `ExecMainStatus` (including `oom-kill`) and then stop and reset the unit itself.
 - Stopping a unit sends SIGTERM to every process in its cgroup, waits for the grace period, then sends SIGKILL, which covers dataloader workers and other children.
@@ -91,7 +94,7 @@ So pasar accounts for memory itself.
 
 - **Pool** = total RAM − `system_reserve` (default **16 GiB**, for the OS, monitoring, and interactive use).
 - **External usage.** GPU memory used by processes that pasar did not launch (NVML) is subtracted from the free pool, so pasar never launches into memory that isn't really free.
-- **Whole-GPU job**: reserves the entire pool.
+- **Whole-GPU job**: for scheduling and the watchdog, it is charged the pool **minus external GPU usage**, so a foreign GPU process pasar didn't launch can't block it forever. Its cgroup `MemoryMax`, set once at launch, is the full pool regardless, since shrinking or growing that cap as foreign usage comes and goes would be unstable.
 - **Shared job** requesting *R*: reserves **R + max(2 GiB, 10% of R)** to cover the CUDA context, fragmentation and caching-allocator slack. This reservation is the job's **limit**.
 - **Job usage** = cgroup `memory.current` + the NVML GPU memory of every PID in the job's cgroup. Peak usage is tracked per attempt.
 - For scheduling, each running job counts as `max(reservation, actual usage)`.
@@ -145,13 +148,13 @@ queued ──▶ running ──▶ completed
 
 Determined in this order:
 
-1. **pasar's own actions** are known exactly: `cancelled`, `preempted`, `oom` (watchdog).
-2. **systemd**: exit code, signal (`SIGSEGV`, `SIGABRT`, …), or `oom-kill` by the kernel within the cgroup.
-3. **Log scan** of the last lines of `output.log`:
-   - `torch.OutOfMemoryError` / `CUDA out of memory` → `gpu_oom`
-   - a Python traceback → the final exception line becomes the summary
-   - NCCL errors, `Killed`
-4. **GPU faults**: Xid errors in the kernel log during the attempt → `gpu_xid`.
+1. **pasar's own actions** are known exactly and short-circuit everything else: `cancelled`, `preempted`, `oom` (watchdog).
+2. Otherwise, a specific cause found in the logs or the GPU beats a generic signal or exit code:
+   1. **`oom-kill` by the kernel** within the cgroup (from systemd's `Result`) → `kernel_oom`.
+   2. **Log scan** of the last lines of `output.log`, most recent match first: `torch.OutOfMemoryError` / `CUDA out of memory` → `gpu_oom`.
+   3. **GPU faults**: Xid errors in the kernel log during the attempt → `gpu_xid`.
+   4. **Signal** (`SIGSEGV`, `SIGABRT`, …) → `signal`.
+   5. Otherwise → `exit`, with the log scanned again for the final Python exception line or an NCCL error to use as the summary; failing that, "exited with code N".
 
 Each attempt stores a **reason code**, a one-line **summary**, and the **last 50 log lines**.
 
@@ -174,7 +177,7 @@ Each attempt stores a **reason code**, a one-line **summary**, and the **last 50
 | `PASAR_MEM_LIMIT_BYTES` | Shared jobs only: the job's limit |
 | `PASAR_GRACE_SECONDS` | Time between SIGTERM and SIGKILL |
 
-On top of this the job gets the submitter's environment at submit time (unless `--no-env`), stored in `jobs/<id>/env` with mode 0600.
+On top of this the job gets the submitter's environment at submit time (unless `--no-env`), stored in `jobs/<id>/env.json` with mode 0600.
 
 ### Events
 
@@ -219,7 +222,7 @@ For each interrupted attempt (preempted or failed), and the attempt that follows
 ## CLI
 
 ```
-pasar submit [opts] -- <command…>    pasar logs <id> [-f] [--attempt N]
+pasar submit [opts] -- <command…>    pasar logs <id> [-f]
 pasar ls [--all] [--state S]         pasar cancel <id>
 pasar show <id>                      pasar bid <id> <n>
 pasar wait <id> [--timeout T]        pasar restart <id> [--mem/--bid/--time …]
@@ -264,7 +267,7 @@ pasard binds to `127.0.0.1:8750` by default. `bind` in the config can add more a
 ~/.config/pasar/mascot/             optional custom mascot images
 ~/.local/share/pasar/pasar.db       SQLite
 ~/.local/share/pasar/jobs/<id>/
-    spec.json   env   git.diff   output.log   events.jsonl
+    spec.json   env.json   launch.json   git.diff   output.log   events.jsonl
 ```
 
 Tables:
