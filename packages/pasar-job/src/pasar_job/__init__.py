@@ -3,6 +3,8 @@
 Every function is a no-op outside pasar, so scripts can call them unconditionally.
 """
 
+from __future__ import annotations
+
 import json
 import os
 import signal
