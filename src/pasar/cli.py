@@ -225,12 +225,17 @@ def run(args, client: httpx.Client) -> int:
     elif args.cmd == "logs":
         if args.follow:
             try:
-                with client.stream("GET", f"/api/jobs/{args.id}/logs",
-                                   params={"follow": True}) as r:
+                # The server sends a comment every ~15 s of quiet (see KEEPALIVE_INTERVAL), so
+                # this stream can safely wait past the client's normal read timeout; only the
+                # initial connect still needs to time out promptly.
+                with client.stream("GET", f"/api/jobs/{args.id}/logs", params={"follow": True},
+                                   timeout=httpx.Timeout(30, read=None)) as r:
                     if r.status_code >= 400:
                         r.read()
                         raise ApiError(_error_message(_response_detail(r)))
                     for line in r.iter_lines():
+                        # SSE comment lines (e.g. ": keep-alive") and the blank lines between
+                        # events are not data; only "data: " lines carry log text.
                         if line.startswith("data: "):
                             sys.stdout.write(json.loads(line[6:]).get("text", ""))
                             sys.stdout.flush()

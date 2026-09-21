@@ -55,3 +55,11 @@ def test_unknown_key_is_an_error(tmp_path):
 
 def test_config_is_constructible_with_defaults():
     assert Config().mem_margin_frac == 0.10
+
+
+def test_allowed_hosts_defaults_empty_and_parses_from_toml(tmp_path):
+    assert Config().allowed_hosts == []
+    p = tmp_path / "config.toml"
+    p.write_text('allowed_hosts = ["mybox.example.ts.net"]\n')
+    cfg = load_config(p)
+    assert cfg.allowed_hosts == ["mybox.example.ts.net"]

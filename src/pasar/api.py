@@ -2,13 +2,16 @@
 
 import asyncio
 import json
+import time
 from pathlib import Path
 
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, Query, Request
 from fastapi.responses import JSONResponse, StreamingResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, Field, field_validator
+from starlette.middleware.trustedhost import TrustedHostMiddleware
 
 from pasar import __version__
+from pasar.config import Config
 from pasar.daemon import UNSET, Conflict, Daemon, NotFound
 from pasar.metrics import Prometheus
 from pasar.models import TERMINAL, JobSpec, State
@@ -16,6 +19,16 @@ from pasar.units import parse_duration, parse_size
 from pasar.views import attempt_view, job_view, schedule_projection, status_view
 
 RECENT = 86400
+KEEPALIVE_INTERVAL = 15.0  # seconds of quiet before an SSE stream sends a `: keep-alive` comment
+_MAX_INT = 2**62  # keeps user-supplied numbers well clear of sqlite's signed-64-bit columns
+
+
+def _bounded(v):
+    """A field_validator for fields that mix str and int (parsed later by parse_duration /
+    parse_size): reject an out-of-range int, leave strings and None alone."""
+    if isinstance(v, int) and not isinstance(v, bool) and not (0 <= v <= _MAX_INT):
+        raise ValueError(f"out of range (0..{_MAX_INT}): {v}")
+    return v
 
 
 class SubmitBody(BaseModel):
@@ -23,27 +36,31 @@ class SubmitBody(BaseModel):
     time: str | int
     cwd: str
     mem: str | int | None = None
-    bid: int | None = None
+    bid: int | None = Field(default=None, ge=0, le=_MAX_INT)
     preemptible: bool = True
     grace: str | int | None = None
-    retries: int = 0
+    retries: int = Field(default=0, ge=0, le=_MAX_INT)
     name: str = ""
     note: str = ""
     tags: list[str] = []
     submitter: str = ""
     env: dict[str, str] | None = None
 
+    _bounded_mixed = field_validator("time", "mem", "grace")(_bounded)
+
 
 class PatchBody(BaseModel):
-    bid: int
+    bid: int = Field(ge=0, le=_MAX_INT)
 
 
 class RestartBody(BaseModel):
     mem: str | int | None = None
     whole_gpu: bool = False
     time: str | int | None = None
-    bid: int | None = None
-    retries: int | None = None
+    bid: int | None = Field(default=None, ge=0, le=_MAX_INT)
+    retries: int | None = Field(default=None, ge=0, le=_MAX_INT)
+
+    _bounded_mixed = field_validator("time", "mem")(_bounded)
 
 
 def _sse(data: dict, event: str | None = None) -> str:
@@ -60,9 +77,68 @@ def _read_chunk(path: Path, offset: int, limit: int = 1 << 20) -> tuple[str, int
     return data.decode("utf-8", errors="replace"), offset + len(data)
 
 
-def create_app(daemon: Daemon, *, prom: Prometheus | None = None, wake=lambda: None) -> FastAPI:
+async def _follow_logs(daemon: Daemon, job_id: int, path: Path, offset: int):
+    """SSE body for `GET .../logs?follow=1`: log text as it's written, a `: keep-alive` comment
+    every `KEEPALIVE_INTERVAL` of quiet (so a client's read timeout doesn't trip), and an `end`
+    event once the job is done. A module-level function (rather than a route-local closure) so
+    it can be driven directly in tests without a live HTTP stream."""
+    off = offset
+    last_sent = time.monotonic()
+    while True:
+        text, new_off = _read_chunk(path, off)
+        if text:
+            off = new_off
+            yield _sse({"text": text, "offset": off})
+            last_sent = time.monotonic()
+        elif daemon.job(job_id).state in TERMINAL:
+            yield _sse({}, event="end")
+            return
+        else:
+            if time.monotonic() - last_sent >= KEEPALIVE_INTERVAL:
+                yield ": keep-alive\n\n"
+                last_sent = time.monotonic()
+            await asyncio.sleep(0.5)
+
+
+async def _stream_updates(daemon: Daemon, snapshot, limit: int | None):
+    """SSE body for `GET /api/stream`: one snapshot per state change, plus the same keep-alive
+    comment as `_follow_logs` if the daemon goes quiet for a while."""
+    seen, sent = None, 0
+    last_sent = time.monotonic()
+    while limit is None or sent < limit:
+        if daemon.version != seen:
+            seen = daemon.version
+            yield _sse(snapshot())
+            sent += 1
+            last_sent = time.monotonic()
+        elif time.monotonic() - last_sent >= KEEPALIVE_INTERVAL:
+            yield ": keep-alive\n\n"
+            last_sent = time.monotonic()
+        await asyncio.sleep(0.5)
+
+
+def _default_allowed_hosts(cfg: Config) -> list[str]:
+    """Host allowlist for TrustedHostMiddleware: what pasard binds to (from `cfg.addresses()`,
+    stripped of ports and brackets), always localhost, plus any extra names from
+    `allowed_hosts` in config.toml (e.g. a Tailscale DNS name)."""
+    hosts = {"localhost", "127.0.0.1", "::1", "[::1]"}
+    for addr in cfg.addresses():
+        host, _, _ = addr.rpartition(":")
+        hosts.add(host.strip("[]"))
+    hosts.update(cfg.allowed_hosts)
+    return sorted(hosts)
+
+
+def create_app(daemon: Daemon, *, prom: Prometheus | None = None, wake=lambda: None,
+               allowed_hosts: list[str] | None = None) -> FastAPI:
     app = FastAPI(title="pasar", version=__version__)
     cfg = daemon.cfg
+    # `allowed_hosts` here is *extra* names on top of the production defaults below (e.g.
+    # TestClient's "testserver"); it must never be used to widen what production allows.
+    hosts = _default_allowed_hosts(cfg)
+    if allowed_hosts:
+        hosts = [*hosts, *allowed_hosts]
+    app.add_middleware(TrustedHostMiddleware, allowed_hosts=hosts)
 
     @app.exception_handler(NotFound)
     async def _not_found(request: Request, exc: NotFound):
@@ -164,27 +240,14 @@ def create_app(daemon: Daemon, *, prom: Prometheus | None = None, wake=lambda: N
         return daemon.store.metric_summaries(job_id)
 
     @app.get("/api/jobs/{job_id}/logs")
-    async def logs(job_id: int, offset: int = 0, follow: bool = False):
+    async def logs(job_id: int, offset: int = Query(0, ge=0), follow: bool = False):
         daemon.job(job_id)
         path = daemon.job_dir(job_id) / "output.log"
         if not follow:
             text, new_offset = _read_chunk(path, offset)
             return {"text": text, "offset": new_offset}
-
-        async def gen():
-            off = offset
-            while True:
-                text, new_off = _read_chunk(path, off)
-                if text:
-                    off = new_off
-                    yield _sse({"text": text, "offset": off})
-                elif daemon.job(job_id).state in TERMINAL:
-                    yield _sse({}, event="end")
-                    return
-                else:
-                    await asyncio.sleep(0.5)
-
-        return StreamingResponse(gen(), media_type="text/event-stream")
+        return StreamingResponse(_follow_logs(daemon, job_id, path, offset),
+                                 media_type="text/event-stream")
 
     @app.get("/api/status")
     async def status():
@@ -199,15 +262,7 @@ def create_app(daemon: Daemon, *, prom: Prometheus | None = None, wake=lambda: N
 
     @app.get("/api/stream")
     async def stream(limit: int | None = None):
-        async def gen():
-            seen, sent = None, 0
-            while limit is None or sent < limit:
-                if daemon.version != seen:
-                    seen = daemon.version
-                    yield _sse(snapshot())
-                    sent += 1
-                await asyncio.sleep(0.5)
-
-        return StreamingResponse(gen(), media_type="text/event-stream")
+        return StreamingResponse(_stream_updates(daemon, snapshot, limit),
+                                 media_type="text/event-stream")
 
     return app

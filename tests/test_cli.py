@@ -10,7 +10,7 @@ from pasar.cli import ApiError, base_url, call, main, wait_code
 
 @pytest.fixture
 def client(daemon):
-    return TestClient(create_app(daemon))
+    return TestClient(create_app(daemon, allowed_hosts=["testserver"]))
 
 
 def run(client, capsys, *argv):
@@ -121,6 +121,28 @@ def test_logs_follow_unreachable_daemon(capsys):
     unreachable = httpx.Client(base_url="http://127.0.0.1:1", timeout=0.5)
     code, out = run(unreachable, capsys, "logs", "1", "-f")
     assert code == 69 and "cannot reach pasard" in out.err
+
+
+def test_logs_follow_uses_a_read_none_timeout(capsys, monkeypatch):
+    # The follow stream can be quiet for a long time between server keep-alives; it must not
+    # use the client's normal (bounded) read timeout, or `pasar logs -f` dies after ~30s.
+    sse = 'data: {"text": "hi"}\n\nevent: end\ndata: {}\n\n'
+    captured = {}
+    orig_stream = httpx.Client.stream
+
+    def spy(self, method, url, **kw):
+        captured.update(kw)
+        return orig_stream(self, method, url, **kw)
+
+    monkeypatch.setattr(httpx.Client, "stream", spy)
+
+    def handler(request):
+        return httpx.Response(200, text=sse)
+
+    client = httpx.Client(transport=httpx.MockTransport(handler), base_url="http://test")
+    code, out = run(client, capsys, "logs", "1", "-f")
+    assert code == 0 and out.out == "hi"
+    assert captured["timeout"] == httpx.Timeout(30, read=None)
 
 
 def test_logs_follow_streams_text(capsys):

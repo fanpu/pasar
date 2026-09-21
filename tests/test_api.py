@@ -1,15 +1,17 @@
+import asyncio
 import json
 
 import pytest
 from fastapi.testclient import TestClient
 
+from pasar import api
 from pasar.api import create_app
 from pasar.units import GiB
 
 
 @pytest.fixture
 def client(daemon):
-    return TestClient(create_app(daemon))
+    return TestClient(create_app(daemon, allowed_hosts=["testserver"]))
 
 
 def submit(client, tmp_path, **kw):
@@ -63,6 +65,51 @@ def test_job_detail_logs_and_events(client, daemon, executor, tmp_path):
     assert client.get("/api/jobs/1/events").json()[0]["kind"] == "checkpoint"
 
 
+def test_nan_in_event_payload_does_not_break_get_jobs_for_everyone(client, daemon, tmp_path):
+    # NaN/Infinity in event JSON used to reach job_view and make Starlette's strict JSON
+    # encoder raise (caught by the app's blanket ValueError handler as a 422) for the whole
+    # /api/jobs response, not just the offending job.
+    submit(client, tmp_path)
+    daemon.tick()
+    (daemon.job_dir(1) / "events.jsonl").write_text(
+        '{"event":"progress","step":1,"loss":NaN}\n'
+        '{"event":"progress","step":2,"total_steps":10}\n'
+    )
+    daemon.tick()
+    r = client.get("/api/jobs")
+    assert r.status_code == 200
+    assert r.json()[0]["progress"]["step"] == 2
+
+
+def _drain(gen, n):
+    """Pull up to `n` items from an async generator, then close it. Bounded so a generator
+    that never finishes on its own (like the SSE ones below) can't hang a test."""
+    async def run():
+        items = []
+        try:
+            for _ in range(n):
+                items.append(await gen.__anext__())
+        finally:
+            await gen.aclose()
+        return items
+    return asyncio.run(run())
+
+
+def test_follow_logs_sends_keepalive_when_quiet(daemon, executor, make_spec, monkeypatch):
+    monkeypatch.setattr(api, "KEEPALIVE_INTERVAL", 0.05)
+    daemon.submit(make_spec())
+    daemon.tick()  # writes the "attempt 1" separator into output.log
+    path = daemon.job_dir(1) / "output.log"
+    chunks = _drain(api._follow_logs(daemon, 1, path, 0), 4)
+    assert any(c.startswith(":") for c in chunks)
+
+
+def test_stream_sends_keepalive_when_quiet(daemon, monkeypatch):
+    monkeypatch.setattr(api, "KEEPALIVE_INTERVAL", 0.05)
+    chunks = _drain(api._stream_updates(daemon, lambda: {"status": {}, "jobs": []}, None), 4)
+    assert any(c.startswith(":") for c in chunks)
+
+
 def test_follow_logs_ends_when_job_finishes(client, daemon, executor, tmp_path):
     submit(client, tmp_path)
     daemon.tick()
@@ -82,6 +129,54 @@ def test_status_gpu_and_stream(client, daemon, tmp_path):
         line = next(ln for ln in r.iter_lines() if ln.startswith("data: "))
     msg = json.loads(line[len("data: "):])
     assert msg["status"]["pool"] == 105 * GiB and msg["jobs"][0]["id"] == 1
+
+
+def test_disallowed_host_header_is_rejected(daemon):
+    # DNS rebinding: a request whose Host header doesn't match an allowed name must be
+    # rejected before it reaches any handler.
+    app = create_app(daemon, allowed_hosts=["testserver"])
+    client = TestClient(app)
+    r = client.get("/api/status", headers={"Host": "evil.example.com"})
+    assert r.status_code == 400
+
+
+def test_default_hosts_are_allowed_without_config(daemon):
+    app = create_app(daemon, allowed_hosts=["testserver"])
+    client = TestClient(app)
+    assert client.get("/api/status", headers={"Host": "127.0.0.1"}).status_code == 200
+    assert client.get("/api/status", headers={"Host": "localhost"}).status_code == 200
+
+
+def test_configured_allowed_hosts_extra_name_is_allowed(daemon):
+    daemon.cfg.allowed_hosts = ["mybox.example.ts.net"]
+    app = create_app(daemon, allowed_hosts=["testserver"])
+    client = TestClient(app)
+    r = client.get("/api/status", headers={"Host": "mybox.example.ts.net"})
+    assert r.status_code == 200
+
+
+def test_submit_rejects_out_of_range_bid(client, tmp_path):
+    assert submit(client, tmp_path, bid=2**70).status_code == 422
+
+
+def test_patch_rejects_out_of_range_bid(client, daemon, tmp_path):
+    submit(client, tmp_path)
+    assert client.patch("/api/jobs/1", json={"bid": -1}).status_code == 422
+    assert client.patch("/api/jobs/1", json={"bid": 2**70}).status_code == 422
+
+
+def test_restart_rejects_out_of_range_bid(client, daemon, tmp_path):
+    submit(client, tmp_path)
+    client.post("/api/jobs/1/cancel")
+    r = client.post("/api/jobs/1/restart", json={"bid": 2**70})
+    assert r.status_code == 422
+
+
+def test_negative_logs_offset_is_rejected(client, daemon, tmp_path):
+    submit(client, tmp_path)
+    daemon.tick()
+    r = client.get("/api/jobs/1/logs?offset=-1")
+    assert r.status_code == 422
 
 
 def test_env_is_stored_privately(client, daemon, tmp_path):

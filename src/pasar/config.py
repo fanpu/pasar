@@ -32,6 +32,7 @@ class Config:
     log_retention_size: int = 20 * GiB
     mascot_dir: str = ""
     data_dir: str = ""
+    allowed_hosts: list[str] = field(default_factory=list)
 
     def addresses(self) -> list[str]:
         """Return list of addresses with DEFAULT_ADDRESS first, then bind entries.
