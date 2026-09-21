@@ -256,14 +256,14 @@ Every command accepts `--json`. `pasar wait` exit codes: `0` completed, `1` fail
 REST under `/api`, JSON in and out:
 
 - `POST /api/jobs`, `GET /api/jobs`, `GET /api/jobs/{id}`
-- `POST /api/jobs/{id}/cancel`, `PATCH /api/jobs/{id}` (bid and other queued-job settings), `POST /api/jobs/{id}/restart`
+- `POST /api/jobs/{id}/cancel`, `PATCH /api/jobs/{id}` (bid; patching other queued-job settings is **planned, not yet implemented**), `POST /api/jobs/{id}/restart`
 - `GET /api/jobs/{id}/logs` (range, or SSE with `?follow=1`)
 - `GET /api/jobs/{id}/events`, `GET /api/jobs/{id}/metrics`
 - `GET /api/status` (pool, pressure, GPU stats, projected schedule)
 - `GET /api/gpu` (power, temperature, utilisation time series from Prometheus, for the dashboard)
 - `GET /api/stream`: a single SSE stream of state changes that keeps the UI live
 
-pasard binds to `127.0.0.1:8750` by default. `bind` in the config can add more addresses, e.g. a Tailscale IP. There is no authentication, so it should never bind to a public interface.
+pasard binds to `127.0.0.1:8750` by default. `bind` in the config can add more addresses, e.g. a Tailscale IP. There is no authentication, so it should never bind to a public interface. pasard also checks the request's `Host` header against an allowlist (bound addresses, localhost, plus `allowed_hosts` in the config) to guard against DNS rebinding.
 
 ## Storage
 
@@ -281,14 +281,14 @@ Tables:
 - `attempts`: job, number, unit name, start and end time, end kind, exit code or signal, reason and summary, log tail, peak memory, wasted work, restart cost.
 - `events`: job, attempt, time, kind, step, payload.
 - `metric_summaries`: job, attempt, metric, avg, max, total (e.g. energy).
-- `machine_events`: pressure episodes, watchdog kills, external GPU usage changes.
+- `machine_events`: pressure episodes, watchdog kills; external GPU usage changes as a machine event is **planned, not yet implemented**.
 
 Old job directories are cleaned up by a size and age policy (default: keep 30 days or 20 GiB of logs).
 
 ## Metrics
 
 - **Per job**, from pasar itself: memory (cgroup + NVML) current and peak, progress, checkpoints.
-- **GPU-wide**, from Prometheus (`prometheus_url`, e.g. `http://127.0.0.1:9090`): power, temperature, utilisation, SM clock, energy (dcgm-exporter), memory pressure and host stats (node-exporter). While a job runs the UI queries these live. When an attempt ends, pasard stores summaries (average and max power, energy used, max temperature) so they outlive Prometheus retention. The job page links to the matching time range in Grafana if `grafana_url` is set.
+- **GPU-wide**, from Prometheus (`prometheus_url`, e.g. `http://127.0.0.1:9090`), via dcgm-exporter: power, temperature, utilisation, energy. While a job runs the UI queries these live. When an attempt ends, pasard stores summaries (average and max power, energy used, max temperature) so they outlive Prometheus retention. The job page links to the matching time range in Grafana if `grafana_url` is set. **Planned, not yet implemented**: SM clock (also dcgm-exporter), and memory pressure / host stats from node-exporter.
 - GPU-wide metrics cannot be split between jobs that share the GPU. The UI labels them as GPU-wide and shows which jobs were co-running.
 - Without Prometheus configured, these panels are hidden and everything else works.
 
@@ -330,6 +330,7 @@ The repo ships a minimal built-in set. Users can point `mascot_dir` (default `~/
 | Key | Default |
 |---|---|
 | `bind` | `["127.0.0.1:8750"]` |
+| `allowed_hosts` | `[]` (extra Host-header names to accept, e.g. `["mybox.example.ts.net"]`; localhost, 127.0.0.1, `::1` and the bound addresses are always accepted) |
 | `system_reserve` | `16GiB` |
 | `mem_margin_min` / `mem_margin_frac` | `2GiB` / `0.10` |
 | `default_bid` | `1000` |

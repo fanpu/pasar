@@ -44,6 +44,7 @@ See [docs/jobs.md](docs/jobs.md) for writing jobs that checkpoint and resume, an
     bind = ["127.0.0.1:8750"]   # extra addresses to bind; 127.0.0.1:8750 is always included
     system_reserve = "16G"
     prometheus_url = "http://127.0.0.1:9090"
+    allowed_hosts = ["mybox.example.ts.net"]   # extra Host-header names to accept
 
 ## Licence
 
