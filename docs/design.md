@@ -69,17 +69,16 @@ pasard writes `jobs/<id>/launch.json` (mode 0600: command, working directory, fu
 including `PASAR_*`) and runs roughly:
 
 ```
-systemd-run --user --unit=pasar-job-42-3 \
+systemd-run --user --quiet --unit=pasar-job-42-3 \
   -p StandardOutput=append:<jobdir>/output.log -p StandardError=append:<jobdir>/output.log \
   -p RemainAfterExit=yes -p KillMode=control-group -p KillSignal=SIGTERM \
-  -p TimeoutStopSec=<grace> -p MemoryMax=<limit> -p MemorySwapMax=0 \
+  -p TimeoutStopSec=<grace> -p MemorySwapMax=0 -p MemoryMax=<limit> \
   <python> -m pasar.launch <jobdir>
 ```
 
 `pasar.launch` changes to the working directory and execs `bash -c '<command>'` with exactly
 that environment, so no quoting rules of systemd environment files apply.
 
-- `RemainAfterExit=yes` keeps the unit around after the process exits, so pasard can read `Result`, `ExecMainCode` and `ExecMainStatus` (including `oom-kill`) and then stop and reset the unit itself.
 - Stopping a unit sends SIGTERM to every process in its cgroup, waits for the grace period, then sends SIGKILL, which covers dataloader workers and other children.
 - Before each launch pasard appends a separator line to `output.log` (`──── attempt 3 · 2026-09-21 14:02 · resumed after preemption ────`).
 
@@ -156,6 +155,8 @@ Determined in this order:
    4. **Signal** (`SIGSEGV`, `SIGABRT`, …) → `signal`.
    5. Otherwise → `exit`, with the log scanned again for the final Python exception line or an NCCL error to use as the summary; failing that, "exited with code N".
 
+**Planned, not yet implemented**: a log scan for a bare `Killed` line (printed when the kernel OOM-kills a process from *outside* the job's own cgroup, e.g. under whole-machine memory pressure — distinct from the `oom-kill` `Result` systemd reports for the cgroup itself) is planned but not wired up yet. Until it lands, such a case surfaces as `signal` or a generic `exit`, not as an OOM reason.
+
 Each attempt stores a **reason code**, a one-line **summary**, and the **last 50 log lines**.
 
 ### Retries and restarts
@@ -222,12 +223,15 @@ For each interrupted attempt (preempted or failed), and the attempt that follows
 ## CLI
 
 ```
-pasar submit [opts] -- <command…>    pasar logs <id> [-f]
+pasar submit [opts] -- <command…>    pasar logs <id> [-f] [--attempt N]
 pasar ls [--all] [--state S]         pasar cancel <id>
 pasar show <id>                      pasar bid <id> <n>
 pasar wait <id> [--timeout T]        pasar restart <id> [--mem/--bid/--time …]
 pasar status
 ```
+
+`logs --attempt N` (viewing a single attempt's slice of the log, rather than the whole file with
+its separator lines between attempts) is **planned, not yet implemented**.
 
 Submit options:
 
@@ -256,6 +260,7 @@ REST under `/api`, JSON in and out:
 - `GET /api/jobs/{id}/logs` (range, or SSE with `?follow=1`)
 - `GET /api/jobs/{id}/events`, `GET /api/jobs/{id}/metrics`
 - `GET /api/status` (pool, pressure, GPU stats, projected schedule)
+- `GET /api/gpu` (power, temperature, utilisation time series from Prometheus, for the dashboard)
 - `GET /api/stream`: a single SSE stream of state changes that keeps the UI live
 
 pasard binds to `127.0.0.1:8750` by default. `bind` in the config can add more addresses, e.g. a Tailscale IP. There is no authentication, so it should never bind to a public interface.
