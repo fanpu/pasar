@@ -102,24 +102,29 @@ class Daemon:
     def changed(self) -> None:
         self.version += 1
 
-    # ---- commands
-    def submit(self, spec: JobSpec) -> Job:
+    def _validate_spec(self, spec: JobSpec) -> None:
+        """Field-level checks shared by submit and restart. Needs self.pool sampled first for
+        the memory-request check."""
         if not spec.command.strip():
             raise ValueError("command is empty")
         if spec.est_runtime <= 0:
             raise ValueError("estimated runtime must be positive")
         if spec.bid < 0 or spec.grace < 0 or spec.retries < 0:
             raise ValueError("bid, grace and retries must not be negative")
-        if not Path(spec.cwd).is_dir():
-            raise ValueError(f"working directory does not exist: {spec.cwd}")
-        if not self.pool:
-            self._sample_machine()
         if spec.mem_request is not None:
             if spec.mem_request <= 0:
                 raise ValueError("memory request must be positive")
             if reservation(spec.mem_request, self.pool, self.cfg) > self.pool:
                 raise ValueError(f"requests more than the whole pool ({fmt_gib(self.pool)}); "
                                  "omit the memory request to take the whole GPU")
+
+    # ---- commands
+    def submit(self, spec: JobSpec) -> Job:
+        if not Path(spec.cwd).is_dir():
+            raise ValueError(f"working directory does not exist: {spec.cwd}")
+        if not self.pool:
+            self._sample_machine()
+        self._validate_spec(spec)
         now = self.clock()
         commit, diff = gitinfo.capture(spec.cwd)
         stored = replace(spec, name=spec.name or default_name(spec.command), env=None)
@@ -165,6 +170,9 @@ class Daemon:
         if not self.job_dir(job_id).is_dir():
             raise Conflict(f"job {job_id}'s files are gone (housekeeping removed them); "
                            "resubmit it instead")
+        new_bid = job.bid if bid is None else bid
+        if new_bid < 0:
+            raise ValueError("bid must not be negative")
         spec = job.spec
         if mem_request is not UNSET:
             spec = replace(spec, mem_request=mem_request)
@@ -172,8 +180,11 @@ class Daemon:
             spec = replace(spec, est_runtime=est_runtime)
         if retries is not None:
             spec = replace(spec, retries=retries)
+        if not self.pool:
+            self._sample_machine()
+        self._validate_spec(spec)
         self.store.update_job(
-            job_id, spec=spec, state=State.QUEUED, bid=job.bid if bid is None else bid,
+            job_id, spec=spec, state=State.QUEUED, bid=new_bid,
             queue_time=self.clock(), retries_used=0, reason=None, summary="", stop_requested=None,
         )
         self.changed()
@@ -338,26 +349,34 @@ class Daemon:
         n = len(prior) + 1
         unit = f"pasar-job-{job.id}-{n}"
         d = self.job_dir(job.id)
-        limit = self.limit(job)
-        base = {k: os.environ[k] for k in _BASE_ENV_KEYS if k in os.environ}
-        env = {**base, **json.loads((d / "env.json").read_text())}
-        env.update(
-            PASAR_JOB_ID=str(job.id), PASAR_ATTEMPT=str(n), PASAR_RESUMING="1" if n > 1 else "0",
-            PASAR_EVENTS=str(d / "events.jsonl"), PASAR_JOB_DIR=str(d),
-            PASAR_GRACE_SECONDS=str(job.spec.grace),
-        )
-        if job.spec.mem_request is not None:
-            env["PASAR_MEM_LIMIT_BYTES"] = str(limit)
-        _write_private(d / "launch.json",
-                       json.dumps({"command": job.spec.command, "cwd": job.spec.cwd, "env": env}))
-        with (d / "output.log").open("a") as f:
-            f.write(_separator(n, now, prior[-1] if prior else None))
+        # The cgroup cap must be stable regardless of transient external GPU usage: unlike
+        # limit() (used for scheduling and the watchdog), a whole-GPU job's MemoryMax is the
+        # full pool, not pool - external, or it would shrink/grow as foreign processes come
+        # and go and could even go to zero.
+        mem_max = reservation(job.spec.mem_request, self.pool, self.cfg)
+        try:
+            base = {k: os.environ[k] for k in _BASE_ENV_KEYS if k in os.environ}
+            env = {**base, **json.loads((d / "env.json").read_text())}
+            env.update(
+                PASAR_JOB_ID=str(job.id), PASAR_ATTEMPT=str(n),
+                PASAR_RESUMING="1" if n > 1 else "0", PASAR_EVENTS=str(d / "events.jsonl"),
+                PASAR_JOB_DIR=str(d), PASAR_GRACE_SECONDS=str(job.spec.grace),
+            )
+            if job.spec.mem_request is not None:
+                env["PASAR_MEM_LIMIT_BYTES"] = str(mem_max)
+            _write_private(d / "launch.json",
+                           json.dumps({"command": job.spec.command, "cwd": job.spec.cwd, "env": env}))
+            with (d / "output.log").open("a") as f:
+                f.write(_separator(n, now, prior[-1] if prior else None))
+        except OSError as e:
+            self._fail_launch(job, n, unit, now, str(e))
+            return
         if not Path(job.spec.cwd).is_dir():
             self._fail_launch(job, n, unit, now,
                               f"working directory no longer exists: {job.spec.cwd}")
             return
         try:
-            self.executor.launch(LaunchRequest(unit, str(d), str(d / "output.log"), limit,
+            self.executor.launch(LaunchRequest(unit, str(d), str(d / "output.log"), mem_max,
                                                job.spec.grace))
         except LaunchError as e:
             self._fail_launch(job, n, unit, now, str(e))

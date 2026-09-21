@@ -75,13 +75,16 @@ def test_restart_only_finished_jobs_and_applies_overrides(daemon, clock, make_sp
 def test_whole_gpu_job_launches_despite_external_gpu_usage(daemon, executor, probe, make_spec):
     # A foreign GPU process (not owned by any pasar job) is using memory. A queued whole-GPU
     # job (mem_request=None) must still be sized against pool - external, not the raw pool,
-    # or it would never fit and would be blocked forever.
+    # or it would never fit and would be blocked forever. But the cgroup cap it actually
+    # launches with (MemoryMax) must stay the stable full pool, not pool - external, or the
+    # cap would shrink (or hit zero) whenever a foreign process is using GPU memory.
     probe.gpu = {424242: 5 * GiB}
     daemon.submit(make_spec())
     daemon.tick()
     job = daemon.job(1)
     assert job.state == State.RUNNING
     assert executor.launched
+    assert executor.launched[0].mem_max == daemon.pool
 
 
 def test_restart_raises_conflict_when_job_directory_is_gone(daemon, make_spec):
@@ -90,6 +93,16 @@ def test_restart_raises_conflict_when_job_directory_is_gone(daemon, make_spec):
     shutil.rmtree(daemon.job_dir(1))
     with pytest.raises(Conflict, match="resubmit"):
         daemon.restart(1)
+
+
+def test_restart_validates_overrides_like_submit(daemon, make_spec):
+    daemon.submit(make_spec())
+    daemon.cancel(1)
+    with pytest.raises(ValueError, match="negative"):
+        daemon.restart(1, bid=-5)
+    with pytest.raises(ValueError, match="pool"):
+        daemon.restart(1, mem_request=200 * GiB)
+    assert daemon.job(1).state == State.CANCELLED
 
 
 def test_launch_fails_when_cwd_no_longer_exists(daemon, executor, make_spec, tmp_path):
@@ -109,3 +122,12 @@ def test_launch_env_gets_a_minimal_base_when_no_captured_env(daemon, make_spec):
     daemon.tick()
     launch = json.loads((daemon.job_dir(1) / "launch.json").read_text())
     assert "PATH" in launch["env"]
+
+
+def test_launch_missing_env_json_fails_the_attempt_instead_of_raising(daemon, executor, make_spec):
+    daemon.submit(make_spec())
+    (daemon.job_dir(1) / "env.json").unlink()
+    daemon.tick()  # must not raise
+    job = daemon.job(1)
+    assert job.state == State.FAILED and job.reason == "launch_error"
+    assert executor.launched == []
