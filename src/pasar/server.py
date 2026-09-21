@@ -45,6 +45,19 @@ def uvicorn_servers(app, addresses: list[str]) -> list[uvicorn.Server]:
     return servers
 
 
+def tick_and_housekeep(daemon: Daemon, last_housekeep: float) -> float:
+    """One scheduling pass (and housekeeping if due), isolated so an exception from either
+    doesn't kill the loop. Returns the (possibly updated) last-housekeep timestamp."""
+    try:
+        daemon.tick()
+        if time.time() - last_housekeep > HOUSEKEEP_EVERY:
+            daemon.housekeep()
+            last_housekeep = time.time()
+    except Exception:
+        log.exception("tick failed")
+    return last_housekeep
+
+
 async def serve(cfg: Config) -> None:
     wakeup = asyncio.Event()
     daemon, app = build(cfg, wake=wakeup.set)
@@ -53,13 +66,7 @@ async def serve(cfg: Config) -> None:
     async def loop():
         last_housekeep = 0.0
         while True:
-            try:
-                daemon.tick()
-                if time.time() - last_housekeep > HOUSEKEEP_EVERY:
-                    daemon.housekeep()
-                    last_housekeep = time.time()
-            except Exception:
-                log.exception("tick failed")
+            last_housekeep = tick_and_housekeep(daemon, last_housekeep)
             try:
                 await asyncio.wait_for(wakeup.wait(), timeout=cfg.tick)
             except TimeoutError:

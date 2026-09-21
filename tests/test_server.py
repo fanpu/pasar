@@ -1,5 +1,5 @@
 from pasar.config import DEFAULT_ADDRESS, Config
-from pasar.server import build, split_bind, uvicorn_servers
+from pasar.server import build, split_bind, tick_and_housekeep, uvicorn_servers
 
 
 def test_split_bind():
@@ -12,6 +12,31 @@ def test_build_creates_data_dir(tmp_path):
     _daemon, app = build(cfg)
     assert (tmp_path / "data" / "pasar.db").exists()
     assert any(r.path == "/api/status" for r in app.routes)
+
+
+def test_tick_and_housekeep_survives_a_tick_exception(caplog):
+    # A tick that raises must not kill the scheduler loop; the next pass should still run.
+    class FlakyDaemon:
+        def __init__(self):
+            self.ticks = 0
+            self.housekept = 0
+
+        def tick(self):
+            self.ticks += 1
+            if self.ticks == 1:
+                raise RuntimeError("boom")
+
+        def housekeep(self):
+            self.housekept += 1
+
+    daemon = FlakyDaemon()
+    with caplog.at_level("ERROR"):
+        last_housekeep = tick_and_housekeep(daemon, 0.0)
+    assert daemon.ticks == 1 and daemon.housekept == 0  # housekeep skipped: tick raised first
+    assert "tick failed" in caplog.text
+
+    last_housekeep = tick_and_housekeep(daemon, last_housekeep)
+    assert daemon.ticks == 2 and daemon.housekept == 1  # loop kept going on the next pass
 
 
 def test_uvicorn_servers_bind_to_addresses_not_just_extra_bind(tmp_path):

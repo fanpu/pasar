@@ -108,6 +108,36 @@ def test_over_limit_job_killed_only_under_sustained_pressure(daemon, executor, p
     assert "oom_kill" in kinds and "pressure" in kinds
 
 
+def test_oom_killed_job_is_not_chosen_as_a_same_tick_preemption_victim(
+        daemon, executor, probe, clock, make_spec):
+    # Regression: a job the watchdog kills for OOM in a tick used to still be eligible as a
+    # preemption victim in that same tick's scheduling pass. _finish would then see
+    # stop_requested == "preempt" and report the job PREEMPTED (not FAILED/oom), which requeues
+    # it without consuming a retry -> it just gets launched again, hits the same OOM, forever.
+    daemon.submit(make_spec(mem_request=10 * GiB))  # job 1, limit 12 GiB
+    daemon.tick()
+    cg = executor.units["pasar-job-1-1"].control_group
+    probe.cg_mem[cg] = 1 * GiB
+    probe.cg_pids[cg] = [4242]
+    probe.gpu = {4242: 14 * GiB}  # 15 GiB used, over its 12 GiB limit
+    clock.advance(60)
+    daemon.tick()  # over limit, but no pressure yet
+    probe.psi = 25.0
+    daemon.tick()  # pressure starts
+    # A higher-bid job needing the whole GPU queues up while job 1 is still (over-limit) running:
+    # without the fix, job 1 would be an attractive preemption victim for it.
+    daemon.submit(make_spec(bid=2000))
+    clock.advance(31)
+    daemon.tick()  # pressure sustained long enough: the watchdog kills job 1 this same tick
+    assert executor.killed == ["pasar-job-1-1"]
+    assert daemon.decision.preempt == []  # job 1 was excluded as a candidate
+    assert daemon.job(1).stop_requested is None  # never marked as preempted
+    daemon.tick()
+    job = daemon.job(1)
+    assert job.state == State.FAILED and job.reason == "oom"  # not requeued as preempted
+    assert daemon.store.attempts(1)[0].end_kind == EndKind.FAILED
+
+
 def test_reconcile_notes_stray_units(daemon, executor):
     executor.units["pasar-job-77-1"] = UnitState("pasar-job-77-1", False, None, None, None, None)
     daemon.reconcile()

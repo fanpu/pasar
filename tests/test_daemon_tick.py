@@ -101,3 +101,54 @@ def test_usage_and_external_memory(daemon, executor, probe, make_spec):
     daemon.tick()
     assert daemon.usage[1] == 6 * GiB and daemon.external == 3 * GiB
     assert daemon.store.current_attempt(1).peak_mem == 6 * GiB
+
+
+def test_out_of_range_step_does_not_crash_the_tick(daemon, executor, make_spec):
+    # A step outside signed 64-bit range used to reach Store.add_event and raise OverflowError
+    # on every tick, wedging all scheduling; events.py now drops such a step to None instead.
+    daemon.submit(make_spec())
+    daemon.tick()
+    (daemon.job_dir(1) / "events.jsonl").write_text(f'{{"event":"checkpoint","step":{2**63}}}\n')
+    daemon.tick()
+    assert daemon.job(1).state == State.RUNNING
+    assert daemon.store.events(1)[0]["step"] is None
+
+
+def test_poll_isolates_a_failing_jobs_exception(daemon, executor, make_spec, caplog):
+    daemon.submit(make_spec(mem_request=10 * GiB))
+    daemon.submit(make_spec(mem_request=10 * GiB))
+    daemon.tick()  # both launch (room for both, sharing the GPU)
+
+    orig = daemon._read_events
+
+    def boom(job, att):
+        if job.id == 1:
+            raise RuntimeError("boom")
+        return orig(job, att)
+
+    daemon._read_events = boom
+    executor.exit("pasar-job-2-1", code=0)
+    with caplog.at_level("ERROR"):
+        daemon.tick()
+    assert daemon.job(1).state == State.RUNNING  # untouched by job 2's poll continuing
+    assert daemon.job(2).state == State.COMPLETED
+    assert "poll failed for job 1" in caplog.text
+
+
+def test_corrupt_env_json_fails_launch_instead_of_crashing_the_tick(daemon, executor, make_spec):
+    daemon.submit(make_spec())
+    (daemon.job_dir(1) / "env.json").write_text("{not valid json")
+    daemon.tick()  # must not raise
+    job = daemon.job(1)
+    assert job.state == State.FAILED and job.reason == "launch_error"
+
+
+def test_stray_pasar_env_keys_are_dropped_before_relaunch(daemon, executor, make_spec):
+    # A PASAR_* key surviving in the submitter's captured environment (e.g. a stale
+    # PASAR_MEM_LIMIT_BYTES from a previous shared-memory job) must not leak into a fresh
+    # whole-GPU job's launch environment.
+    daemon.submit(make_spec(env={"PASAR_MEM_LIMIT_BYTES": "999", "KEEP": "1"}))
+    daemon.tick()
+    env = json.loads((daemon.job_dir(1) / "launch.json").read_text())["env"]
+    assert env["KEEP"] == "1"
+    assert "PASAR_MEM_LIMIT_BYTES" not in env  # whole GPU: pasar doesn't set this key itself

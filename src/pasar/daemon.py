@@ -1,6 +1,7 @@
 """The scheduler daemon: owns the job store and turns decisions into launches and stops."""
 
 import json
+import logging
 import os
 import shutil
 import time
@@ -18,6 +19,8 @@ from pasar.models import TERMINAL, Attempt, EndKind, Job, JobSpec, State, defaul
 from pasar.scheduler import Decision, Queued, Running, decide
 from pasar.units import fmt_duration, fmt_gib
 from pasar.watchdog import MachineSample, Watchdog
+
+log = logging.getLogger(__name__)
 
 UNSET = object()
 LOG_TAIL_LINES = 50
@@ -209,18 +212,21 @@ class Daemon:
     def _poll(self) -> None:
         self.units = {}
         for job in self.store.list_jobs(ACTIVE):
-            att = self.store.current_attempt(job.id)
-            self._read_events(job, att)
-            st = self.executor.status(att.unit)
-            if st is None:
-                self._finish(job.id, None, lost=not job.stop_requested)
-            elif st.exited:
-                self._finish(job.id, st)
-            else:
-                self.units[job.id] = st
+            try:
+                att = self.store.current_attempt(job.id)
+                self._read_events(job, att)
+                st = self.executor.status(att.unit)
+                if st is None:
+                    self._finish(job.id, None, lost=not job.stop_requested)
+                elif st.exited:
+                    self._finish(job.id, st)
+                else:
+                    self.units[job.id] = st
+            except Exception:
+                log.exception("poll failed for job %s", job.id)
 
     def _read_events(self, job: Job, att: Attempt) -> None:
-        events, offset = read_new(self.job_dir(job.id) / "events.jsonl", job.events_offset)
+        events, offset = read_new(self.job_dir(job.id) / "events.jsonl", job.events_offset, job.id)
         if offset == job.events_offset:
             return
         now = self.clock()
@@ -236,14 +242,17 @@ class Daemon:
         job = self.job(job_id)
         att = self.store.current_attempt(job_id)
         tail = _tail(self.job_dir(job_id) / "output.log", LOG_TAIL_LINES)
-        if job.stop_requested == "cancel":
-            kind, reason, summary = EndKind.CANCELLED, "cancelled", "cancelled while running"
-        elif job.stop_requested == "preempt":
-            kind, reason, summary = EndKind.PREEMPTED, "preempted", "preempted by a higher bid"
-        elif job_id in self.oom_killed:
+        if job_id in self.oom_killed:
+            # Takes priority even if a preempt/cancel was also requested this tick: the job is
+            # already dead from the watchdog's kill, and reporting anything else would let it
+            # requeue without consuming a retry, looping on the same OOM forever.
             kind, reason = EndKind.FAILED, "oom"
             summary = (f"exceeded its {fmt_gib(self.limit(job))} limit "
                        f"(peak {fmt_gib(att.peak_mem)}) during memory pressure")
+        elif job.stop_requested == "cancel":
+            kind, reason, summary = EndKind.CANCELLED, "cancelled", "cancelled while running"
+        elif job.stop_requested == "preempt":
+            kind, reason, summary = EndKind.PREEMPTED, "preempted", "preempted by a higher bid"
         elif lost:
             kind, reason = EndKind.FAILED, "lost"
             summary = "the job's process disappeared (did pasard or the machine restart?)"
@@ -320,8 +329,12 @@ class Daemon:
         for j in self.store.list_jobs(ACTIVE):
             att = self.store.current_attempt(j.id)
             charge = max(self.limit(j), self.usage.get(j.id, 0))
+            # A job the watchdog already killed this tick is as good as gone: treat it like a
+            # stopping job (not a preemption candidate, its charge counts as "incoming" free
+            # space) rather than let the scheduler pick an already-dead job as a victim.
+            stopping = j.state == State.STOPPING or j.id in self.oom_killed
             running.append(Running(j.id, j.bid, att.start_time, charge, j.spec.preemptible,
-                                   stopping=j.state == State.STOPPING))
+                                   stopping=stopping))
         return queued, running
 
     def free(self, running: list[Running]) -> int:
@@ -356,7 +369,11 @@ class Daemon:
         mem_max = reservation(job.spec.mem_request, self.pool, self.cfg)
         try:
             base = {k: os.environ[k] for k in _BASE_ENV_KEYS if k in os.environ}
-            env = {**base, **json.loads((d / "env.json").read_text())}
+            # Drop any PASAR_* keys the submitter's own environment happened to carry (e.g. a
+            # stale PASAR_MEM_LIMIT_BYTES) before overlaying the fresh ones we set below.
+            stored = {k: v for k, v in json.loads((d / "env.json").read_text()).items()
+                     if not k.startswith("PASAR_")}
+            env = {**base, **stored}
             env.update(
                 PASAR_JOB_ID=str(job.id), PASAR_ATTEMPT=str(n),
                 PASAR_RESUMING="1" if n > 1 else "0", PASAR_EVENTS=str(d / "events.jsonl"),
@@ -368,7 +385,7 @@ class Daemon:
                            json.dumps({"command": job.spec.command, "cwd": job.spec.cwd, "env": env}))
             with (d / "output.log").open("a") as f:
                 f.write(_separator(n, now, prior[-1] if prior else None))
-        except OSError as e:
+        except (OSError, ValueError) as e:
             self._fail_launch(job, n, unit, now, str(e))
             return
         if not Path(job.spec.cwd).is_dir():
