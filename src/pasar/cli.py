@@ -58,17 +58,23 @@ def _error_message(detail) -> str:
     return json.dumps(detail)
 
 
+def _response_detail(r: httpx.Response):
+    """Pull an error `detail` out of a response body, without assuming it's a dict (a
+    non-JSON or non-dict body degrades to the raw text/body instead of raising)."""
+    try:
+        body = r.json()
+    except ValueError:
+        return r.text
+    return body.get("detail") if isinstance(body, dict) else body
+
+
 def call(client: httpx.Client, method: str, path: str, **kw):
     try:
         r = client.request(method, path, **kw)
     except httpx.TransportError as e:
         raise ConnectionError(f"cannot reach pasard at {client.base_url}: {e}") from e
     if r.status_code >= 400:
-        try:
-            detail = r.json().get("detail")
-        except ValueError:
-            detail = r.text
-        raise ApiError(_error_message(detail))
+        raise ApiError(_error_message(_response_detail(r)))
     return r.json()
 
 
@@ -218,12 +224,18 @@ def run(args, client: httpx.Client) -> int:
         out(job) if out else print(f"#{job['id']} requeued")
     elif args.cmd == "logs":
         if args.follow:
-            with client.stream("GET", f"/api/jobs/{args.id}/logs",
-                               params={"follow": True}) as r:
-                for line in r.iter_lines():
-                    if line.startswith("data: "):
-                        sys.stdout.write(json.loads(line[6:]).get("text", ""))
-                        sys.stdout.flush()
+            try:
+                with client.stream("GET", f"/api/jobs/{args.id}/logs",
+                                   params={"follow": True}) as r:
+                    if r.status_code >= 400:
+                        r.read()
+                        raise ApiError(_error_message(_response_detail(r)))
+                    for line in r.iter_lines():
+                        if line.startswith("data: "):
+                            sys.stdout.write(json.loads(line[6:]).get("text", ""))
+                            sys.stdout.flush()
+            except httpx.TransportError as e:
+                raise ConnectionError(f"cannot reach pasard at {client.base_url}: {e}") from e
         else:
             r = call(client, "GET", f"/api/jobs/{args.id}/logs")
             out(r) if out else sys.stdout.write(r["text"])

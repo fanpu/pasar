@@ -108,6 +108,35 @@ def test_logs_and_status(client, capsys, daemon, tmp_path, monkeypatch):
     assert json.loads(out.out)["pool"] > 0
 
 
+def test_logs_follow_missing_job(client, capsys):
+    # the API error (404) must surface through the streaming path the same way `call()`
+    # surfaces it elsewhere: exit 70 with the detail message, not a silent exit 0.
+    code, out = run(client, capsys, "logs", "42", "-f")
+    assert code == 70 and "no job 42" in out.err
+
+
+def test_logs_follow_unreachable_daemon(capsys):
+    # a real (non-ASGI) client pointed at a port nothing listens on; the connection error
+    # from client.stream() must map to EX_UNAVAILABLE (69), not an uncaught exception.
+    unreachable = httpx.Client(base_url="http://127.0.0.1:1", timeout=0.5)
+    code, out = run(unreachable, capsys, "logs", "1", "-f")
+    assert code == 69 and "cannot reach pasard" in out.err
+
+
+def test_logs_follow_streams_text(capsys):
+    sse = ('data: {"text": "hello "}\n\n'
+           'data: {"text": "world"}\n\n'
+           'event: end\ndata: {}\n\n')
+
+    def handler(request):
+        return httpx.Response(200, text=sse)
+
+    mock_client = httpx.Client(transport=httpx.MockTransport(handler), base_url="http://test")
+    code, out = run(mock_client, capsys, "logs", "1", "-f")
+    assert code == 0
+    assert out.out == "hello world"
+
+
 def test_base_url_defaults_to_the_always_bound_default_address(monkeypatch):
     monkeypatch.delenv("PASAR_URL", raising=False)
     assert base_url() == "http://127.0.0.1:8750"
