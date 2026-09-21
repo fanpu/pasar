@@ -1,0 +1,57 @@
+import pytest
+
+from pasar.config import Config, load_config
+from pasar.units import GiB
+
+
+def test_defaults_when_file_missing(tmp_path, monkeypatch):
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "cfg"))
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "data"))
+    cfg = load_config()
+    assert cfg.bind == []
+    assert cfg.addresses() == ["127.0.0.1:8750"]
+    assert cfg.system_reserve == 16 * GiB
+    assert cfg.default_bid == 1000 and cfg.default_grace == 120
+    assert cfg.mascot_dir == str(tmp_path / "cfg" / "pasar" / "mascot")
+    assert cfg.data_dir == str(tmp_path / "data" / "pasar")
+
+
+def test_parses_sizes_and_durations(tmp_path):
+    p = tmp_path / "config.toml"
+    p.write_text(
+        'bind = ["127.0.0.1:9000", "100.1.2.3:9000"]\n'
+        'system_reserve = "8G"\n'
+        'default_grace = "5m"\n'
+        'pressure_sustain = "45s"\n'
+        'tick = "1s"\n'
+        'prometheus_url = "http://127.0.0.1:9090"\n'
+    )
+    cfg = load_config(p)
+    assert cfg.bind == ["127.0.0.1:9000", "100.1.2.3:9000"]
+    assert cfg.addresses() == ["127.0.0.1:8750", "127.0.0.1:9000", "100.1.2.3:9000"]
+    assert cfg.system_reserve == 8 * GiB
+    assert cfg.default_grace == 300
+    assert cfg.pressure_sustain == 45
+    assert cfg.tick == 1.0
+    assert cfg.prometheus_url == "http://127.0.0.1:9090"
+
+
+def test_addresses_dedupes_and_preserves_order(tmp_path):
+    p = tmp_path / "config.toml"
+    p.write_text(
+        'bind = ["127.0.0.1:8750", "127.0.0.1:9000", "127.0.0.1:8750"]\n'
+    )
+    cfg = load_config(p)
+    assert cfg.bind == ["127.0.0.1:8750", "127.0.0.1:9000", "127.0.0.1:8750"]
+    assert cfg.addresses() == ["127.0.0.1:8750", "127.0.0.1:9000"]
+
+
+def test_unknown_key_is_an_error(tmp_path):
+    p = tmp_path / "config.toml"
+    p.write_text("bogus = 1\n")
+    with pytest.raises(ValueError, match="bogus"):
+        load_config(p)
+
+
+def test_config_is_constructible_with_defaults():
+    assert Config().mem_margin_frac == 0.10
