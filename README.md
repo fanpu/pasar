@@ -6,6 +6,8 @@ A friendly GPU job scheduler for a single machine that is designed for agents
 are popular in Singapore (and also Malaysia and Indonesia). Unlike a literal
 pasar malams, here jobs bid for time on the GPU to determine what to run next.
 
+![The pasar dashboard: memory pool and GPU tiles, the schedule of running and projected jobs, and the job table](docs/screenshot.webp)
+
 - **Bids set priority.** Default 1000. Bid higher only when the work is worth preempting others.
 - **Preemption with checkpoints.** Higher bids stop lower ones (SIGTERM, grace period, SIGKILL)
   and requeue them; jobs resume from their checkpoints.
@@ -93,8 +95,8 @@ The dev server proxies to `PASAR_URL` (default `http://127.0.0.1:8750`). Pass `-
 to reach it over a private network, and set `PASAR_DEV_HOSTS=name1,name2` for extra Host names it
 should accept.
 
-Custom mascot images go in `~/.config/pasar/mascot/`, named after the states listed in
-[docs/design.md](docs/design.md).
+pasar ships its own mascot sprites. To use your own, put images in `~/.config/pasar/mascot/`,
+named after the states listed in [docs/design.md](docs/design.md).
 
 ### Browser smoke test
 
