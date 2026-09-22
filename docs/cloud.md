@@ -31,24 +31,42 @@ scheduler, protocol or UI.
 
 ## Guardrails
 
-Cloud GPUs cost money, so the guardrails come before anything else:
+Cloud GPUs cost money, so the guardrails come before anything else. The risk they address is an
+agent (or a person) starting paid runs nobody meant to pay for: one too many, a sweep ten times
+bigger than intended, or the same failing run over and over. The rule behind all of them: **no paid
+attempt starts without a person approving that attempt, at its estimated cost.**
 
-1. **Off by default.** A cloud target exists only if `config.toml` defines it, and it can't be
+pasar can't be a hard security boundary: agents run as the same user and can reach everything pasar
+can. So the true ceiling lives at the provider (item 1), and pasar makes spending by accident hard.
+
+1. **A spending limit at the provider.** Setup requires a workspace spending limit at the provider
+   (on Modal, in the workspace's usage settings), set to the most you're willing to lose. It's the
+   one limit nothing on this machine can raise. The docs say so, and `pasar cloud` warns if the
+   provider exposes the limit and it isn't set.
+2. **Off by default.** A cloud target exists only if `config.toml` defines it, and it can't be
    enabled without a `budget`.
-2. **Explicit per job.** Only `--on <target>` (or `"target"` in the API) sends a job to the cloud.
+3. **Human approval of every attempt.** A cloud job is submitted into **awaiting approval** and does
+   nothing (no image build, no GPU) until a person approves it in the web UI, which shows the GPU,
+   estimated runtime, estimated cost and the total for everything selected. A sweep can be approved
+   in one go. Approval is per attempt: a job the provider interrupted comes back to awaiting approval,
+   never straight back to the queue. There is no `pasar approve` command; the guide tells agents that
+   approving is for the user alone and that they must never call the approve endpoint. Unapproved
+   jobs are cancelled after `approval_ttl` (default 24 h).
+4. **Explicit per job.** Only `--on <target>` (or `"target"` in the API) sends a job to the cloud.
    Nothing else (bid change, preemption) changes a job's placement, and cloud jobs can't be
    restarted or retried: every new paid run is a new, explicit submit.
-3. **Budget gate.** A cloud job starts only if today's spend plus the committed cost of running jobs
-   plus this job's estimated cost (`--time` × rate) fits within `budget.daily`. Otherwise it waits in
-   the queue as `blocked: budget`.
-4. **Hard timeout.** Unlike local jobs, cloud jobs are killed on overrun: the provider-side timeout is
-   `--time × timeout_factor` (default 1.5), capped at `max_runtime`. A job left running while pasard
-   is down still stops.
-5. **Concurrency cap.** At most `max_running` cloud jobs per target.
-6. **Documentation.** The README, `pasar guide` and `/llms.txt` say plainly: cloud jobs cost money,
+5. **Budget gate.** Even an approved job starts only if the spend so far plus the committed cost of
+   running jobs plus this job's estimated cost (`--time` × rate) fits within both `budget.daily` and
+   `budget.monthly`. Otherwise it waits as `blocked: budget`. Approval can't override the budget.
+6. **Hard timeout, so every job has a maximum cost.** Unlike local jobs, cloud jobs are killed on
+   overrun: the provider-side timeout is `--time × timeout_factor` (default 1.5), capped at
+   `max_runtime`. So a job can cost at most rate × timeout, which is the number the approval shows
+   as "at most". A job left running while pasard is down still stops.
+7. **Concurrency cap.** At most `max_running` cloud jobs per target.
+8. **Documentation.** The README, `pasar guide` and `/llms.txt` say plainly: cloud jobs cost money,
    and agents must only use `--on` when the user explicitly asked for cloud compute for that work.
    `pasar submit` prints the estimated cost.
-7. **No secret leakage.** The submitter's environment is **not** shipped to the cloud (unlike local
+9. **No secret leakage.** The submitter's environment is **not** shipped to the cloud (unlike local
    jobs). Only variables listed in the target's `env_passthrough` or given with `--env KEY` are sent.
 
 ## Concepts
@@ -235,9 +253,10 @@ Bids still order each lane. `--preempt` isn't supported for cloud jobs: the lane
 resource to take back, and stopping someone's paid-for run to start another one wastes money.
 
 Clouds preempt too (spot reclaims, host failures). When a provider reports that it ended an attempt,
-the attempt ends `preempted` (reason `cloud_preempted`), the job requeues, and it resumes from its
+the attempt ends `preempted` (reason `cloud_preempted`) and the job goes back to **awaiting
+approval**, showing how far it got and the estimated cost to finish. If approved, it resumes from its
 persist-dir checkpoint using the same snapshot. This is the only way a cloud job gets a second
-attempt, and it goes through the budget gate again like any launch.
+attempt, and it needs a person's approval and the budget gate like the first.
 
 ### No restarts
 
@@ -255,7 +274,16 @@ tree is snapshotted fresh, the estimated cost is shown again, and the budget is 
 
 ## Job lifecycle and records
 
-The job states are unchanged. A running cloud attempt has a **phase**, shown in the UI and in
+Cloud jobs add one state, **awaiting**, before `queued`:
+
+```
+submit ──▶ awaiting ──(approved in the UI)──▶ queued ──▶ running ──▶ completed / failed
+              │  ▲                                          │
+              │  └──────────── provider reclaimed the GPU ──┘
+              └──(rejected, cancelled, or approval_ttl passed)──▶ cancelled
+```
+
+Local jobs never enter it. A running cloud attempt has a **phase**, shown in the UI and in
 `pasar ls`: `packaging → building image → waiting for GPU → starting → running`. Each phase's
 timestamp is stored, which gives the startup breakdown.
 
@@ -269,6 +297,8 @@ Additions:
   after the attempt ends. `metric_summaries` gets the same summaries (avg and max power, energy, max
   temperature) as locally, computed from these instead of Prometheus.
 - New table `cloud_spend(target, day, estimated, billed)` for the budget gate and the dashboard.
+- New table `approvals(job, attempt, time, estimated_cost, max_cost)`: who approved which attempt at
+  what price, for the record.
 
 New end reasons: `image_build_error`, `no_capacity`, `cloud_timeout` (the hard timeout),
 `cloud_error` (the provider failed the container), `cloud_preempted`, `budget` (a job over its own
@@ -285,11 +315,15 @@ warning, since unlike local ones they cost money.
 pasar submit --on modal --gpu H100[:N] --time 2h [--env KEY]… [--max-cost 20] -- <command>
 pasar pull <id> [path] [--to DIR]
 pasar submit --on modal … --resume-from <id> -- <command>   # continue an earlier cloud job's checkpoints
-pasar cloud                         # targets, budget, spend today, running jobs, rates
+pasar cloud                         # targets, budget, spend today/this month, awaiting approval, rates
 ```
 
+`pasar submit --on …` returns right away with the job awaiting approval and prints the estimated
+and maximum cost plus the UI link. `pasar wait` keeps waiting through `awaiting`.
+
 `--json` works everywhere, as before. `POST /api/jobs` accepts `target`, `gpu`, `env_keys` and
-`max_cost`. `GET /api/cloud` returns the targets, spend and rates. Job views include a `cloud` object
+`max_cost`. `POST /api/jobs/{id}/approve` and `POST /api/jobs/{id}/reject` exist for the web UI
+only; they are left out of the CLI and the agent guide says never to call them. `GET /api/cloud` returns the targets, spend and rates. Job views include a `cloud` object
 for cloud jobs.
 
 ## Web UI
@@ -297,8 +331,13 @@ for cloud jobs.
 - **Cloud timeline**: its own chart under the local one, shown only when a target is configured. One
   row per cloud job, time on the horizontal axis, colours by first tag as elsewhere. Each bar is split
   by phase: a pale segment for building and waiting for a GPU, a solid one for running.
-- **Tiles**: running cloud jobs, spend today against the budget (a small meter), current burn rate
-  in $/h.
+- **Approval tray**: when any job is awaiting approval, a banner at the top of the dashboard
+  ("3 cloud jobs waiting for you · est. $14, at most $21"). It opens a list with checkboxes showing
+  each job's submitter, note, command, GPU, time, estimated and maximum cost, and the job's git diff
+  summary, with **approve selected** and **reject selected**. The selection total and the
+  remaining budget are shown next to the button.
+- **Tiles**: running cloud jobs, spend today and this month against the budget (small meters),
+  current burn rate in $/h.
 - **Cloud job detail** (specialised; the local memory and pool panels are hidden):
   - **Cost**: estimated so far and final projection (from rate × ETA), then billed when known, and
     `--max-cost` if set.
@@ -316,7 +355,8 @@ for cloud jobs.
 ```toml
 [clouds.modal]
 provider = "modal"                 # the SDK reads credentials from ~/.modal.toml or env
-budget = { daily = 50.0 }          # USD; required to enable the target
+budget = { daily = 50.0, monthly = 300.0 }   # USD; required to enable the target
+approval_ttl = "24h"
 max_running = 4
 timeout_factor = 1.5
 max_runtime = "24h"
@@ -353,9 +393,12 @@ uses them, so a local-only install stays as it is.
 
 ## Open questions
 
-- Should the budget be per day, per week, or both? Per submitter?
-- Should `pasar submit --on` require an interactive confirmation when the estimated cost is above a
-  threshold? That doesn't help with agents, which is why the budget is the real guard.
+- Per-submitter budgets?
+- Notify on new approvals (phone push, email) so burst jobs don't sit waiting for someone to open
+  the dashboard? This ties in with the planned Alertmanager notifications.
+- Could approval get a real barrier (for example, the UI session holds a secret the CLI and
+  agents never see)? It would only help if agents can't read the secret's file, which is hard when
+  they run as the same user. The provider spending limit is the actual boundary.
 - Modal: does a new stdout reader replay a sandbox's output from the start? If it does, the pump can
   resume after a pasard restart without the persist-dir tee. The design works either way.
 - Is keeping VMs warm across jobs (for VM clouds) worth the complexity? Deferred until such a
