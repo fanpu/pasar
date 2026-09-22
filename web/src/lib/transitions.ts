@@ -25,6 +25,9 @@ function classify(before: JobView | undefined, next: JobView): TransitionKind | 
     return next.state === "running" ? "started" : null;
   }
   if (!wasRunning(before) && next.state === "running") return "started";
+  // Terminal states only fire on entry — pasard keeps finished jobs in the snapshot for 24h,
+  // so without this guard every subsequent tick would re-classify the same already-terminal job.
+  if (before.state === next.state) return null;
   if (next.state === "completed") return "completed";
   if (next.state === "failed") return classifyReason(next.reason);
   if (next.state === "cancelled") return "cancelled";

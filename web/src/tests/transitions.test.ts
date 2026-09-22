@@ -51,6 +51,20 @@ describe("transitions", () => {
   it("no change", () =>
     expect(kinds([job({ state: "running" })], [job({ state: "running", bid: 5 })])).toEqual([]));
 
+  it("already-completed jobs don't re-fire every tick", () =>
+    expect(kinds([job({ state: "completed" })], [job({ state: "completed" })])).toEqual([]));
+
+  it("already-failed jobs don't re-fire every tick", () =>
+    expect(
+      kinds([job({ state: "failed", reason: "oom" })], [job({ state: "failed", reason: "oom" })]),
+    ).toEqual([]));
+
+  it("already-cancelled jobs don't re-fire every tick", () =>
+    expect(kinds([job({ state: "cancelled" })], [job({ state: "cancelled" })])).toEqual([]));
+
+  it("queued straight to cancelled still yields cancelled", () =>
+    expect(kinds([job({ state: "queued" })], [job({ state: "cancelled" })])).toEqual([["cancelled", 1]]));
+
   it("output order follows next", () => {
     expect(
       kinds(
