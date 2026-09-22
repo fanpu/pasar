@@ -239,3 +239,11 @@ def test_env_is_stored_privately(client, daemon, tmp_path):
     d = daemon.job_dir(job["id"])
     assert json.loads((d / "env.json").read_text()) == {"HF_TOKEN": "secret"}
     assert "HF_TOKEN" not in (d / "spec.json").read_text()
+
+
+def test_patch_preempt_alone_keeps_bid(client, daemon, tmp_path):
+    submit(client, tmp_path, bid=1200)
+    r = client.patch("/api/jobs/1", json={"preempt": True})
+    assert r.status_code == 200 and r.json()["preempt"] is True and r.json()["bid"] == 1200
+    r = client.patch("/api/jobs/1", json={"bid": 1300})
+    assert r.json()["preempt"] is True and r.json()["bid"] == 1300

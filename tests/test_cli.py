@@ -206,3 +206,29 @@ def test_ls_and_show_mark_progress_based_times(client, capsys, daemon, clock, tm
     assert "* projected from the job's progress reports" in out.out
     _, out = run(client, capsys, "show", "1")
     assert "12m of ~1h00m from progress (estimated 10m)" in out.out
+
+
+def test_preempt_flag_on_submit_bid_and_restart(client, capsys, daemon, tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    run(client, capsys, "submit", "--time", "1h", "--preempt", "--", "python", "a.py")
+    assert daemon.job(1).spec.preempt and daemon.job(1).spec.preemptible
+    _, out = run(client, capsys, "show", "1")
+    assert "1000 (may preempt lower bids)" in out.out
+    _, out = run(client, capsys, "bid", "1", "1500")  # not carried over: must be asked for again
+    assert not daemon.job(1).spec.preempt and out.out.strip() == "#1 bid is now 1500"
+    _, out = run(client, capsys, "bid", "1", "2000", "--preempt")
+    assert daemon.job(1).spec.preempt and "may preempt lower bids" in out.out
+    run(client, capsys, "cancel", "1")
+    run(client, capsys, "restart", "1")
+    assert not daemon.job(1).spec.preempt
+    run(client, capsys, "cancel", "1")
+    run(client, capsys, "restart", "1", "--preempt")
+    assert daemon.job(1).spec.preempt
+
+
+def test_non_preemptible_flag_and_old_alias(client, capsys, daemon, tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    run(client, capsys, "submit", "--time", "1h", "--non-preemptible", "--", "python", "a.py")
+    run(client, capsys, "submit", "--time", "1h", "--no-preempt", "--", "python", "a.py")
+    assert not daemon.job(1).spec.preemptible and not daemon.job(2).spec.preemptible
+    assert not daemon.job(1).spec.preempt

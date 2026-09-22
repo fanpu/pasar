@@ -75,6 +75,7 @@ def job_view(daemon, job: Job, now: float, projection: dict) -> dict:
         "expected_runtime": ran + max(0.0, left),
         "eta_source": eta_source,
         "preemptible": job.spec.preemptible,
+        "preempt": job.spec.preempt,
         "grace": job.spec.grace,
         "retries": job.spec.retries,
         "retries_used": job.retries_used,

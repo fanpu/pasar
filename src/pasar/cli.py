@@ -136,7 +136,8 @@ def print_job(job: dict) -> None:
     attempts = job["attempts"]
     fields = [
         ("job", f"#{job['id']} {job['name']}"), ("state", _state(job)),
-        ("summary", job["summary"]), ("bid", job["bid"]), ("memory", _mem(job)),
+        ("summary", job["summary"]), ("bid", f"{job['bid']} (may preempt lower bids)" if job.get("preempt") else job["bid"]),
+        ("memory", _mem(job)),
         ("time", _time_line(job)),
         ("attempts", len(attempts) if isinstance(attempts, list) else attempts),
         ("command", job["command"]), ("cwd", job["cwd"]),
@@ -159,8 +160,11 @@ def build_parser() -> Parser:
     s = add("submit", "queue a job")
     s.add_argument("--time", required=True, help="estimated runtime, e.g. 2h30m")
     s.add_argument("--mem", help="share the GPU, reserving this much memory (e.g. 24G); omit for the whole GPU (recommended)")
-    s.add_argument("--bid", type=int, help="priority (default 1000); higher bids preempt lower")
-    s.add_argument("--no-preempt", action="store_true", help="never preempt this job")
+    s.add_argument("--bid", type=int, help="priority (default 1000); higher bids go first")
+    s.add_argument("--preempt", action="store_true", help="may stop running jobs with a lower bid to start now (never carried over)")
+    s.add_argument("--non-preemptible", action="store_true", dest="no_preempt",
+                   help="other jobs may never stop this one")
+    s.add_argument("--no-preempt", action="store_true", dest="no_preempt", help=argparse.SUPPRESS)
     s.add_argument("--grace", help="time to save a checkpoint when stopped (default 120s)")
     s.add_argument("--retries", type=int, default=0)
     s.add_argument("--name", default="")
@@ -185,6 +189,7 @@ def build_parser() -> Parser:
     b = add("bid", "change a job's bid")
     b.add_argument("id", type=int)
     b.add_argument("bid", type=int)
+    b.add_argument("--preempt", action="store_true", help="may stop running jobs with a lower bid to start now (never carried over)")
 
     r = add("restart", "requeue a finished job")
     r.add_argument("id", type=int)
@@ -193,6 +198,7 @@ def build_parser() -> Parser:
     r.add_argument("--time")
     r.add_argument("--bid", type=int)
     r.add_argument("--retries", type=int)
+    r.add_argument("--preempt", action="store_true", help="may stop running jobs with a lower bid to start now (never carried over)")
 
     w = add("wait", "wait for a job to finish; exit code reflects the outcome")
     w.add_argument("id", type=int)
@@ -216,7 +222,7 @@ def run(args, client: httpx.Client) -> int:
         body = {
             "command": command[0] if len(command) == 1 else shlex.join(command),
             "time": args.time, "cwd": os.path.abspath(args.cwd or os.getcwd()),
-            "mem": args.mem, "bid": args.bid, "preemptible": not args.no_preempt,
+            "mem": args.mem, "bid": args.bid, "preempt": args.preempt, "preemptible": not args.no_preempt,
             "grace": args.grace, "retries": args.retries, "name": args.name, "note": args.note,
             "tags": args.tag, "submitter": args.by or getpass.getuser(),
             "env": None if args.no_env else dict(os.environ),
@@ -236,11 +242,13 @@ def run(args, client: httpx.Client) -> int:
         job = call(client, "POST", f"/api/jobs/{args.id}/cancel")
         out(job) if out else print(f"#{job['id']} {job['state']}")
     elif args.cmd == "bid":
-        job = call(client, "PATCH", f"/api/jobs/{args.id}", json={"bid": args.bid})
-        out(job) if out else print(f"#{job['id']} bid is now {job['bid']}")
+        body = {"bid": args.bid, "preempt": args.preempt}
+        job = call(client, "PATCH", f"/api/jobs/{args.id}", json=body)
+        extra = ", may preempt lower bids" if job["preempt"] else ""
+        out(job) if out else print(f"#{job['id']} bid is now {job['bid']}{extra}")
     elif args.cmd == "restart":
         body = {"mem": args.mem, "whole_gpu": args.whole_gpu, "time": args.time,
-                "bid": args.bid, "retries": args.retries}
+                "bid": args.bid, "retries": args.retries, "preempt": args.preempt}
         job = call(client, "POST", f"/api/jobs/{args.id}/restart", json=body)
         out(job) if out else print(f"#{job['id']} requeued")
     elif args.cmd == "logs":

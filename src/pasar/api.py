@@ -52,6 +52,7 @@ class SubmitBody(BaseModel):
     cwd: str
     mem: str | int | None = None
     bid: int | None = Field(default=None, ge=0, le=_MAX_INT)
+    preempt: bool = False
     preemptible: bool = True
     grace: str | int | None = None
     retries: int = Field(default=0, ge=0, le=_MAX_INT)
@@ -65,7 +66,8 @@ class SubmitBody(BaseModel):
 
 
 class PatchBody(BaseModel):
-    bid: int = Field(ge=0, le=_MAX_INT)
+    bid: int | None = Field(default=None, ge=0, le=_MAX_INT)
+    preempt: bool | None = None
 
 
 class RestartBody(BaseModel):
@@ -74,6 +76,7 @@ class RestartBody(BaseModel):
     time: str | int | None = None
     bid: int | None = Field(default=None, ge=0, le=_MAX_INT)
     retries: int | None = Field(default=None, ge=0, le=_MAX_INT)
+    preempt: bool = False  # never carried over from the previous run
 
     _bounded_mixed = field_validator("time", "mem")(_bounded)
 
@@ -218,7 +221,7 @@ def create_app(daemon: Daemon, *, prom: Prometheus | None = None, wake=lambda: N
             command=body.command, est_runtime=parse_duration(body.time), cwd=body.cwd,
             mem_request=None if body.mem is None else parse_size(body.mem),
             bid=cfg.default_bid if body.bid is None else body.bid,
-            preemptible=body.preemptible,
+            preempt=body.preempt, preemptible=body.preemptible,
             grace=cfg.default_grace if body.grace is None else parse_duration(body.grace),
             retries=body.retries, name=body.name, note=body.note, tags=body.tags,
             submitter=body.submitter, env=body.env,
@@ -258,7 +261,7 @@ def create_app(daemon: Daemon, *, prom: Prometheus | None = None, wake=lambda: N
 
     @app.patch("/api/jobs/{job_id}")
     async def patch(job_id: int, body: PatchBody):
-        job = daemon.set_bid(job_id, body.bid)
+        job = daemon.set_bid(job_id, body.bid, body.preempt)
         wake()
         return view(job)
 
@@ -273,7 +276,7 @@ def create_app(daemon: Daemon, *, prom: Prometheus | None = None, wake=lambda: N
         job = daemon.restart(
             job_id, mem_request=mem,
             est_runtime=None if body.time is None else parse_duration(body.time),
-            bid=body.bid, retries=body.retries,
+            bid=body.bid, retries=body.retries, preempt=body.preempt,
         )
         wake()
         return view(job)
