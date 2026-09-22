@@ -77,8 +77,11 @@
     return `est. ${dur(job.est_runtime)}${job.run_time > 0 ? ` · ran ${dur(job.run_time)}` : ""}`;
   }
 
-  function lost(job: JobView): { text: string; faint: boolean } {
+  function lost(job: JobView): { text: string; faint: boolean; title?: string } {
     const total = job.lost.preemption + job.lost.failure;
+    if (total === 0 && !job.lost.known) {
+      return { text: "?", faint: false, title: "unknown: the job doesn't report checkpoints" };
+    }
     const text = (total > 0 ? dur(total) : "–") + (job.lost.known ? "" : "?");
     return { text, faint: total === 0 };
   }
@@ -158,7 +161,7 @@
                   <div class="small faint">ran {dur(job.run_time)}</div>
                 {/if}
               </td>
-              <td class="small" class:faint={lost(job).faint}>{lost(job).text}</td>
+              <td class="small" class:faint={lost(job).faint} title={lost(job).title}>{lost(job).text}</td>
               <td class="small dim">{job.submitter || "–"}</td>
             </tr>
           {/each}

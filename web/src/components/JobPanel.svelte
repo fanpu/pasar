@@ -500,3 +500,9 @@
     }}
   />
 {/if}
+
+<style>
+  h2:focus {
+    outline: none;
+  }
+</style>

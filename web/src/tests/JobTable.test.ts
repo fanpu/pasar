@@ -113,6 +113,35 @@ describe("JobTable", () => {
     expect(screen.getByText("–")).toBeInTheDocument();
   });
 
+  it("renders '?' when total lost time is 0 and unknown", () => {
+    const { container } = render(JobTable, {
+      jobs: [
+        job({ id: 13, state: "completed", end_time: NOW - 60, submitter: "alice", lost: { preemption: 0, failure: 0, known: false } }),
+      ],
+      pool: 105 * GIB,
+      now: NOW,
+      selected: null,
+      onopen: () => {},
+    });
+    const table = container.querySelector("table")!;
+    const lostCell = within(table).getByText("?");
+    expect(lostCell).toBeInTheDocument();
+    expect(lostCell).toHaveAttribute("title", "unknown: the job doesn't report checkpoints");
+  });
+
+  it("renders '11m?' when lost time is nonzero and unknown", () => {
+    render(JobTable, {
+      jobs: [
+        job({ id: 14, state: "completed", end_time: NOW - 60, submitter: "alice", lost: { preemption: 660, failure: 0, known: false } }),
+      ],
+      pool: 105 * GIB,
+      now: NOW,
+      selected: null,
+      onopen: () => {},
+    });
+    expect(screen.getByText("11m?")).toBeInTheDocument();
+  });
+
   it("clicking a row and pressing Enter both call onopen with the job id", async () => {
     const onopen = vi.fn();
     const { container } = render(JobTable, {
