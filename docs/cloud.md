@@ -58,10 +58,10 @@ can. So the true ceiling lives at the provider (item 1), and pasar makes spendin
 5. **Budget gate.** Even an approved job starts only if the spend so far plus the committed cost of
    running jobs plus this job's estimated cost (`--time` × rate) fits within both `budget.daily` and
    `budget.monthly`. Otherwise it waits as `blocked: budget`. Approval can't override the budget.
-6. **Hard timeout, so every job has a maximum cost.** Unlike local jobs, cloud jobs are killed on
-   overrun: the provider-side timeout is `--time × timeout_factor` (default 1.5), capped at
-   `max_runtime`. So a job can cost at most rate × timeout, which is the number the approval shows
-   as "at most". A job left running while pasard is down still stops.
+6. **Every attempt has an approved maximum, and reaching it pauses the job instead of killing it.**
+   An approval covers `--time × timeout_factor` (default 1.5) of run time, capped at `max_runtime`,
+   shown as the "at most" cost. At that limit the job checkpoints and pauses (see
+   [Run-time limits](#run-time-limits)), even with pasard down.
 7. **Concurrency cap.** At most `max_running` cloud jobs per target.
 8. **Documentation.** The README, `pasar guide` and `/llms.txt` say plainly: cloud jobs cost money,
    and agents must only use `--on` when the user explicitly asked for cloud compute for that work.
@@ -224,7 +224,9 @@ besides the job. It:
   work unchanged, and re-emits each event as a control line;
 - samples `nvidia-smi --query-gpu=index,utilization.gpu,memory.used,memory.total,power.draw,temperature.gpu`
   every 5 s and emits a control line;
-- on a stop request, sends SIGTERM to the job's process group, then SIGKILL after `PASAR_GRACE_SECONDS`;
+- on a stop request, or when the attempt reaches its approved run time (the wrapper enforces it
+  itself), sends SIGTERM to the job's process group, then SIGKILL after `PASAR_GRACE_SECONDS`, and
+  reports which of the two it was;
 - tees everything to `$PASAR_PERSIST_DIR/.pasar/attempt-<n>.log`, so the output survives a pasard
   restart even on providers that can't replay it;
 - ends with a control line holding the exact exit code or signal, which is more precise than what
@@ -258,6 +260,34 @@ approval**, showing how far it got and the estimated cost to finish. If approved
 persist-dir checkpoint using the same snapshot. This is the only way a cloud job gets a second
 attempt, and it needs a person's approval and the budget gate like the first.
 
+### Run-time limits
+
+`--time` is usually a guess made on the local GPU, and cloud GPUs can be several times faster or
+slower. Killing a job for overrunning a wrong guess would throw away paid work just before it
+finishes, so the limit pauses instead, and pasar warns early, using the job's real pace:
+
+1. **Early warning.** Once a running cloud job has reported enough `progress` (default: 5 minutes
+   after its first report), pasar projects its total run time the same way the schedule does. If
+   that is over the approved run time, the job appears in the approval tray as **needs more time**
+   ("#52 is on pace for 2 h 40 m, approved 1 h 30 m: approve $9 more?"). Approving extends the
+   attempt's limit; the job keeps running either way.
+2. **Pause at the limit.** If no extension came in time, the wrapper sends SIGTERM at the limit and
+   the job saves a checkpoint within its grace period. The attempt ends `paused` (reason
+   `time_limit`), and the job goes back to **awaiting approval**, showing its progress and the
+   estimated cost to finish. Approving resumes it from the checkpoint, like a reclaimed job. The
+   only work lost is the restart time.
+3. **Backstop.** The provider-side timeout is the approved limit plus the grace period plus a small
+   margin, for a container that hangs so badly the wrapper can't act. Only that ends a job with
+   `cloud_timeout`.
+4. **Calibration.** pasar records each finished cloud job's measured pace against its `--time`, by
+   first tag and GPU type (and local jobs' by tag). At submit and in the approval tray it shows a
+   calibrated estimate next to the given one ("`lr-sweep` jobs ran 2.8× faster than their `--time`
+   on H100"), and the approval's cost uses the calibrated one when there are at least three
+   comparable jobs.
+
+A job that never reports `checkpoint` loses its attempt at the limit. The approval tray flags cloud
+jobs whose tag has no checkpoint events on record, so their limit can be set generously.
+
 ### No restarts
 
 Cloud jobs can't be restarted, and `--retries` is rejected for them. A restart would start paying
@@ -279,7 +309,8 @@ Cloud jobs add one state, **awaiting**, before `queued`:
 ```
 submit ──▶ awaiting ──(approved in the UI)──▶ queued ──▶ running ──▶ completed / failed
               │  ▲                                          │
-              │  └──────────── provider reclaimed the GPU ──┘
+              │  └── provider reclaimed the GPU, or paused ──┘
+              │      at its approved run time
               └──(rejected, cancelled, or approval_ttl passed)──▶ cancelled
 ```
 
@@ -300,7 +331,9 @@ Additions:
 - New table `approvals(job, attempt, time, estimated_cost, max_cost)`: who approved which attempt at
   what price, for the record.
 
-New end reasons: `image_build_error`, `no_capacity`, `cloud_timeout` (the hard timeout),
+New end reasons: `image_build_error`, `no_capacity`, `time_limit` (paused at the approved run time;
+the attempt's end kind is `paused`, which counts toward lost time like a preemption),
+`cloud_timeout` (the provider's backstop),
 `cloud_error` (the provider failed the container), `cloud_preempted`, `budget` (a job over its own
 `--max-cost` is stopped). The existing `gpu_oom`, `signal` and `exit` reasons come from the log scan
 and the wrapper's exit line as usual. `kernel_oom` and `gpu_xid` don't apply.
@@ -335,7 +368,9 @@ for cloud jobs.
   ("3 cloud jobs waiting for you · est. $14, at most $21"). It opens a list with checkboxes showing
   each job's submitter, note, command, GPU, time, estimated and maximum cost, and the job's git diff
   summary, with **approve selected** and **reject selected**. The selection total and the
-  remaining budget are shown next to the button.
+  remaining budget are shown next to the button. The same tray lists running jobs that
+  **need more time** and paused jobs waiting to resume, each with its progress and cost to finish,
+  and shows calibrated estimates next to the given ones.
 - **Tiles**: running cloud jobs, spend today and this month against the budget (small meters),
   current burn rate in $/h.
 - **Cloud job detail** (specialised; the local memory and pool panels are hidden):
