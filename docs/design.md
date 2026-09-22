@@ -129,7 +129,7 @@ Consequences:
 
 ### Projected schedule
 
-For the UI and `pasar ls`, pasard simulates the same rules forward in time, using each job's remaining estimated time (at least 1 minute for jobs that have overrun). The result is a projected start and finish time per job and the data for the timeline chart. Projections are labelled as estimates.
+For the UI and `pasar ls`, pasard simulates the same rules forward in time, using each job's remaining time (at least 1 minute for jobs that have overrun). For a running job that reports `progress` with `total_steps`, that is extrapolated from its pace: its attempt took `elapsed` (from the attempt's start to the latest report, so startup is amortised) for `done` steps (since the step it resumed from: the `resumed` step, else the last earlier checkpoint, else its first report), so the remaining `total − step` steps take `elapsed × (total − step) ÷ done`, counted down from the latest report. Otherwise it is `--time` minus the time already run. Job views say which (`eta_source`), and `expected_runtime` is run time plus remaining. The result is a projected start and finish time per job and the data for the timeline chart. Projections are labelled as estimates.
 
 ## Job lifecycle
 

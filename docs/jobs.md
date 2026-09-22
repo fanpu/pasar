@@ -50,6 +50,11 @@ Without Python, append JSON lines yourself:
 Events: `checkpoint`, `resumed`, `progress` (`step`, `total_steps`, plus any numeric metrics like
 `loss` — these are charted in the job panel), `note` (`text`).
 
+`progress` needs `total_steps`: once a running job reports it, pasar projects the job's finish from
+its pace (time so far × steps left ÷ steps done this attempt) instead of from `--time`, so the
+queue behind it gets more accurate start times. Pass `resumed` the step you resumed from, so a
+resumed attempt's pace is counted from there.
+
 ## 5. Whole GPU or shared, and estimates
 
 Whole GPU (no `--mem`) is the default and the recommendation. Sharing only pays off when a job
