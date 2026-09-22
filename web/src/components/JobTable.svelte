@@ -6,6 +6,7 @@
   import FilterBar from "./FilterBar.svelte";
   import JobChip from "./JobChip.svelte";
   import StatePill from "./StatePill.svelte";
+  import TagSummary from "./TagSummary.svelte";
   import type { JobView } from "../lib/types";
 
   const ZERO_COUNTS: Record<StateFilter, number> = { running: 0, queued: 0, completed: 0, failed: 0, cancelled: 0 };
@@ -283,6 +284,9 @@
     </select>
   </h3>
   <FilterBar {filter} {counts} {known} onchange={onfilter} />
+  {#if filter.tags.length === 1}
+    <TagSummary tag={filter.tags[0]} {jobs} />
+  {/if}
   {#if jobs.length === 0}
     {#if active}
       <div class="empty">
