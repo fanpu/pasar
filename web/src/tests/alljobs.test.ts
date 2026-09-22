@@ -106,6 +106,32 @@ describe("AllJobs", () => {
     await d2.promise;
   });
 
+  it("keeps the same jobs array reference across ticks when overlaid live jobs are unchanged (regression: a reactive effect reading `jobs` while `update` writes it must not spin forever)", async () => {
+    const d = deferred<JobView[]>();
+    const fetchAll = vi.fn().mockReturnValue(d.promise);
+    const store = new AllJobs({ fetchAll });
+    store.update(true, []);
+    d.resolve([job({ id: 1, name: "steady", run_time: 30 })]);
+    await d.promise;
+    const afterFetch = store.jobs;
+
+    // A live snapshot's jobs are freshly parsed from JSON every tick, so this is a *different*
+    // object than the one just fetched, even though nothing about the job actually changed.
+    store.update(true, [job({ id: 1, name: "steady", run_time: 30 })]);
+    expect(store.jobs).toBe(afterFetch); // same reference: nothing to re-render, nothing to re-run
+
+    // Several more overlapping ticks, still content-identical: still a no-op every time.
+    for (let i = 0; i < 5; i++) {
+      store.update(true, [job({ id: 1, name: "steady", run_time: 30 })]);
+    }
+    expect(store.jobs).toBe(afterFetch);
+
+    // A real content change (e.g. run_time ticking up) does still overlay, exactly once.
+    store.update(true, [job({ id: 1, name: "steady", run_time: 45 })]);
+    expect(store.jobs).not.toBe(afterFetch);
+    expect(store.jobs?.[0].run_time).toBe(45);
+  });
+
   it("clears the in-flight flag on a rejected fetch, so a later update can retry", async () => {
     const d1 = deferred<JobView[]>();
     const fetchAll = vi.fn().mockReturnValueOnce(d1.promise);

@@ -60,7 +60,11 @@ export class AllJobs {
     let changed = false;
     const next = cache.map((j) => {
       const l = liveById.get(j.id);
-      if (!l) return j;
+      // A live snapshot's jobs are freshly parsed from JSON on every tick, so `l` is never the
+      // same object as the cached `j` even when nothing about the job actually changed — comparing
+      // by reference would mark every tick "changed" and reassign `jobs` forever. Compare content
+      // instead so an unchanged job (the common case for anything already running) is a no-op.
+      if (!l || sameJob(l, j)) return j;
       changed = true;
       return l;
     });
@@ -72,4 +76,8 @@ export class AllJobs {
     }
     if (changed) this.jobs = next;
   }
+}
+
+function sameJob(a: JobView, b: JobView): boolean {
+  return a === b || JSON.stringify(a) === JSON.stringify(b);
 }

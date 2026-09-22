@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { onMount } from "svelte";
+  import { onMount, untrack } from "svelte";
   import { Live } from "./lib/live.svelte";
   import { router } from "./lib/router.svelte";
   import { mood, latestTemp, type MascotState } from "./lib/mood";
@@ -28,8 +28,13 @@
   // fresh in `allJobs`; the table and schedule chart both read from it via `source`.
   const filter = $derived(parseFilter(router.search));
   const filterActive = $derived(isActive(filter));
+  // `untrack` around the call: `allJobs.update` reads and (via #overlay) writes `allJobs.jobs`,
+  // so without this the effect would depend on its own write and re-trigger itself every tick —
+  // it should only re-run when the filter's active-ness or the live snapshot itself changes.
   $effect(() => {
-    allJobs.update(filterActive, live.snapshot?.jobs ?? []);
+    const liveJobs = live.snapshot?.jobs ?? [];
+    const active = filterActive;
+    untrack(() => allJobs.update(active, liveJobs));
   });
   const source = $derived(allJobs.jobs ?? live.snapshot?.jobs ?? []);
   const filterCounts = $derived(stateCounts(source, filter));
@@ -41,9 +46,12 @@
   function setFilter(f: Filter, replace = false): void {
     router.setSearch(filterToSearch(f), replace);
   }
+  // Filters by the tag and navigates back to "/" (closing the panel) in a single history push —
+  // two separate router calls (setFilter then router.go) would each push their own entry, so one
+  // click would need two Backs to undo.
   function addTagFilter(tag: string): void {
-    if (!filter.tags.includes(tag)) setFilter({ ...filter, tags: [...filter.tags, tag] }, false);
-    router.go("/");
+    const next = filter.tags.includes(tag) ? filter : { ...filter, tags: [...filter.tags, tag] };
+    router.go(`/${filterToSearch(next)}`);
   }
 
   let showSubmit = $state(false);

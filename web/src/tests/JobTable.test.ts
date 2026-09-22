@@ -251,6 +251,19 @@ describe("JobTable", () => {
     expect(onfilter).toHaveBeenCalledWith({ ...sortedByBid, sort: { key: "bid", desc: false } }, false);
   });
 
+  it("first click on the job (id) header from the unsorted view sorts newest-first (desc), not asc", async () => {
+    // effectiveSort(EMPTY_FILTER) falls back to {key:"id",desc:true} even though filter.sort is
+    // actually null; sortFor must compare against the real (nullable) filter.sort, or this first
+    // click gets misread as "already sorted by id, so flip" and sorts oldest-first instead.
+    const onfilter = vi.fn();
+    render(JobTable, {
+      jobs: [job({ id: 1 }), job({ id: 2 })],
+      pool: 105 * GIB, now: NOW, selected: null, onopen: () => {}, onfilter, filter: EMPTY_FILTER,
+    });
+    await fireEvent.click(screen.getByRole("button", { name: "job" }));
+    expect(onfilter).toHaveBeenCalledWith({ ...EMPTY_FILTER, sort: { key: "id", desc: true } }, false);
+  });
+
   it("shows a flat, filtered list with a match count when a filter is active", () => {
     render(JobTable, {
       jobs: [job({ id: 1, state: "completed", end_time: NOW - 60 })],

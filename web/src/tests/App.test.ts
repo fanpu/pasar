@@ -1,13 +1,14 @@
-import { render, screen, waitFor, within } from "@testing-library/svelte";
+import { render, screen, fireEvent, waitFor, within } from "@testing-library/svelte";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import App from "../App.svelte";
 import * as api from "../lib/api";
 import { mascot } from "../lib/mascot.svelte";
-import { job, status } from "./fixtures";
+import { router } from "../lib/router.svelte";
+import { job, jobDetail, status } from "./fixtures";
 
 vi.mock("../lib/api", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../lib/api")>();
-  return { ...actual, getGpu: vi.fn(), getMascot: vi.fn(), getAllJobs: vi.fn() };
+  return { ...actual, getGpu: vi.fn(), getMascot: vi.fn(), getAllJobs: vi.fn(), getJob: vi.fn() };
 });
 
 class FakeEventSource {
@@ -28,6 +29,7 @@ describe("App", () => {
     vi.mocked(api.getGpu).mockReset().mockResolvedValue({ power_w: [], temp_c: [], util_pct: [] });
     vi.mocked(api.getMascot).mockReset().mockResolvedValue({});
     vi.mocked(api.getAllJobs).mockReset().mockResolvedValue([]);
+    vi.mocked(api.getJob).mockReset();
     vi.stubGlobal("EventSource", FakeEventSource);
     history.pushState({}, "", "/");
     // Reset the shared mascot singleton so an earlier test's loaded manifest doesn't leak in.
@@ -77,5 +79,62 @@ describe("App", () => {
     });
     expect(await within(table).findByText("match-me")).toBeInTheDocument();
     expect(within(table).queryByText("not-me")).toBeNull();
+  });
+
+  it("doesn't spin forever when live jobs repeatedly overlap the all-jobs cache while filtered (regression for effect_update_depth_exceeded)", async () => {
+    history.pushState({}, "", "/?tag=sweep-a");
+    dispatchEvent(new PopStateEvent("popstate"));
+    // A fresh object per call, like a real snapshot parsed anew from JSON every tick, even though
+    // nothing about the job actually changes — this is exactly what used to make AllJobs#overlay
+    // reassign `jobs` on every tick and re-trigger App's own update effect without end.
+    const steady = () => job({ id: 5, name: "steady", tags: ["sweep-a"], state: "running", start_time: 1000, run_time: 30 });
+    vi.mocked(api.getAllJobs).mockResolvedValue([steady()]);
+
+    const { container } = render(App);
+    const es = FakeEventSource.last!;
+    es.emit({ status: status(), jobs: [steady()] });
+
+    const table = await waitFor(() => {
+      const t = container.querySelector("table");
+      expect(t).not.toBeNull();
+      return t!;
+    });
+    expect(within(table).getByText("steady")).toBeInTheDocument();
+
+    // Several more ticks with a content-identical (but reference-distinct) live job.
+    for (let i = 0; i < 10; i++) {
+      es.emit({ status: status({ version: i + 2 }), jobs: [steady()] });
+    }
+
+    // Still just the one row, still responsive — no runaway loop, no crash.
+    expect(within(table).getAllByText("steady").length).toBe(1);
+  });
+
+  it("clicking a tag in the job panel filters and closes the panel with a single history push", async () => {
+    history.pushState({}, "", "/jobs/42");
+    dispatchEvent(new PopStateEvent("popstate"));
+    const liveJob = job({ id: 42, name: "llama-sft", state: "queued", tags: ["sweep-a"] });
+    vi.mocked(api.getJob).mockResolvedValue(jobDetail({ id: 42, name: "llama-sft", state: "queued", tags: ["sweep-a"] }));
+
+    render(App);
+    FakeEventSource.last!.emit({ status: status(), jobs: [liveJob] });
+
+    const drawer = await waitFor(() => {
+      const d = document.querySelector<HTMLElement>(".drawer.open");
+      expect(d).not.toBeNull();
+      return d!;
+    });
+    const tagBtn = await within(drawer).findByRole("button", { name: "sweep-a" });
+
+    const pushSpy = vi.spyOn(history, "pushState");
+    const replaceSpy = vi.spyOn(history, "replaceState");
+    await fireEvent.click(tagBtn);
+
+    expect(pushSpy).toHaveBeenCalledTimes(1);
+    expect(replaceSpy).not.toHaveBeenCalled();
+    expect(router.route).toEqual({ name: "home" });
+    expect(router.search).toBe("?tag=sweep-a");
+    pushSpy.mockRestore();
+    replaceSpy.mockRestore();
   });
 });

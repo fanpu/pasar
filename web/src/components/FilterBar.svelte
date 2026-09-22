@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { untrack } from "svelte";
+  import { onDestroy, untrack } from "svelte";
   import { jobColor } from "../lib/colors";
   import { EMPTY_FILTER, STATE_FILTERS, isActive, type Filter, type StateFilter } from "../lib/jobfilter";
 
@@ -25,9 +25,13 @@
     qDraft = (e.target as HTMLInputElement).value;
     if (debounceTimer !== null) clearTimeout(debounceTimer);
     debounceTimer = setTimeout(() => {
+      debounceTimer = null;
       onchange({ ...filter, q: qDraft }, true);
     }, SEARCH_DEBOUNCE_MS);
   }
+  onDestroy(() => {
+    if (debounceTimer !== null) clearTimeout(debounceTimer);
+  });
 
   function toggleState(s: StateFilter): void {
     const states = filter.states.includes(s) ? filter.states.filter((x) => x !== s) : [...filter.states, s];

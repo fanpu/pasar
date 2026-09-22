@@ -37,8 +37,12 @@
   ];
 
   function sortFor(key: SortKey): { key: SortKey; desc: boolean } {
-    const cur = effectiveSort(filter);
-    if (cur.key === key) return { key, desc: !cur.desc };
+    // Compare against the *actual* (nullable) filter.sort, not effectiveSort's fallback default —
+    // effectiveSort defaults to {key:"id",desc:true} even when nothing has been clicked yet, so
+    // comparing against it would treat a first click on the id/job header as "same key, flip" and
+    // sort ascending instead of the intended "new key → desc".
+    const cur = filter.sort;
+    if (cur !== null && cur.key === key) return { key, desc: !cur.desc };
     return { key, desc: DESC_DEFAULT.has(key) };
   }
   function onSort(key: SortKey): void {
