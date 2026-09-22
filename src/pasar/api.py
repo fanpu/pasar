@@ -5,14 +5,15 @@ import json
 import time
 from pathlib import Path
 
-from fastapi import FastAPI, Query, Request
-from fastapi.responses import JSONResponse, StreamingResponse
+from fastapi import FastAPI, HTTPException, Query, Request
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, StreamingResponse
 from pydantic import BaseModel, Field, field_validator
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 
 from pasar import __version__
 from pasar.config import Config
 from pasar.daemon import UNSET, Conflict, Daemon, NotFound
+from pasar.mascot import manifest, resolve, resolve_builtin
 from pasar.metrics import Prometheus
 from pasar.models import TERMINAL, JobSpec, State
 from pasar.units import parse_duration, parse_size
@@ -21,6 +22,10 @@ from pasar.views import attempt_view, job_view, schedule_projection, status_view
 RECENT = 86400
 KEEPALIVE_INTERVAL = 15.0  # seconds of quiet before an SSE stream sends a `: keep-alive` comment
 _MAX_INT = 2**62  # keeps user-supplied numbers well clear of sqlite's signed-64-bit columns
+
+WEBUI_DIR = Path(__file__).parent / "webui"
+_UNBUILT = ("<!doctype html><meta charset=utf-8><title>pasar</title>"
+            "<p>pasar web UI is not built. Run: <code>cd web && npm ci && npm run build</code></p>")
 
 
 def _bounded(v):
@@ -130,7 +135,7 @@ def _default_allowed_hosts(cfg: Config) -> list[str]:
 
 
 def create_app(daemon: Daemon, *, prom: Prometheus | None = None, wake=lambda: None,
-               allowed_hosts: list[str] | None = None) -> FastAPI:
+               allowed_hosts: list[str] | None = None, webui_dir: Path | None = None) -> FastAPI:
     app = FastAPI(title="pasar", version=__version__)
     cfg = daemon.cfg
     # `allowed_hosts` here is *extra* names on top of the production defaults below (e.g.
@@ -269,5 +274,42 @@ def create_app(daemon: Daemon, *, prom: Prometheus | None = None, wake=lambda: N
     async def stream(limit: int | None = None):
         return StreamingResponse(_stream_updates(daemon, snapshot, limit),
                                  media_type="text/event-stream")
+
+    @app.get("/api/mascot")
+    async def mascot_manifest():
+        return manifest(Path(cfg.mascot_dir))
+
+    @app.get("/mascot/builtin/{filename}")
+    async def mascot_builtin(filename: str):
+        path = resolve_builtin(filename)
+        if path is None:
+            raise HTTPException(404)
+        return FileResponse(path, headers={"Cache-Control": "max-age=300"})
+
+    @app.get("/mascot/{filename}")
+    async def mascot_file(filename: str):
+        path = resolve(Path(cfg.mascot_dir), filename)
+        if path is None:
+            raise HTTPException(404)
+        return FileResponse(path, headers={"Cache-Control": "max-age=300"})
+
+    ui = WEBUI_DIR if webui_dir is None else webui_dir
+    assets = (ui / "assets").resolve()
+
+    @app.get("/assets/{name:path}")
+    async def asset(name: str):
+        path = (assets / name).resolve()
+        if not path.is_relative_to(assets) or not path.is_file():
+            raise HTTPException(404)
+        return FileResponse(path, headers={"Cache-Control": "public, max-age=31536000, immutable"})
+
+    @app.get("/{path:path}", include_in_schema=False)
+    async def spa(path: str):
+        if path.startswith(("api/", "mascot/")) or path in ("api", "mascot"):
+            raise HTTPException(404)
+        index = ui / "index.html"
+        if not index.is_file():
+            return HTMLResponse(_UNBUILT, status_code=503)
+        return FileResponse(index, headers={"Cache-Control": "no-cache"})
 
     return app

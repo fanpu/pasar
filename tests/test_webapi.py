@@ -1,5 +1,6 @@
 from fastapi.testclient import TestClient
 
+from pasar import mascot
 from pasar.api import create_app
 from pasar.daemon import USAGE_HISTORY
 from pasar.models import State
@@ -64,3 +65,48 @@ def test_usage_history_is_bounded_and_resets_per_attempt(daemon, executor, probe
     daemon.clock.advance(2)
     daemon.tick()
     assert len(daemon.usage_history[1]) <= 2
+
+
+def make_webui(tmp_path):
+    ui = tmp_path / "webui"
+    (ui / "assets").mkdir(parents=True)
+    (ui / "index.html").write_text("<!doctype html><title>pasar</title>")
+    (ui / "assets" / "app-abc123.js").write_text("console.log(1)")
+    return ui
+
+
+def test_spa_fallback_and_assets(daemon, tmp_path):
+    c = TestClient(create_app(daemon, allowed_hosts=["testserver"], webui_dir=make_webui(tmp_path)))
+    for path in ["/", "/jobs/42"]:
+        r = c.get(path)
+        assert r.status_code == 200 and "<title>pasar</title>" in r.text
+        assert r.headers["cache-control"] == "no-cache"
+    r = c.get("/assets/app-abc123.js")
+    assert r.status_code == 200 and "immutable" in r.headers["cache-control"]
+    assert c.get("/assets/missing.js").status_code == 404
+    r = c.get("/api/nope")
+    assert r.status_code == 404 and r.headers["content-type"].startswith("application/json")
+
+
+def test_unbuilt_ui_says_how_to_build(daemon, tmp_path):
+    c = TestClient(create_app(daemon, allowed_hosts=["testserver"], webui_dir=tmp_path / "none"))
+    r = c.get("/")
+    assert r.status_code == 503 and "npm run build" in r.text
+
+
+def test_mascot_routes(daemon, tmp_path, monkeypatch):
+    builtin = tmp_path / "builtin"
+    builtin.mkdir()
+    (builtin / "idle.svg").write_text("<svg/>")
+    monkeypatch.setattr(mascot, "BUILTIN_DIR", builtin)
+    custom = tmp_path / "custom"
+    custom.mkdir()
+    (custom / "happy.png").write_bytes(b"\x89PNG")
+    daemon.cfg.mascot_dir = str(custom)
+    c = TestClient(create_app(daemon, allowed_hosts=["testserver"], webui_dir=tmp_path / "none"))
+    m = c.get("/api/mascot").json()
+    assert m["happy"] == ["/mascot/happy.png"] and m["idle"] == ["/mascot/builtin/idle.svg"]
+    assert c.get("/mascot/happy.png").content == b"\x89PNG"
+    assert c.get("/mascot/builtin/idle.svg").status_code == 200
+    assert c.get("/mascot/secret.png").status_code == 404
+    assert c.get("/mascot/builtin/nope.svg").status_code == 404
