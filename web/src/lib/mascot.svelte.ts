@@ -3,7 +3,7 @@ import type { MascotState } from "./mood";
 import type { MascotManifest } from "./types";
 
 /** Which mascot image to show for a given state: a random pick from the user's `mascot_dir`
- * manifest, falling back to the repo's built-in SVG when the user hasn't supplied one. */
+ * manifest, falling back to the built-in art when the user hasn't supplied one. */
 export class Mascot {
   manifest = $state.raw<MascotManifest>({});
   // Flips once load() resolves. A primitive (rather than the manifest object itself) so callers
@@ -18,7 +18,7 @@ export class Mascot {
 
   pick(state: MascotState, rand: () => number = Math.random): string {
     const urls = this.manifest[state];
-    if (!urls || urls.length === 0) return `/mascot/builtin/${state}.svg`;
+    if (!urls || urls.length === 0) return `/mascot/builtin/${state}.png`;
     return urls[Math.floor(rand() * urls.length)];
   }
 }

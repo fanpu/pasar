@@ -111,7 +111,7 @@ def test_unbuilt_ui_says_how_to_build(daemon, tmp_path):
 def test_mascot_routes(daemon, tmp_path, monkeypatch):
     builtin = tmp_path / "builtin"
     builtin.mkdir()
-    (builtin / "idle.svg").write_text("<svg/>")
+    (builtin / "idle.png").write_bytes(b"\x89PNG")
     monkeypatch.setattr(mascot, "BUILTIN_DIR", builtin)
     custom = tmp_path / "custom"
     custom.mkdir()
@@ -119,11 +119,11 @@ def test_mascot_routes(daemon, tmp_path, monkeypatch):
     daemon.cfg.mascot_dir = str(custom)
     c = TestClient(create_app(daemon, allowed_hosts=["testserver"], webui_dir=tmp_path / "none"))
     m = c.get("/api/mascot").json()
-    assert m["happy"] == ["/mascot/happy.png"] and m["idle"] == ["/mascot/builtin/idle.svg"]
+    assert m["happy"] == ["/mascot/happy.png"] and m["idle"] == ["/mascot/builtin/idle.png"]
     assert c.get("/mascot/happy.png").content == b"\x89PNG"
-    assert c.get("/mascot/builtin/idle.svg").status_code == 200
+    assert c.get("/mascot/builtin/idle.png").status_code == 200
     assert c.get("/mascot/secret.png").status_code == 404
-    assert c.get("/mascot/builtin/nope.svg").status_code == 404
+    assert c.get("/mascot/builtin/nope.png").status_code == 404
 
 
 def test_jobs_in_time_range(daemon, executor, make_spec):

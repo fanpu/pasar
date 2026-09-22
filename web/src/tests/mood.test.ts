@@ -211,7 +211,7 @@ describe("Mascot.pick", () => {
 
   it("falls back to the built-in svg when the state has no images", () => {
     const m = new Mascot();
-    expect(m.pick("idle")).toBe("/mascot/builtin/idle.svg");
+    expect(m.pick("idle")).toBe("/mascot/builtin/idle.png");
   });
 });
 

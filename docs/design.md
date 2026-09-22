@@ -331,7 +331,7 @@ A mascot in the header reflects the machine's state, and small versions appear i
 | `hmm` | empty search results, empty filters |
 | `confused` | a job ended with an unknown or `lost` reason |
 
-The repo ships a minimal built-in set. Users can point `mascot_dir` (default `~/.config/pasar/mascot/`) at their own PNGs using these names. Variants are allowed: `done.png`, `done-2.png`, … and the UI picks one at random each time the state is shown. Missing images fall back to the built-in set.
+pasar ships a built-in set of PNG sprites (`src/pasar/mascot/`). Users can point `mascot_dir` (default `~/.config/pasar/mascot/`) at their own PNGs using these names. Variants are allowed: `done.png`, `done-2.png`, … and the UI picks one at random each time the state is shown. Missing images fall back to the built-in set.
 
 ## Configuration
 

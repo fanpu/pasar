@@ -43,7 +43,7 @@ describe("App", () => {
     // No snapshot has arrived yet, so the mood stays "thinking" the whole time: before the
     // manifest resolves, the header must be showing the built-in art for that state.
     const imgBefore = container.querySelector<HTMLImageElement>(".mascot")!;
-    expect(imgBefore.src).toContain("/mascot/builtin/thinking.svg");
+    expect(imgBefore.src).toContain("/mascot/builtin/thinking.png");
 
     resolveManifest({ thinking: ["/mascot/thinking-1.png"] });
     await waitFor(() => {
