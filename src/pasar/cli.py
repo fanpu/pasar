@@ -89,8 +89,8 @@ def _mem(job: dict) -> str:
 
 def _expected(job: dict) -> str:
     """Expected total run time, e.g. `~48m`; `~48m*` when projected from progress reports."""
-    total = job.get("expected_runtime", job["est_runtime"])
-    return f"~{fmt_duration(total)}" + ("*" if job.get("eta_source") == "progress" else "")
+    total = job["expected_runtime"]
+    return f"~{fmt_duration(total)}" + ("*" if job["eta_source"] == "progress" else "")
 
 
 def _when(job: dict) -> str:
@@ -107,7 +107,7 @@ def _when(job: dict) -> str:
 def _state(job: dict) -> str:
     if job["state"] in ("failed", "cancelled") and job.get("reason"):
         return f"{job['state']} ({job['reason']})"
-    if job["state"] == "queued" and job.get("preemptions"):
+    if job["state"] == "queued" and job["preemptions"]:
         return f"queued (preempted x{job['preemptions']})"
     return job["state"]
 
@@ -126,7 +126,7 @@ def print_table(jobs: list[dict]) -> None:
 
 def _time_line(job: dict) -> str:
     ran = fmt_duration(job["run_time"])
-    if job.get("eta_source") == "progress" and job["state"] in ("running", "stopping"):
+    if job["eta_source"] == "progress" and job["state"] in ("running", "stopping"):
         return (f"{ran} of ~{fmt_duration(job['expected_runtime'])} from progress"
                 f" (estimated {fmt_duration(job['est_runtime'])})")
     return f"{ran} of ~{fmt_duration(job['est_runtime'])}"
@@ -136,7 +136,7 @@ def print_job(job: dict) -> None:
     attempts = job["attempts"]
     fields = [
         ("job", f"#{job['id']} {job['name']}"), ("state", _state(job)),
-        ("summary", job["summary"]), ("bid", f"{job['bid']} (may preempt lower bids)" if job.get("preempt") else job["bid"]),
+        ("summary", job["summary"]), ("bid", f"{job['bid']} (may preempt lower bids)" if job["preempt"] else job["bid"]),
         ("memory", _mem(job)),
         ("time", _time_line(job)),
         ("attempts", len(attempts) if isinstance(attempts, list) else attempts),
