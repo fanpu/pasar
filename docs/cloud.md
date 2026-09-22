@@ -213,6 +213,36 @@ set. Cases that need more than uv (system packages) get an optional `[tool.pasar
   job detail view lists its files. Persist dirs are deleted with the job's files by the normal
   retention policy (`cloud_retention_days`, default 14), since stored data costs money too.
 
+### Writing jobs for the cloud
+
+This guidance goes into [jobs.md](jobs.md) and the agent guide when cloud jobs ship. Locally,
+checkpointing protects against preemption. In the cloud, the job is paused when it reaches its
+approved run time, the provider can reclaim the GPU, and every minute of lost work was paid for, so
+checkpointing matters more:
+
+- **Checkpoint every 10 to 15 minutes of run time**, not every 30 minutes as for local jobs.
+  Measure the interval in time, not steps: a step count tuned on the local GPU can be much too far
+  apart on a faster cloud GPU, or much too close on a slower one.
+- **Save the first checkpoint early**, within the first few minutes of useful work, so an early pause
+  or reclaim doesn't lose the startup time (building the image, loading data, compiling).
+- **Save to `$PASAR_PERSIST_DIR`** (`pasar_job.persist_dir()`). Everything else in the container
+  is gone when the attempt ends.
+- **Save on SIGTERM** with `pasar_job.on_preempt(save_checkpoint)`, and make sure the save fits in
+  `--grace`. Writes to a provider volume are slower than to local disk, so time a save once and set
+  `--grace` to at least twice that.
+- **Report every checkpoint** with `pasar_job.checkpoint(step)` and every resume with
+  `pasar_job.resumed(step)`. pasar uses them to count lost time, and the approval tray flags jobs
+  it has never seen checkpoint.
+- **Keep only the last two checkpoints**, since stored checkpoints cost money too. Keep a second
+  one in case a save is interrupted halfway.
+- **Test resuming locally first**: run a few minutes on the local GPU, cancel, and resubmit. A
+  cloud run is an expensive place to find out resuming is broken.
+
+pasar checks this while the job runs: a running cloud job that has reported `progress` but no
+`checkpoint` for 20 minutes gets a warning line in its log and a **not checkpointing** badge in the
+UI and the approval tray. Its approved limit doesn't change; the badge exists so the problem gets
+noticed before the limit.
+
 ## The wrapper protocol
 
 The wrapper (`python -m pasar_job.run -- <command>`, in the dependency-free `pasar-job` package that
@@ -421,7 +451,8 @@ uses them, so a local-only install stays as it is.
 
 1. Provider-neutral pieces with the fake provider: `JobSpec.target`, executor per target, the cloud
    lane and budget, the bundle builder, the wrapper and output pump.
-2. `ModalProvider`, guardrails, and the docs (README, guide).
+2. `ModalProvider`, guardrails, and the docs (README, guide, and the cloud checkpointing guidance in
+   jobs.md).
 3. CLI (`--on`, `--gpu`, `pull`, `cloud`) and API fields.
 4. UI: the cloud timeline, tiles, and the cloud job detail view.
 5. Billing reconciliation and `--max-cost`.
