@@ -31,6 +31,11 @@ describe("JobForm (submit)", () => {
     localStorage.clear();
   });
 
+  it("uses the wider Modal size (it has several fields, unlike the default 360px dialogs)", () => {
+    const { container } = render(JobForm, { mode: "submit", onclose: noop, ondone: noopDone });
+    expect(container.querySelector(".modal.wide")).not.toBeNull();
+  });
+
   it("sends mem: null, submitter web and the default bid for a whole-GPU submit", async () => {
     vi.mocked(api.submitJob).mockResolvedValue(submittedJob());
     render(JobForm, { mode: "submit", onclose: noop, ondone: noopDone });
@@ -128,6 +133,28 @@ describe("JobForm (submit)", () => {
 
     render(JobForm, { mode: "submit", onclose: noop, ondone: noopDone });
     expect((screen.getByLabelText("directory") as HTMLInputElement).value).toBe("/home/you/run");
+  });
+
+  it("still calls ondone/onclose (no error shown) when saving the directory to localStorage throws", async () => {
+    const onclose = vi.fn();
+    const ondone = vi.fn();
+    const submitted = submittedJob();
+    vi.mocked(api.submitJob).mockResolvedValue(submitted);
+    const setItem = vi.spyOn(Storage.prototype, "setItem").mockImplementation(() => {
+      throw new Error("quota exceeded");
+    });
+    try {
+      render(JobForm, { mode: "submit", onclose, ondone });
+
+      await fillRequired();
+      await fireEvent.click(screen.getByRole("button", { name: "Submit" }));
+
+      await waitFor(() => expect(ondone).toHaveBeenCalledWith(submitted));
+      expect(onclose).toHaveBeenCalled();
+      expect(screen.queryByText(/quota exceeded/)).toBeNull();
+    } finally {
+      setItem.mockRestore();
+    }
   });
 });
 

@@ -132,7 +132,7 @@
 
 <div class="wrap">
   <Header mood={currentMood} image={headerImage} {bounceKey} onsubmit={openSubmit} />
-  <Banner banner={currentMood.banner} connected={live.connected} />
+  <Banner banner={currentMood.banner} connected={live.connected} hasConnectedOnce={live.snapshot !== null} />
 
   {#if live.snapshot}
     <Tiles status={live.snapshot.status} jobs={live.snapshot.jobs} gpu={live.gpu} />

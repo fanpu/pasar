@@ -83,7 +83,12 @@
           bid, preemptible, retries, name, note, submitter: "web",
         };
         result = await submitJob(body);
-        localStorage.setItem(CWD_KEY, cwd);
+        try {
+          localStorage.setItem(CWD_KEY, cwd);
+        } catch {
+          // Best-effort: a storage failure (quota, private browsing) shouldn't surface as a
+          // submit error or block ondone()/onclose() below, which would invite a duplicate submit.
+        }
       } else {
         const current = job;
         if (!current) return;
@@ -115,7 +120,7 @@
 </script>
 
 <svelte:window onkeydown={onkeydown} />
-<Modal {title} {onclose}>
+<Modal {title} {onclose} wide>
   <form bind:this={formEl} onsubmit={onFormSubmit}>
     {#if mode === "restart" && job}
       <div class="field">

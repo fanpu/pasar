@@ -304,7 +304,7 @@ Old job directories are cleaned up by a size and age policy (default: keep 30 da
 - **Dashboard**: a header with the mascot and a one-line status ("2 jobs running, 2 waiting · next up #47 ~16:40"), stat tiles (memory pool, power, temperature, utilisation), then a **timeline** (memory on the vertical axis, time on the horizontal) of running jobs and the projected schedule of queued jobs, then the **job table** (running, stopping, queued, recently finished).
 - **Job detail**: on desktop, a slide-over panel on the right with the dashboard dimmed behind it. On phones, a full page with tabs (Overview, Logs, Metrics, Events). The URL is the same (`/jobs/42`) either way. Contents: state and reason, bid (editable), cancel/restart, elapsed vs estimated time, progress, last checkpoint, memory (current, peak, limit), lost time, an attempts bar (run, lost, waiting), metric charts, live log, event timeline, command, environment and git info.
 - **Failed jobs** show the reason prominently (category, summary, the last log lines) with **restart** and **restart…** (a form pre-filled with the job's settings).
-- **Phone layout**: the table becomes a list of cards, the timeline shrinks to a strip (tap to expand), and actions sit in a bottom bar.
+- **Phone layout**: the table becomes a list of cards, the timeline is shorter, and actions sit in a bottom bar.
 - **Look**: light theme by default, soft rounded type, pastel colours, rounded cards with soft shadows, big numbers for key stats, subtle motion (a bounce when a job starts, a small celebration when one finishes). Motion respects `prefers-reduced-motion`. Status colours stay consistent (green running, lavender queued, amber stopping or over limit, red failed).
 
 ### Mascot

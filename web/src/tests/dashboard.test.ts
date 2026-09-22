@@ -16,18 +16,23 @@ describe("dashboard pieces", () => {
     expect(screen.getByText("next up: #48 at ~14:47")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: /submit/i })).toBeInTheDocument();
   });
-  it("disconnect banner wins", () => {
-    render(Banner, { banner: { tone: "bad", text: "boom" }, connected: false });
+  it("disconnect banner wins once the stream has connected before", () => {
+    render(Banner, { banner: { tone: "bad", text: "boom" }, connected: false, hasConnectedOnce: true });
     expect(screen.getByText(/Lost connection to pasard/)).toBeInTheDocument();
     expect(screen.queryByText("boom")).toBeNull();
   });
   it("shows the given banner when connected", () => {
-    render(Banner, { banner: { tone: "warn", text: "careful now" }, connected: true });
+    render(Banner, { banner: { tone: "warn", text: "careful now" }, connected: true, hasConnectedOnce: true });
     expect(screen.getByText("careful now")).toBeInTheDocument();
   });
   it("renders nothing when connected with no banner", () => {
-    const { container } = render(Banner, { banner: null, connected: true });
+    const { container } = render(Banner, { banner: null, connected: true, hasConnectedOnce: true });
     expect(container.querySelector(".banner")).toBeNull();
+  });
+  it("stays quiet before the stream has ever connected, even though `connected` starts false", () => {
+    const { container } = render(Banner, { banner: null, connected: false, hasConnectedOnce: false });
+    expect(container.querySelector(".banner")).toBeNull();
+    expect(screen.queryByText(/Lost connection to pasard/)).toBeNull();
   });
   it("pool tile numbers", () => {
     const s = status({ pool: 105 * GIB, reserved: 58 * GIB, free: 47 * GIB });
@@ -36,6 +41,28 @@ describe("dashboard pieces", () => {
     expect(screen.getByText(/58\.0/)).toBeInTheDocument();
     expect(screen.getAllByText("–").length).toBe(3);
   });
+  it("includes stopping jobs in the pool bar since they still hold memory", () => {
+    const s = status({ pool: 105 * GIB, reserved: 58 * GIB, free: 47 * GIB });
+    const { container } = render(Tiles, {
+      status: s,
+      jobs: [job({ id: 42, state: "stopping", limit: 37.4 * GIB })],
+      gpu: null,
+    });
+    expect(container.querySelectorAll(".pool i").length).toBe(1);
+    expect(screen.getByText(/#42 37\.4 GiB/)).toBeInTheDocument();
+  });
+
+  it("doesn't compute NaN/Infinity bar widths when the pool is 0", () => {
+    const s = status({ pool: 0, reserved: 0, free: 0 });
+    const { container } = render(Tiles, {
+      status: s,
+      jobs: [job({ id: 42, state: "running", limit: 37.4 * GIB })],
+      gpu: null,
+    });
+    const bar = container.querySelector<HTMLElement>(".pool i")!;
+    expect(bar.style.width).toBe("0%");
+  });
+
   it("gpu tiles show rounded values and a sparkline", () => {
     const s = status({ pool: 105 * GIB, reserved: 0, free: 105 * GIB });
     render(Tiles, {

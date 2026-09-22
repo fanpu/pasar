@@ -7,7 +7,7 @@
     detail: JobDetail | null;
     now: number;
   }
-  let { job, now }: Props = $props();
+  let { job, detail, now }: Props = $props();
 
   interface Fact {
     l: string;
@@ -38,10 +38,20 @@
     return [value, sub];
   }
 
-  function attemptFact(j: JobView): [string, string] {
+  // "resumed after N preemptions" is only right when every earlier attempt was preempted; an
+  // earlier attempt can just as well have failed and been retried. Break it down by each earlier
+  // attempt's actual end kind instead, falling back to "restarted" when detail (with per-attempt
+  // end kinds) hasn't loaded yet.
+  function attemptFact(j: JobView, d: JobDetail | null): [string, string] {
     if (j.attempts <= 1) return [`${j.attempts}`, "first run"];
-    const k = j.attempts - 1;
-    return [`${j.attempts}`, `resumed after ${plural(k, "preemption")}`];
+    if (d === null || d.attempts.length < j.attempts) return [`attempt ${j.attempts}`, "restarted"];
+    const prior = d.attempts.slice(0, j.attempts - 1);
+    const preemptions = prior.filter((a) => a.end_kind === "preempted").length;
+    const retries = prior.length - preemptions;
+    const parts: string[] = [];
+    if (preemptions > 0) parts.push(plural(preemptions, "preemption"));
+    if (retries > 0) parts.push(`${retries} ${retries > 1 ? "retries" : "retry"}`);
+    return [`attempt ${j.attempts}`, parts.length > 0 ? `after ${parts.join(", ")}` : "restarted"];
   }
 
   function bidSub(bid: number): string {
@@ -55,7 +65,7 @@
       const [pv, ps] = progressFact(job.progress);
       const [cv, cs] = checkpointFact(job.last_checkpoint);
       const [lv, ls] = lostFact(job);
-      const [av, as] = attemptFact(job);
+      const [av, as] = attemptFact(job, detail);
       return [
         { l: "elapsed", v: dur(job.run_time), s: `of ~${dur(job.est_runtime)} estimated` },
         { l: "progress", v: pv, s: ps },

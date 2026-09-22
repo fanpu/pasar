@@ -11,10 +11,18 @@
   }
   let { status, jobs, gpu }: Props = $props();
 
-  const runningJobs = $derived(jobs.filter((j) => j.state === "running"));
+  // Stopping jobs are still holding their memory until they actually exit, so they belong in the
+  // pool bar too — otherwise it under-counts what's reserved right as a preemption is in flight.
+  const activeJobs = $derived(jobs.filter((j) => j.state === "running" || j.state === "stopping"));
 
   function reserved(j: JobView): number {
     return Math.max(j.limit, j.usage ?? 0);
+  }
+
+  // status.pool can be 0 (e.g. no GPU reachable yet); guard so the bar segments never compute a
+  // NaN/Infinity width.
+  function pct(value: number): number {
+    return status.pool > 0 ? (value / status.pool) * 100 : 0;
   }
 
   function latest(series: [number, number][] | undefined): number | null {
@@ -32,15 +40,15 @@
     <div class="l"><span>memory pool</span><span>{gib(status.free)} GiB free</span></div>
     <div class="n">{gib(status.reserved)}&nbsp;<span>/ {gib(status.pool)} GiB reserved</span></div>
     <div class="pool">
-      {#each runningJobs as j (j.id)}
-        <i style="width: {(reserved(j) / status.pool) * 100}%; background: {jobColor(j.id)}"></i>
+      {#each activeJobs as j (j.id)}
+        <i style="width: {pct(reserved(j))}%; background: {jobColor(j.id)}"></i>
       {/each}
       {#if status.external > 0}
-        <i style="width: {(status.external / status.pool) * 100}%; background: var(--ink-3)"></i>
+        <i style="width: {pct(status.external)}%; background: var(--ink-3)"></i>
       {/if}
     </div>
     <div class="poolkey">
-      {#each runningJobs as j (j.id)}
+      {#each activeJobs as j (j.id)}
         <span><i style="background: {jobColor(j.id)}"></i>#{j.id} {gib(reserved(j))} GiB</span>
       {/each}
       {#if status.external > 0}

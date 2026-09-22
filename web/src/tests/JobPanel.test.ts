@@ -135,6 +135,30 @@ describe("JobPanel", () => {
     expect(onclose).not.toHaveBeenCalled();
   });
 
+  it("builds the Grafana link with URLSearchParams so an existing query string isn't broken", async () => {
+    const liveJob = job({
+      id: 42, name: "llama-sft", state: "running", start_time: NOW - 600,
+      spans: [[NOW - 600, null, null]],
+    });
+    vi.mocked(api.getJob).mockResolvedValue(baseDetail({ state: "running", start_time: NOW - 600 }));
+    const { container } = render(JobPanel, {
+      id: 42, live: liveJob, now: NOW, grafanaUrl: "https://grafana.example/d/abc?orgId=1",
+      onclose: noop, onrestartwith: noopRestartWith,
+    });
+
+    const link = await waitFor(() => {
+      const a = container.querySelector<HTMLAnchorElement>('a[href*="grafana.example"]');
+      expect(a).not.toBeNull();
+      return a!;
+    });
+    const url = new URL(link.href);
+    expect(url.origin).toBe("https://grafana.example");
+    expect(url.pathname).toBe("/d/abc");
+    expect(url.searchParams.get("orgId")).toBe("1");
+    expect(url.searchParams.get("from")).toBe(String(Math.round((NOW - 600) * 1000)));
+    expect(url.searchParams.get("to")).toBe("now");
+  });
+
   it("shows the failure reason and the last 8 log-tail lines for an OOM job", async () => {
     const lines = Array.from({ length: 10 }, (_, i) => `line${i + 1}`);
     const finalAttempt = attempt({
@@ -260,6 +284,23 @@ describe("JobPanel", () => {
     await waitFor(() => expect(container.querySelector('[data-tab~="metrics"] svg[role="img"]')).not.toBeNull());
     const svg = container.querySelector('[data-tab~="metrics"] svg[role="img"]');
     expect(svg?.getAttribute("aria-label")).toMatch(/^memory: latest/);
+  });
+
+  it("clears the memory usage chart once a running job is requeued (preempted or retried)", async () => {
+    const liveJob = job({ id: 42, name: "llama-sft", state: "running", start_time: NOW - 600, limit: 6 * 1024 ** 3 });
+    vi.mocked(api.getJob).mockResolvedValue(baseDetail({ state: "running", start_time: NOW - 600 }));
+    vi.mocked(api.getUsage).mockResolvedValue([[NOW - 60, 2 * 1024 ** 3], [NOW, 3 * 1024 ** 3]]);
+    const { container, rerender } = render(JobPanel, {
+      id: 42, live: liveJob, now: NOW, grafanaUrl: null, onclose: noop, onrestartwith: noopRestartWith,
+    });
+    await waitFor(() => expect(container.querySelector('[data-tab~="metrics"] svg[role="img"]')).not.toBeNull());
+
+    const queuedJob = job({ id: 42, name: "llama-sft", state: "queued", attempts: 2 });
+    await rerender({ live: queuedJob });
+
+    await waitFor(() =>
+      expect(container.querySelector('[data-tab~="metrics"] svg[role="img"]')).toBeNull(),
+    );
   });
 
   it("shows 'No metrics for this job.' when there's no usage or GPU history", async () => {

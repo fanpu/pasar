@@ -147,6 +147,13 @@
     latestNow = now;
   });
 
+  // A preempted/failed-and-retried job goes back to "queued" before its next attempt starts.
+  // Without this, the metrics tab would keep showing the previous attempt's memory usage chart
+  // (it isn't gated on isLiveState the way the GPU charts are) until fresh data arrives.
+  $effect(() => {
+    if (curState === "queued") usage = [];
+  });
+
   $effect(() => {
     const forId = id;
     if (!isLiveState) return;
@@ -277,7 +284,13 @@
   function grafanaHref(url: string, job: JobView): string {
     const from = Math.round((job.spans[0]?.[0] ?? job.start_time ?? job.submit_time) * 1000);
     const to = job.end_time !== null ? `${Math.round(job.end_time * 1000)}` : "now";
-    return `${url}?from=${from}&to=${to}`;
+    // Build with URL + searchParams rather than string-concatenating "?from=...&to=...": a
+    // grafana_url that already has a query string (e.g. an org id) would otherwise end up with
+    // two "?"s and a broken link.
+    const href = new URL(url);
+    href.searchParams.set("from", String(from));
+    href.searchParams.set("to", to);
+    return href.toString();
   }
 
   const memoryFormat = (v: number): string => `${gib(v)} GiB`;
