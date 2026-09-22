@@ -51,10 +51,20 @@ describe("JobForm (submit)", () => {
           time: "2h",
           mem: null,
           bid: 1000,
+          preempt: false,
           submitter: "web",
         }),
       ),
     );
+  });
+
+  it("sends preempt when asked to stop lower-bid jobs", async () => {
+    vi.mocked(api.submitJob).mockResolvedValue(submittedJob());
+    render(JobForm, { mode: "submit", onclose: noop, ondone: noopDone });
+    await fillRequired();
+    await fireEvent.click(screen.getByLabelText("also stop lower-bid jobs to start now"));
+    await fireEvent.click(screen.getByRole("button", { name: "Submit" }));
+    await waitFor(() => expect(api.submitJob).toHaveBeenCalledWith(expect.objectContaining({ preempt: true })));
   });
 
   it("sends the shared memory size when shared is selected", async () => {

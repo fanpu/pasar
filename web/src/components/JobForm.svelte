@@ -39,6 +39,7 @@
   let name = $state("");
   let note = $state("");
   let preemptible = $state(true);
+  let preempt = $state(false); // never carried over from a previous run
   let retries = $state(initialRetries);
 
   let error = $state<string | null>(null);
@@ -50,6 +51,7 @@
     if (time !== initialTime) body.time = time;
     if (bid !== current.bid) body.bid = bid;
     if (retries !== current.retries) body.retries = retries;
+    if (preempt) body.preempt = true;
     if (memMode === "whole" && initialMode === "shared") {
       body.whole_gpu = true;
     } else if (memMode === "shared" && (initialMode === "whole" || size !== initialSize)) {
@@ -80,7 +82,7 @@
       if (mode === "submit") {
         const body: SubmitBody = {
           command, cwd, time, mem: memMode === "shared" ? size : null,
-          bid, preemptible, retries, name, note, submitter: "web",
+          bid, preempt, preemptible, retries, name, note, submitter: "web",
         };
         result = await submitJob(body);
         try {
@@ -170,7 +172,8 @@
     <div class="field">
       <label for="jf-bid">bid</label>
       <input id="jf-bid" type="number" min="0" step="1" bind:value={bid} />
-      <p class="hint">1000 is normal. Higher bids can preempt lower ones.</p>
+      <p class="hint">1000 is normal. Higher bids go sooner.</p>
+      <label class="check"><input type="checkbox" bind:checked={preempt} /> also stop lower-bid jobs to start now</label>
     </div>
 
     <div class="field">

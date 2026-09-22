@@ -66,8 +66,8 @@ export function getLog(id: number, offset = 0): Promise<{ text: string; offset: 
 export function cancelJob(id: number): Promise<JobView> {
   return request("POST", `/api/jobs/${id}/cancel`);
 }
-export function setBid(id: number, bid: number): Promise<JobView> {
-  return request("PATCH", `/api/jobs/${id}`, { bid });
+export function setBid(id: number, bid: number, preempt: boolean): Promise<JobView> {
+  return request("PATCH", `/api/jobs/${id}`, { bid, preempt });
 }
 export function restartJob(id: number, body?: RestartBody): Promise<JobView> {
   return request("POST", `/api/jobs/${id}/restart`, body);

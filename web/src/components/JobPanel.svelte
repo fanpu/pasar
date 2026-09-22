@@ -263,10 +263,10 @@
     if (detail) onrestartwith(detail);
   }
 
-  async function saveBid(bid: number): Promise<void> {
+  async function saveBid(bid: number, preempt: boolean): Promise<void> {
     actionError = null;
     try {
-      await setBid(id, bid);
+      await setBid(id, bid, preempt);
     } catch (e) {
       actionError = e instanceof ApiError ? e.message : String(e);
       throw e;
@@ -493,6 +493,7 @@
 {#if showBid && jobView}
   <BidDialog
     bid={jobView.bid}
+    preempt={jobView.preempt}
     onsave={saveBid}
     onclose={() => {
       showBid = false;

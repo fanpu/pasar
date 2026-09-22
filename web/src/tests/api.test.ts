@@ -36,11 +36,11 @@ class FakeEventSource {
 describe("api", () => {
   it("sends JSON and returns the job", async () => {
     const f = mockFetch(200, { id: 3, bid: 1500 });
-    expect((await setBid(3, 1500)).bid).toBe(1500);
+    expect((await setBid(3, 1500, true)).bid).toBe(1500);
     const [url, init] = f.mock.calls[0];
     expect(url).toBe("/api/jobs/3");
     expect(init.method).toBe("PATCH");
-    expect(JSON.parse(init.body)).toEqual({ bid: 1500 });
+    expect(JSON.parse(init.body)).toEqual({ bid: 1500, preempt: true });
     expect(init.headers["Content-Type"]).toBe("application/json");
   });
   it("posts without a body for cancel", async () => {

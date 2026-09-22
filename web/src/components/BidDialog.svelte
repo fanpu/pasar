@@ -4,13 +4,15 @@
 
   interface Props {
     bid: number;
-    onsave: (bid: number) => Promise<void>;
+    preempt: boolean;
+    onsave: (bid: number, preempt: boolean) => Promise<void>;
     onclose: () => void;
   }
-  let { bid, onsave, onclose }: Props = $props();
+  let { bid, preempt, onsave, onclose }: Props = $props();
 
-  // Seed the editable field from the bid prop once; it's a local draft, not synced afterward.
+  // Seed the editable fields from the props once; they're a local draft, not synced afterward.
   let value = $state(untrack(() => bid));
+  let mayPreempt = $state(untrack(() => preempt));
   let saving = $state(false);
   let error = $state<string | null>(null);
 
@@ -20,7 +22,7 @@
     saving = true;
     error = null;
     try {
-      await onsave(value);
+      await onsave(value, mayPreempt);
       onclose();
     } catch (e) {
       error = e instanceof Error ? e.message : String(e);
@@ -44,7 +46,8 @@
       <button type="button" class="btn" onclick={() => (value = q)}>{q}</button>
     {/each}
   </div>
-  <p class="hint">1000 is normal. Higher bids can preempt lower ones.</p>
+  <p class="hint">1000 is normal. Higher bids go sooner.</p>
+  <label class="check"><input type="checkbox" bind:checked={mayPreempt} /> also stop lower-bid jobs to start now</label>
   {#if error}<p class="err">{error}</p>{/if}
   <div class="acts">
     <button class="btn primary" type="button" disabled={saving} onclick={save}>Save</button>
@@ -58,6 +61,7 @@
     border: 1.5px solid var(--line-2); margin-bottom: 8px; color: var(--ink);
   }
   .quick { display: flex; gap: 6px; margin-bottom: 8px; }
+  .check { display: flex; align-items: center; gap: 8px; font-weight: 700; color: var(--ink); margin: 0 0 10px; }
   .hint { font-size: 12px; color: var(--ink-2); font-weight: 700; margin: 0 0 10px; }
   .err { color: var(--fail); font-weight: 800; font-size: 12.5px; margin: 0 0 8px; }
 </style>

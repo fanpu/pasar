@@ -203,7 +203,18 @@ describe("JobPanel", () => {
     await fireEvent.input(input, { target: { value: "1500" } });
     await fireEvent.keyDown(input, { key: "Enter" });
 
-    await waitFor(() => expect(api.setBid).toHaveBeenCalledWith(42, 1500));
+    await waitFor(() => expect(api.setBid).toHaveBeenCalledWith(42, 1500, false));
+  });
+
+  it("can ask to preempt from the bid dialog", async () => {
+    const liveJob = job({ id: 42, name: "llama-sft", state: "queued", bid: 800 });
+    vi.mocked(api.getJob).mockResolvedValue(baseDetail({ state: "queued", bid: 800 }));
+    vi.mocked(api.setBid).mockResolvedValue(liveJob);
+    render(JobPanel, { id: 42, live: liveJob, now: NOW, grafanaUrl: null, onclose: noop, onrestartwith: noopRestartWith });
+    await fireEvent.click(await screen.findByText("★ bid 800 ✎"));
+    await fireEvent.click(screen.getByLabelText("also stop lower-bid jobs to start now"));
+    await fireEvent.click(screen.getByRole("button", { name: "Save" }));
+    await waitFor(() => expect(api.setBid).toHaveBeenCalledWith(42, 800, true));
   });
 
   it("shows the attempts bar legend with lost time from wasted work and restart cost", async () => {

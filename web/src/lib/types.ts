@@ -13,7 +13,7 @@ export interface JobView {
   over_limit: boolean; peak: number; est_runtime: number; run_time: number; remaining: number;
   /** run_time + remaining; from progress reports when `eta_source` is "progress". */
   expected_runtime: number; eta_source: "progress" | "estimate";
-  preemptible: boolean; grace: number; retries: number; retries_used: number;
+  preemptible: boolean; preempt: boolean; grace: number; retries: number; retries_used: number;
   submit_time: number; queue_time: number; start_time: number | null; end_time: number | null;
   attempts: number; preemptions: number;
   lost: { preemption: number; failure: number; known: boolean };
@@ -55,10 +55,10 @@ export type MascotManifest = Record<string, string[]>;
 
 export interface SubmitBody {
   command: string; time: string | number; cwd: string; mem?: string | number | null; bid?: number;
-  preemptible?: boolean; grace?: string | number | null; retries?: number; name?: string;
+  preempt?: boolean; preemptible?: boolean; grace?: string | number | null; retries?: number; name?: string;
   note?: string; tags?: string[]; submitter?: string; env?: Record<string, string> | null;
 }
 export interface RestartBody {
   mem?: string | number | null; whole_gpu?: boolean; time?: string | number | null; bid?: number;
-  retries?: number;
+  retries?: number; preempt?: boolean;
 }
