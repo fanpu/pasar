@@ -226,9 +226,7 @@ def test_preempt_flag_on_submit_bid_and_restart(client, capsys, daemon, tmp_path
     assert daemon.job(1).spec.preempt
 
 
-def test_non_preemptible_flag_and_old_alias(client, capsys, daemon, tmp_path, monkeypatch):
+def test_non_preemptible_flag(client, capsys, daemon, tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     run(client, capsys, "submit", "--time", "1h", "--non-preemptible", "--", "python", "a.py")
-    run(client, capsys, "submit", "--time", "1h", "--no-preempt", "--", "python", "a.py")
-    assert not daemon.job(1).spec.preemptible and not daemon.job(2).spec.preemptible
-    assert not daemon.job(1).spec.preempt
+    assert not daemon.job(1).spec.preemptible and not daemon.job(1).spec.preempt

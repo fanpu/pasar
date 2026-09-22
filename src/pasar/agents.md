@@ -46,7 +46,7 @@ Options:
 | `--mem SIZE` | Reserve a memory slice (e.g. `24G`) so this job can share the GPU with others — only for jobs that suit sharing (see below). pasar adds a safety margin on top (`max(2 GiB, 10%)`) to cover CUDA context and allocator slack — this is a **unified-memory** box, so ordinary CUDA allocations count against the same pool as everything else. | whole GPU (recommended) |
 | `--bid N` | Priority: higher bids start first. On its own a bid never stops a running job. | `1000` |
 | `--preempt` | Also stop running jobs with a lower bid (that are preemptible) if that's what it takes to start now. Never carried over: pass it again on `pasar bid` or `pasar restart` if still wanted. | off |
-| `--non-preemptible` | Other jobs can never stop this one. (`--no-preempt` is an old spelling.) | preemptible |
+| `--non-preemptible` | Other jobs can never stop this one. | preemptible |
 | `--grace DURATION` | Time between SIGTERM and SIGKILL when stopped, e.g. `180s`. Raise it if checkpointing takes longer than the default. | `120s` |
 | `--retries N` | Auto-retry after a failure (non-zero exit, signal, `oom`, `gpu_oom`, `gpu_xid`). Cancellations are never retried; preemptions don't consume a retry. | `0` |
 | `--name NAME` | Short display name. | derived from the command |

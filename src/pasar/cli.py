@@ -162,9 +162,8 @@ def build_parser() -> Parser:
     s.add_argument("--mem", help="share the GPU, reserving this much memory (e.g. 24G); omit for the whole GPU (recommended)")
     s.add_argument("--bid", type=int, help="priority (default 1000); higher bids go first")
     s.add_argument("--preempt", action="store_true", help="may stop running jobs with a lower bid to start now (never carried over)")
-    s.add_argument("--non-preemptible", action="store_true", dest="no_preempt",
+    s.add_argument("--non-preemptible", action="store_true",
                    help="other jobs may never stop this one")
-    s.add_argument("--no-preempt", action="store_true", dest="no_preempt", help=argparse.SUPPRESS)
     s.add_argument("--grace", help="time to save a checkpoint when stopped (default 120s)")
     s.add_argument("--retries", type=int, default=0)
     s.add_argument("--name", default="")
@@ -222,7 +221,7 @@ def run(args, client: httpx.Client) -> int:
         body = {
             "command": command[0] if len(command) == 1 else shlex.join(command),
             "time": args.time, "cwd": os.path.abspath(args.cwd or os.getcwd()),
-            "mem": args.mem, "bid": args.bid, "preempt": args.preempt, "preemptible": not args.no_preempt,
+            "mem": args.mem, "bid": args.bid, "preempt": args.preempt, "preemptible": not args.non_preemptible,
             "grace": args.grace, "retries": args.retries, "name": args.name, "note": args.note,
             "tags": args.tag, "submitter": args.by or getpass.getuser(),
             "env": None if args.no_env else dict(os.environ),
