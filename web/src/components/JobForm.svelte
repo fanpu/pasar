@@ -43,6 +43,7 @@
 
   let error = $state<string | null>(null);
   let saving = $state(false);
+  let formEl: HTMLFormElement | undefined;
 
   function buildRestartBody(current: JobDetail): RestartBody {
     const body: RestartBody = {};
@@ -58,7 +59,17 @@
   }
 
   async function handleSubmit(): Promise<void> {
+    if (saving) return;
     error = null;
+    if (mode === "submit") {
+      if (!command.trim() || !cwd.trim() || !time.trim()) {
+        error = "command, directory and time are required";
+        return;
+      }
+    } else if (!time.trim()) {
+      error = "time is required";
+      return;
+    }
     if (memMode === "shared" && !size.trim()) {
       error = "memory size is required for shared jobs";
       return;
@@ -95,14 +106,17 @@
   function onkeydown(e: KeyboardEvent): void {
     if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) {
       e.preventDefault();
-      void handleSubmit();
+      if (saving) return;
+      // Go through the form's own submit event (rather than calling handleSubmit directly) so
+      // this path is identical to clicking the submit button.
+      formEl?.requestSubmit();
     }
   }
 </script>
 
 <svelte:window onkeydown={onkeydown} />
 <Modal {title} {onclose}>
-  <form onsubmit={onFormSubmit}>
+  <form bind:this={formEl} onsubmit={onFormSubmit}>
     {#if mode === "restart" && job}
       <div class="field">
         <span class="lbl">command</span>
@@ -118,20 +132,19 @@
         <textarea
           id="jf-command"
           class="mono"
-          required
           bind:value={command}
           placeholder="python train.py --config run.yaml"
         ></textarea>
       </div>
       <div class="field">
         <label for="jf-cwd">directory</label>
-        <input id="jf-cwd" type="text" required bind:value={cwd} placeholder="/home/you/project" />
+        <input id="jf-cwd" type="text" bind:value={cwd} placeholder="/home/you/project" />
       </div>
     {/if}
 
     <div class="field">
       <label for="jf-time">time</label>
-      <input id="jf-time" type="text" required bind:value={time} placeholder="2h" />
+      <input id="jf-time" type="text" bind:value={time} placeholder="2h" />
       <p class="hint">estimate; jobs aren't killed for running over</p>
     </div>
 

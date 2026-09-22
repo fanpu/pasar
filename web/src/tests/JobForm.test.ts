@@ -89,6 +89,33 @@ describe("JobForm (submit)", () => {
     expect(ondone).not.toHaveBeenCalled();
   });
 
+  it("Ctrl+Enter with an empty command does not call submitJob and shows the message", async () => {
+    render(JobForm, { mode: "submit", onclose: noop, ondone: noopDone });
+
+    await fireEvent.keyDown(window, { key: "Enter", ctrlKey: true });
+
+    expect(
+      await screen.findByText("command, directory and time are required"),
+    ).toBeInTheDocument();
+    expect(api.submitJob).not.toHaveBeenCalled();
+  });
+
+  it("Ctrl+Enter twice while the first submitJob is pending calls it once", async () => {
+    let resolveSubmit!: (job: JobView) => void;
+    vi.mocked(api.submitJob).mockImplementation(
+      () => new Promise((resolve) => { resolveSubmit = resolve; }),
+    );
+    render(JobForm, { mode: "submit", onclose: noop, ondone: noopDone });
+    await fillRequired();
+
+    await fireEvent.keyDown(window, { key: "Enter", ctrlKey: true });
+    await fireEvent.keyDown(window, { key: "Enter", ctrlKey: true });
+
+    expect(api.submitJob).toHaveBeenCalledTimes(1);
+    resolveSubmit(submittedJob());
+    await waitFor(() => expect(api.submitJob).toHaveBeenCalledTimes(1));
+  });
+
   it("saves the directory to localStorage on success and prefills it next render", async () => {
     vi.mocked(api.submitJob).mockResolvedValue(submittedJob());
     const { unmount } = render(JobForm, { mode: "submit", onclose: noop, ondone: noopDone });
@@ -176,6 +203,18 @@ describe("JobForm (restart)", () => {
     await fireEvent.click(screen.getByRole("button", { name: "Restart" }));
 
     await waitFor(() => expect(api.restartJob).toHaveBeenCalledWith(7, {}));
+  });
+
+  it("shows the API's 409 conflict message and leaves the form open without calling ondone", async () => {
+    const detail = jobDetail({ id: 7, bid: 800, est_runtime: 2700, mode: "whole", retries: 1 });
+    vi.mocked(api.restartJob).mockRejectedValue(new ApiError(409, "job 7 is running"));
+    const ondone = vi.fn();
+    render(JobForm, { mode: "restart", job: detail, onclose: noop, ondone });
+
+    await fireEvent.click(screen.getByRole("button", { name: "Restart" }));
+
+    expect(await screen.findByText("job 7 is running")).toBeInTheDocument();
+    expect(ondone).not.toHaveBeenCalled();
   });
 
   it("shows the command and directory read-only", () => {
