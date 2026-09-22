@@ -31,6 +31,7 @@
 
   let detail = $state<JobDetail | null>(null);
   let notFound = $state(false);
+  let loadError = $state<string | null>(null);
   let headingEl = $state<HTMLElement | null>(null);
   let activeTab = $state<TabKey>("overview");
   let showBid = $state(false);
@@ -43,29 +44,62 @@
     return null;
   });
 
-  async function load(): Promise<void> {
+  function keyFor(forId: number): string {
+    return `${forId}:${live?.state ?? ""}:${live?.attempts ?? ""}`;
+  }
+
+  // Bumped on every load() call so a response that's no longer for the latest request (e.g. a
+  // slow fetch for a job we've since navigated away from) is ignored instead of overwriting
+  // the current job's detail.
+  let requestId = 0;
+  // Tracks the id/state/attempts key of the last *successful* (or 404'd) load, so a snapshot
+  // tick that didn't change anything meaningful skips refetching — but a transient error leaves
+  // this stale, so the next tick retries.
+  let committedKey = "";
+  let lastId: number | null = null;
+
+  async function load(forId: number, key: string): Promise<void> {
+    const myRequest = ++requestId;
     try {
-      const d = await getJob(id);
+      const d = await getJob(forId);
+      if (myRequest !== requestId) return;
       detail = d;
       notFound = false;
+      loadError = null;
+      committedKey = key;
     } catch (e) {
+      if (myRequest !== requestId) return;
       if (e instanceof ApiError && e.status === 404) {
         notFound = true;
         detail = null;
+        loadError = null;
+        committedKey = key;
       } else {
-        throw e;
+        // Leave committedKey stale (don't commit it) so the next snapshot tick retries.
+        loadError = e instanceof ApiError ? e.message : e instanceof Error ? e.message : String(e);
       }
     }
   }
 
   // Reload attempts whenever the job first mounts or its state/attempt count changes, without
-  // refetching on every snapshot tick (e.g. just a usage number changing).
-  let lastKey = "";
+  // refetching on every snapshot tick (e.g. just a usage number changing) — unless the last
+  // load failed with something other than a 404, in which case committedKey stays stale and
+  // this retries once per tick until it succeeds.
   $effect(() => {
-    const key = `${id}:${live?.state ?? ""}:${live?.attempts ?? ""}`;
-    if (key === lastKey) return;
-    lastKey = key;
-    void load();
+    void now; // read so this effect (and therefore a retry check) reruns once per snapshot tick
+    if (id !== lastId) {
+      lastId = id;
+      detail = null;
+      notFound = false;
+      loadError = null;
+      committedKey = "";
+      showBid = false;
+      busy = null;
+      actionError = null;
+    }
+    const key = keyFor(id);
+    if (key === committedKey) return;
+    void load(id, key);
   });
 
   $effect(() => {
@@ -76,7 +110,7 @@
     if (e.key === "Escape" && !showBid) onclose();
   }
 
-  const mascotImg = $derived(mascot.pick(notFound ? "hmm" : "thinking"));
+  const mascotImg = $derived(mascot.pick(notFound || loadError ? "hmm" : "thinking"));
 
   async function doCancel(): Promise<void> {
     if (!jobView) return;
@@ -131,8 +165,6 @@
     const to = job.end_time !== null ? `${Math.round(job.end_time * 1000)}` : "now";
     return `${url}?from=${from}&to=${to}`;
   }
-
-  const showAttempts = $derived(detail !== null && (detail.attempts.length > 1 || detail.preemptions > 0));
 </script>
 
 <svelte:window onkeydown={onkeydown} />
@@ -146,7 +178,9 @@
     <img src={mascotImg} alt="" width="72" height="72" />
   {:else if jobView === null}
     <div class="dhead">
-      <h2 id="jobpanel-heading" tabindex="-1" bind:this={headingEl}>Loading…</h2>
+      <h2 id="jobpanel-heading" tabindex="-1" bind:this={headingEl}>
+        {loadError ? `Couldn't load job #${id}: ${loadError}` : "Loading…"}
+      </h2>
       <button class="x" type="button" onclick={onclose} aria-label="Close">✕</button>
     </div>
     <img src={mascotImg} alt="" width="72" height="72" />
@@ -190,11 +224,12 @@
       {/if}
     </div>
     {#if actionError}<div class="acterr">{actionError}</div>{/if}
+    {#if loadError}<div class="acterr">Couldn't load job #{id}: {loadError}</div>{/if}
 
     <section data-tab="overview">
       <ReasonBox job={jobView} {detail} />
       <Facts job={jobView} {detail} {now} />
-      {#if showAttempts && detail}
+      {#if detail}
         <AttemptsBar {detail} {now} />
       {/if}
     </section>
@@ -220,5 +255,12 @@
 </div>
 
 {#if showBid && jobView}
-  <BidDialog bid={jobView.bid} onsave={saveBid} onclose={() => (showBid = false)} />
+  <BidDialog
+    bid={jobView.bid}
+    onsave={saveBid}
+    onclose={() => {
+      showBid = false;
+      actionError = null;
+    }}
+  />
 {/if}

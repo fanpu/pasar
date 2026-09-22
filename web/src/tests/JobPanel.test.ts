@@ -167,4 +167,54 @@ describe("JobPanel", () => {
 
     expect(await screen.findByText("lost (6m unsaved work + 5m restart)")).toBeInTheDocument();
   });
+
+  it("ignores a stale getJob response for a job the panel has since navigated away from", async () => {
+    let resolveJob1!: (d: JobDetail) => void;
+    const job1Promise = new Promise<JobDetail>((resolve) => {
+      resolveJob1 = resolve;
+    });
+    const job1Detail = baseDetail({
+      id: 1, name: "job-one", state: "failed", reason: "gpu_oom", summary: "oom1",
+      attempts: [attempt({ job_id: 1, log_tail: "job1-log-line" })],
+    });
+    const job2Detail = baseDetail({
+      id: 2, name: "job-two", state: "failed", reason: "gpu_oom", summary: "oom2",
+      attempts: [attempt({ job_id: 2, log_tail: "job2-log-line" })],
+    });
+    vi.mocked(api.getJob).mockImplementation((requestedId: number) =>
+      requestedId === 1 ? job1Promise : Promise.resolve(job2Detail),
+    );
+
+    const liveJob1 = job({ id: 1, name: "job-one", state: "failed", reason: "gpu_oom", summary: "oom1" });
+    const liveJob2 = job({ id: 2, name: "job-two", state: "failed", reason: "gpu_oom", summary: "oom2" });
+    const { rerender, container } = render(JobPanel, {
+      id: 1, live: liveJob1, now: NOW, grafanaUrl: null, onclose: noop, onrestartwith: noopRestartWith,
+    });
+
+    // Navigate to job 2 before job 1's getJob call resolves.
+    await rerender({ id: 2, live: liveJob2 });
+    await waitFor(() => expect(container.querySelector(".tail")?.textContent).toContain("job2-log-line"));
+
+    // Job 1's stale response arrives late; it must not clobber job 2's detail.
+    resolveJob1(job1Detail);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(container.querySelector(".tail")?.textContent).toContain("job2-log-line");
+    expect(container.querySelector(".tail")?.textContent).not.toContain("job1-log-line");
+  });
+
+  it("shows an inline error (and retries on the next snapshot tick) when getJob fails for a reason other than 404", async () => {
+    vi.mocked(api.getJob).mockRejectedValueOnce(new ApiError(500, "boom"));
+    vi.mocked(api.getJob).mockResolvedValueOnce(baseDetail({ state: "queued" }));
+    const { rerender } = render(JobPanel, {
+      id: 42, live: null, now: NOW, grafanaUrl: null, onclose: noop, onrestartwith: noopRestartWith,
+    });
+
+    expect(await screen.findByText("Couldn't load job #42: boom")).toBeInTheDocument();
+
+    // A later snapshot tick (a fresh `now`) should retry the load and succeed.
+    await rerender({ now: NOW + 2 });
+
+    expect(await screen.findByText("llama-sft")).toBeInTheDocument();
+  });
 });
