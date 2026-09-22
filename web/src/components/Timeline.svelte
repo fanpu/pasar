@@ -52,14 +52,6 @@
   function panBy(seconds: number) {
     setWindow({ t0: t0 + seconds, t1: t1 + seconds });
   }
-  function zoomBy(factor: number) {
-    if (following) {
-      const w = clampWindow(0, span * factor, Infinity);
-      span = w.t1 - w.t0;
-    } else {
-      setWindow(zoomAround(win, (t0 + t1) / 2, factor, now));
-    }
-  }
   function showPreset(s: number) {
     span = s;
     pinnedT0 = null;
@@ -263,11 +255,6 @@
       {#each PRESETS as p (p.label)}
         <button class="chip" class:on={following && span === p.span} aria-pressed={following && span === p.span} onclick={() => showPreset(p.span)}>{p.label}</button>
       {/each}
-      <span class="gap"></span>
-      <button class="chip" aria-label="Earlier" onclick={() => panBy(-(t1 - t0) / 2)}>‹</button>
-      <button class="chip" aria-label="Later" onclick={() => panBy((t1 - t0) / 2)}>›</button>
-      <button class="chip" aria-label="Zoom out" onclick={() => zoomBy(2)}>−</button>
-      <button class="chip" aria-label="Zoom in" onclick={() => zoomBy(0.5)}>+</button>
       {#if !following || span !== DEFAULT_SPAN}
         <button class="chip now" onclick={reset}>now</button>
       {/if}
@@ -396,7 +383,6 @@
 
   h3 { flex-wrap: wrap; }
   .tlnav { margin-left: auto; display: inline-flex; align-items: center; gap: 4px; flex-wrap: wrap; }
-  .tlnav .gap { width: 6px; }
   .chip { border: 1.5px solid var(--line-2); background: var(--card); color: var(--ink-2); border-radius: 99px; min-width: 30px; padding: 3px 10px; font-size: 12px; font-weight: 800; line-height: 1.2; }
   .chip:hover { color: var(--ink); border-color: var(--accent); }
   .chip.on { background: var(--accent); border-color: var(--accent); color: #fff; }

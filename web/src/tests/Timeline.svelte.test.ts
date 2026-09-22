@@ -51,12 +51,12 @@ describe("Timeline", () => {
     expect(onopen).toHaveBeenCalledWith(42);
   });
 
-  it("pans back with Earlier, shows the range, and returns with now", async () => {
+  it("pans back, shows the range, and returns with now", async () => {
     render(Timeline, { jobs: [], pool: 105 * GIB, now: NOW, onopen: () => {} });
     expect(screen.queryByRole("button", { name: "now" })).toBeNull();
-    await fireEvent.click(screen.getByRole("button", { name: "Earlier" }));
-    // live 12:56 – 18:26, moved back 2h45
-    expect(screen.getByText(/10:11 – 15:41/)).toBeInTheDocument();
+    await fireEvent.keyDown(window, { key: "a" });
+    await fireEvent.keyUp(window, { key: "a" });
+    expect(screen.getByText(/12:47 – 18:17/)).toBeInTheDocument();
     expect(screen.getByText("Nothing ran in this window.")).toBeInTheDocument();
     await fireEvent.click(screen.getByRole("button", { name: "now" }));
     expect(screen.getByText("memory over time")).toBeInTheDocument();
@@ -86,14 +86,6 @@ describe("Timeline", () => {
     await waitFor(() => expect(api.getJobsBetween).toHaveBeenCalled());
     expect(screen.getByRole("button", { name: /#9 fresh/ })).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: /stale/ })).toBeNull();
-  });
-
-  it("zoom buttons change the window length", async () => {
-    render(Timeline, { jobs: [], pool: 105 * GIB, now: NOW, onopen: () => {} });
-    await fireEvent.click(screen.getByRole("button", { name: "Zoom out" }));
-    await fireEvent.click(screen.getByRole("button", { name: "Earlier" }));
-    // 11h live window reaches 4h ahead (07:26 – 18:26), moved back 5h30
-    expect(screen.getByText(/01:56 – 12:56/)).toBeInTheDocument();
   });
 
   it("A and D move the window; W/S zoom", async () => {
