@@ -6,13 +6,20 @@ import time
 from pathlib import Path
 
 from fastapi import FastAPI, HTTPException, Query, Request
-from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, StreamingResponse
+from fastapi.responses import (
+    FileResponse,
+    HTMLResponse,
+    JSONResponse,
+    PlainTextResponse,
+    StreamingResponse,
+)
 from pydantic import BaseModel, Field, field_validator
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 
 from pasar import __version__
 from pasar.config import Config
 from pasar.daemon import UNSET, Conflict, Daemon, NotFound
+from pasar.guide import load_guide
 from pasar.mascot import manifest, resolve, resolve_builtin
 from pasar.metrics import Prometheus
 from pasar.models import TERMINAL, JobSpec, State
@@ -316,6 +323,14 @@ def create_app(daemon: Daemon, *, prom: Prometheus | None = None, wake=lambda: N
         if path is None:
             raise HTTPException(404)
         return FileResponse(path, headers={"Cache-Control": "max-age=300"})
+
+    @app.get("/llms.txt")
+    async def llms_txt():
+        return PlainTextResponse(load_guide())
+
+    @app.get("/agents.md")
+    async def agents_md():
+        return PlainTextResponse(load_guide(), media_type="text/markdown")
 
     ui = WEBUI_DIR if webui_dir is None else webui_dir
     assets = (ui / "assets").resolve()

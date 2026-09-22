@@ -41,6 +41,12 @@ needed once, to build the web UI).
 See [docs/jobs.md](docs/jobs.md) for writing jobs that checkpoint and resume, and
 [docs/design.md](docs/design.md) for how scheduling works.
 
+## For AI agents
+
+Tell your agent to run `pasar guide`, or fetch `http://127.0.0.1:8750/llms.txt` — it's a
+self-contained guide to connecting, submitting well-formed jobs, checkpointing, monitoring, and
+etiquette on a shared GPU, matching the version installed on this machine.
+
 ## Configure
 
 `~/.config/pasar/config.toml` (all optional):
