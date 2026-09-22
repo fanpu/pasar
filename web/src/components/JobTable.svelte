@@ -65,8 +65,18 @@
   }
 
   function timePct(job: JobView): number {
-    if (job.est_runtime <= 0) return 0;
-    return Math.min(100, (job.run_time / job.est_runtime) * 100);
+    const total = expected(job);
+    if (total <= 0) return 0;
+    return Math.min(100, (job.run_time / total) * 100);
+  }
+
+  /** Expected total run time: projected from progress reports when the job sends them. */
+  function expected(job: JobView): number {
+    return job.eta_source === "progress" ? job.expected_runtime : job.est_runtime;
+  }
+
+  function expectedTitle(job: JobView): string | undefined {
+    return job.eta_source === "progress" ? `from progress reports (estimated ${dur(job.est_runtime)})` : undefined;
   }
 
   function queuedStart(job: JobView): string {
@@ -87,7 +97,7 @@
   }
 
   function cardMeta(job: JobView): string {
-    if (isLive(job)) return `${dur(job.run_time)} of ~${dur(job.est_runtime)} · ${gib(job.usage ?? 0)}/${gib(job.limit)} GiB`;
+    if (isLive(job)) return `${dur(job.run_time)} of ~${dur(expected(job))} · ${gib(job.usage ?? 0)}/${gib(job.limit)} GiB`;
     if (job.state === "queued") return `${queuedStart(job)} · ${job.mode === "whole" ? "whole GPU" : fmtGib(job.limit)}`;
     return `ran ${dur(job.run_time)} · ended ${hm(job.end_time ?? now)}`;
   }
@@ -150,7 +160,7 @@
               <td>
                 {#if isLive(job)}
                   <div class="meter">
-                    <div class="small">{dur(job.run_time)} <span class="faint">/ ~{dur(job.est_runtime)}</span></div>
+                    <div class="small">{dur(job.run_time)} <span class="faint" title={expectedTitle(job)}>/ ~{dur(expected(job))}</span></div>
                     <div class="bar"><i style="width: {timePct(job)}%; background: linear-gradient(90deg, #a9d8f5, #cdbcf5)"></i></div>
                   </div>
                 {:else if job.state === "queued"}

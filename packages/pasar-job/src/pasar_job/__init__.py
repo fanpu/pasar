@@ -70,8 +70,11 @@ def resumed(step: int | None = None) -> None:
 _RESERVED = {"event", "step", "total_steps"}
 
 
-def progress(step: int, total_steps: int | None = None, **metrics: float) -> None:
-    """Report progress, optionally with numeric metrics (e.g. loss=1.84) the UI can chart."""
+def progress(step: int, total_steps: int, **metrics: float) -> None:
+    """Report progress out of `total_steps` (pasar projects the finish time from it), optionally
+    with numeric metrics (e.g. loss=1.84) the UI can chart."""
+    if isinstance(total_steps, bool) or not isinstance(total_steps, int) or total_steps <= 0:
+        raise ValueError(f"total_steps must be a positive integer, got {total_steps!r}")
     for name, value in metrics.items():
         if name in _RESERVED:
             raise ValueError(f"reserved metric name: {name}")

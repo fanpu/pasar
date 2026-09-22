@@ -194,6 +194,17 @@ class Store:
         rows = self._q(sql + " ORDER BY id DESC LIMIT 1", args)
         return self._event(rows[0]) if rows else None
 
+    def first_event(self, job_id: int, kind: str, attempt: int) -> dict | None:
+        rows = self._q("SELECT * FROM events WHERE job_id = ? AND kind = ? AND attempt = ? "
+                       "ORDER BY id LIMIT 1", (job_id, kind, attempt))
+        return self._event(rows[0]) if rows else None
+
+    def last_event_before(self, job_id: int, kind: str, attempt: int) -> dict | None:
+        """The latest `kind` event from an attempt earlier than `attempt`."""
+        rows = self._q("SELECT * FROM events WHERE job_id = ? AND kind = ? AND attempt < ? "
+                       "ORDER BY id DESC LIMIT 1", (job_id, kind, attempt))
+        return self._event(rows[0]) if rows else None
+
     def has_events(self, job_id: int) -> bool:
         return bool(self._q("SELECT 1 FROM events WHERE job_id = ? LIMIT 1", (job_id,)))
 

@@ -76,4 +76,15 @@ def test_progress_metrics(events_file):
                                  {"loss": float("inf")}, {"lr": True}])
 def test_progress_rejects_bad_metrics(events_file, bad):
     with pytest.raises(ValueError):
-        pasar_job.progress(1, **bad)
+        pasar_job.progress(1, 10, **bad)
+
+
+@pytest.mark.parametrize("total", [None, 0, -5, 2.5, True, "100"])
+def test_progress_requires_positive_total_steps(events_file, total):
+    with pytest.raises(ValueError):
+        pasar_job.progress(1, total)
+
+
+def test_progress_total_steps_is_required(events_file):
+    with pytest.raises(TypeError):
+        pasar_job.progress(1)  # type: ignore[call-arg]

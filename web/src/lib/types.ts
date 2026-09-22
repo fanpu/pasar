@@ -11,6 +11,8 @@ export interface JobView {
   note: string; tags: string[]; submitter: string; git_commit: string | null;
   mode: "whole" | "shared"; mem_request: number | null; limit: number; usage: number | null;
   over_limit: boolean; peak: number; est_runtime: number; run_time: number; remaining: number;
+  /** run_time + remaining; from progress reports when `eta_source` is "progress". */
+  expected_runtime: number; eta_source: "progress" | "estimate";
   preemptible: boolean; grace: number; retries: number; retries_used: number;
   submit_time: number; queue_time: number; start_time: number | null; end_time: number | null;
   attempts: number; preemptions: number;

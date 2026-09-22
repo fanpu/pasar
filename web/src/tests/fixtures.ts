@@ -30,6 +30,8 @@ export function job(overrides: Partial<JobView> = {}): JobView {
     est_runtime: 0,
     run_time: 0,
     remaining: 0,
+    expected_runtime: 0,
+    eta_source: "estimate",
     preemptible: true,
     grace: 0,
     retries: 0,

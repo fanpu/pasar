@@ -192,3 +192,17 @@ def test_call_passes_through_plain_string_detail():
     with pytest.raises(ApiError) as exc_info:
         call(client, "GET", "/x")
     assert str(exc_info.value) == "no job 42"
+
+
+def test_ls_and_show_mark_progress_based_times(client, capsys, daemon, clock, tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    run(client, capsys, "submit", "--time", "10m", "--", "python", "a.py")
+    daemon.tick()
+    clock.advance(720)
+    (daemon.job_dir(1) / "events.jsonl").write_text('{"event":"progress","step":1000,"total_steps":5000}\n')
+    daemon.tick()
+    _, out = run(client, capsys, "ls")
+    assert "12m / ~1h00m*" in out.out
+    assert "* projected from the job's progress reports" in out.out
+    _, out = run(client, capsys, "show", "1")
+    assert "12m of ~1h00m from progress (estimated 10m)" in out.out

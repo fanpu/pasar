@@ -351,7 +351,7 @@
 {#if tip}
   <div class="tip" style="left: {tip.x}px; top: {tip.y}px">
     <b>#{tip.job.id} {tip.job.name}</b><br />
-    <span class="dim">{kindLabel(tip.kind)} · {when(tip.start, now)}–{when(tip.end, now)}</span><br />
+    <span class="dim">{kindLabel(tip.kind)} · {when(tip.start, now)}–{when(tip.end, now)}{tip.kind === "run" && tip.job.eta_source === "progress" ? " (from progress)" : ""}</span><br />
     ★ {tip.job.bid} · {tip.job.mode === "whole" ? "whole GPU" : fmtGib(tip.job.limit)}
   </div>
 {/if}

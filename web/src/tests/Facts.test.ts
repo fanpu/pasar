@@ -32,4 +32,10 @@ describe("Facts", () => {
     expect(screen.getByText("attempt 3")).toBeInTheDocument();
     expect(screen.getByText("restarted")).toBeInTheDocument();
   });
+
+  it("shows the expected run time from progress next to the estimate", () => {
+    const j = job({ state: "running", attempts: 1, run_time: 720, est_runtime: 600, expected_runtime: 3600, eta_source: "progress" });
+    render(Facts, { job: j, detail: jobDetail({ ...j, attempts: [attempt({ n: 1 })] }), now: NOW });
+    expect(screen.getByText("of ~1h00 from progress (est. 10m)")).toBeInTheDocument();
+  });
 });

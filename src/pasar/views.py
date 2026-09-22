@@ -11,6 +11,53 @@ def run_time(attempts: list[Attempt], now: float) -> float:
     return sum((a.end_time if a.end_time is not None else now) - a.start_time for a in attempts)
 
 
+def _number(v) -> bool:
+    return isinstance(v, (int, float)) and not isinstance(v, bool)
+
+
+def resume_step(store, job_id: int, att: Attempt) -> float | None:
+    """The step an attempt started from: 0 for the first attempt; later ones resume from the step
+    they reported in `resumed`, else the last checkpoint of an earlier attempt, else (unknown)
+    their own first progress report."""
+    if att.n == 1:
+        return 0
+    for event in (store.last_event(job_id, "resumed", attempt=att.n),
+                  store.last_event_before(job_id, "checkpoint", att.n),
+                  store.first_event(job_id, "progress", att.n)):
+        if event and _number(event["step"]):
+            return event["step"]
+    return None
+
+
+def progress_remaining(store, job_id: int, atts: list[Attempt], now: float) -> float | None:
+    """Seconds left for a running job, from its progress reports: the attempt so far took
+    `elapsed` for `done` steps, so the rest takes `elapsed × (total − step) ÷ done`, counted from
+    the latest report. Startup is amortised into the rate. None when the job hasn't reported
+    `total_steps` or any steps yet this attempt (callers then fall back to `--time`)."""
+    if not atts or atts[-1].end_time is not None:
+        return None
+    att = atts[-1]
+    p = store.last_event(job_id, "progress", attempt=att.n)
+    if p is None:
+        return None
+    step, total = p["payload"].get("step"), p["payload"].get("total_steps")
+    base = resume_step(store, job_id, att)
+    if not (_number(step) and _number(total) and total > 0) or base is None:
+        return None
+    done, elapsed = step - base, p["ts"] - att.start_time
+    if done <= 0 or elapsed <= 0:
+        return None
+    return max(0.0, total - step) * elapsed / done - (now - p["ts"])
+
+
+def remaining_time(store, job, atts: list[Attempt], now: float) -> tuple[float, str]:
+    """Seconds left and where that figure comes from: `"progress"` or the `"estimate"`."""
+    left = progress_remaining(store, job.id, atts, now)
+    if left is not None:
+        return left, "progress"
+    return job.spec.est_runtime - run_time(atts, now), "estimate"
+
+
 def lost_time(attempts: list[Attempt]) -> dict:
     lost = {"preemption": 0.0, "failure": 0.0}
     known = True
@@ -32,7 +79,7 @@ def schedule_projection(daemon, now: float) -> dict[int, list[tuple[float, float
     remaining, queue_times = {}, {}
     for job_id in [q.job_id for q in queued] + [r.job_id for r in running]:
         job = daemon.job(job_id)
-        remaining[job_id] = job.spec.est_runtime - run_time(daemon.store.attempts(job_id), now)
+        remaining[job_id], _ = remaining_time(daemon.store, job, daemon.store.attempts(job_id), now)
         queue_times[job_id] = job.queue_time
     return project(queued, running, remaining, queue_times, daemon.pool - daemon.external, now)
 
@@ -49,6 +96,7 @@ def job_view(daemon, job: Job, now: float, projection: dict) -> dict:
     limit = daemon.limit(job)
     usage = daemon.usage.get(job.id)
     ran = run_time(atts, now)
+    left, eta_source = remaining_time(daemon.store, job, atts, now)
     progress = daemon.store.last_event(job.id, "progress")
     ckpt = daemon.store.last_event(job.id, "checkpoint")
     active = job.state in ACTIVE
@@ -74,7 +122,9 @@ def job_view(daemon, job: Job, now: float, projection: dict) -> dict:
         "peak": max((a.peak_mem for a in atts), default=0),
         "est_runtime": job.spec.est_runtime,
         "run_time": ran,
-        "remaining": max(0.0, job.spec.est_runtime - ran),
+        "remaining": max(0.0, left),
+        "expected_runtime": ran + max(0.0, left),
+        "eta_source": eta_source,
         "preemptible": job.spec.preemptible,
         "grace": job.spec.grace,
         "retries": job.spec.retries,

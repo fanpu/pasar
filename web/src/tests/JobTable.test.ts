@@ -182,4 +182,11 @@ describe("JobTable", () => {
     // the component's markup still renders the double space per the design spec.
     expect(screen.getByText("No jobs yet. Try pasar submit --time 10m -- python train.py")).toBeInTheDocument();
   });
+
+  it("shows a running job's expected time from progress instead of its estimate", () => {
+    const j = job({ id: 3, state: "running", run_time: 720, est_runtime: 600, expected_runtime: 3600, eta_source: "progress" });
+    render(JobTable, { jobs: [j], pool: 100, now: NOW, selected: null, onopen: () => {} });
+    const cell = screen.getByTitle("from progress reports (estimated 10m)");
+    expect(cell).toHaveTextContent("/ ~1h00");
+  });
 });

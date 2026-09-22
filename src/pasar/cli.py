@@ -87,9 +87,15 @@ def _mem(job: dict) -> str:
     return fmt_gib(job["mem_request"])
 
 
+def _expected(job: dict) -> str:
+    """Expected total run time, e.g. `~48m`; `~48m*` when projected from progress reports."""
+    total = job.get("expected_runtime", job["est_runtime"])
+    return f"~{fmt_duration(total)}" + ("*" if job.get("eta_source") == "progress" else "")
+
+
 def _when(job: dict) -> str:
     if job["state"] in ("running", "stopping"):
-        return f"{fmt_duration(job['run_time'])} / ~{fmt_duration(job['est_runtime'])}"
+        return f"{fmt_duration(job['run_time'])} / {_expected(job)}"
     if job["state"] == "queued":
         if job["projected"]:
             return "starts ~" + time.strftime("%H:%M", time.localtime(job["projected"][0][0]))
@@ -114,6 +120,16 @@ def print_table(jobs: list[dict]) -> None:
     widths = [max(len(r[i]) for r in rows) for i in range(len(rows[0]))]
     for r in rows:
         print("  ".join(c.ljust(w) for c, w in zip(r, widths)).rstrip())
+    if any(r[5].endswith("*") for r in rows[1:]):
+        print("* projected from the job's progress reports")
+
+
+def _time_line(job: dict) -> str:
+    ran = fmt_duration(job["run_time"])
+    if job.get("eta_source") == "progress" and job["state"] in ("running", "stopping"):
+        return (f"{ran} of ~{fmt_duration(job['expected_runtime'])} from progress"
+                f" (estimated {fmt_duration(job['est_runtime'])})")
+    return f"{ran} of ~{fmt_duration(job['est_runtime'])}"
 
 
 def print_job(job: dict) -> None:
@@ -121,7 +137,7 @@ def print_job(job: dict) -> None:
     fields = [
         ("job", f"#{job['id']} {job['name']}"), ("state", _state(job)),
         ("summary", job["summary"]), ("bid", job["bid"]), ("memory", _mem(job)),
-        ("time", f"{fmt_duration(job['run_time'])} of ~{fmt_duration(job['est_runtime'])}"),
+        ("time", _time_line(job)),
         ("attempts", len(attempts) if isinstance(attempts, list) else attempts),
         ("command", job["command"]), ("cwd", job["cwd"]),
         ("note", job["note"]), ("by", job["submitter"]), ("git", job["git_commit"] or ""),

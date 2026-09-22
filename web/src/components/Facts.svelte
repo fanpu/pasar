@@ -67,7 +67,13 @@
       const [lv, ls] = lostFact(job);
       const [av, as] = attemptFact(job, detail);
       return [
-        { l: "elapsed", v: dur(job.run_time), s: `of ~${dur(job.est_runtime)} estimated` },
+        {
+          l: "elapsed",
+          v: dur(job.run_time),
+          s: job.eta_source === "progress"
+            ? `of ~${dur(job.expected_runtime)} from progress (est. ${dur(job.est_runtime)})`
+            : `of ~${dur(job.est_runtime)} estimated`,
+        },
         { l: "progress", v: pv, s: ps },
         { l: "last checkpoint", v: cv, s: cs },
         { l: "memory", v: fmtGib(job.usage), s: `limit ${fmtGib(job.limit)} · peak ${fmtGib(job.peak)}` },
