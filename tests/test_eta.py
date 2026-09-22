@@ -3,7 +3,7 @@ import json
 from fastapi.testclient import TestClient
 
 from pasar.api import create_app
-from pasar.views import progress_remaining
+from pasar.eta import progress_remaining
 
 
 def emit(daemon, job_id, **event):
