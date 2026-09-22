@@ -1,3 +1,4 @@
+import xml.etree.ElementTree as ET
 from pathlib import Path
 
 from pasar import mascot
@@ -40,3 +41,16 @@ def test_resolve_rejects_traversal_and_unknown(tmp_path):
                 "happy.png/..", ""]:
         assert mascot.resolve(tmp_path, bad) is None
     assert mascot.resolve(tmp_path, "done.png") is None  # valid name, no file
+
+
+def test_builtin_art_complete_and_safe():
+    for state in mascot.STATES:
+        path = mascot.BUILTIN_DIR / f"{state}.svg"
+        text = path.read_text()
+        assert len(text.encode()) < 6 * 1024, state
+        root = ET.fromstring(text)
+        assert root.tag.endswith("svg") and root.get("viewBox") == "0 0 128 128", state
+        assert root.get("width") is None and root.get("height") is None, state
+        lowered = text.lower()
+        assert "<script" not in lowered and "http" not in lowered.replace("http://www.w3.org", ""), state
+        assert "onload" not in lowered and "onclick" not in lowered, state
