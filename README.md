@@ -39,7 +39,7 @@ needed once, to build the web UI).
 
 ## Use
 
-    pasar submit --time 2h --note "lr sweep point 3" -- .venv/bin/python train.py
+    pasar submit --time 2h --tag lr-sweep --note "lr sweep point 3" -- .venv/bin/python train.py
     pasar ls
     pasar logs -f 42
     pasar bid 42 1500                # go sooner

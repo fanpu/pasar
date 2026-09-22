@@ -35,7 +35,7 @@ in this guide requires it.
 The `--` is required: everything after it is passed to the shell verbatim, including its own
 flags. Give the full environment invocation — pasar does not activate anything for you:
 
-    pasar submit --time 2h --note "lr sweep point 3" \
+    pasar submit --time 2h --tag lr-sweep --note "lr sweep point 3" \
       -- .venv/bin/python train.py --lr 3e-5
 
 Options:
@@ -51,7 +51,7 @@ Options:
 | `--retries N` | Auto-retry after a failure (non-zero exit, signal, `oom`, `gpu_oom`, `gpu_xid`). Cancellations are never retried; preemptions don't consume a retry. | `0` |
 | `--name NAME` | Short display name. | derived from the command |
 | `--note TEXT` | Say why this job matters — shown in the UI and `pasar show`. | empty |
-| `--tag TAG` | Repeatable. Free-form label. | none |
+| `--tag TAG` | Repeatable. **Always give at least one:** the job's category, e.g. the sweep or experiment it belongs to (`lr-sweep`, `ablation-heads`, `eval`). Jobs sharing a first tag share a colour in the web UI, so people can see at a glance what kind of work is running and queued. | none |
 | `--by WHO` | Identify yourself (e.g. an agent's name) so humans know who to ask. | `$USER` |
 | `--cwd DIR` | Working directory the command runs in. | current directory |
 | `--no-env` | Don't capture your current environment for the job. | environment is captured |
@@ -286,5 +286,7 @@ Reading state is just a `GET`:
   "Submitting a job"); sharing a GPU that a job already keeps busy slows every job on it.
 - `pasar cancel` anything you no longer need; a queued or running job you've abandoned blocks
   everyone behind it.
+- Tag every job with its category (`--tag`, first tag = the sweep or experiment), so related jobs
+  group together in the UI.
 - Use `--note` to say why the job matters, and `--by` to identify yourself — someone (human or
   agent) may need to know who to ask before touching your job.
