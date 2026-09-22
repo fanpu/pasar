@@ -344,10 +344,6 @@ def create_app(daemon: Daemon, *, prom: Prometheus | None = None, wake=lambda: N
     async def llms_txt():
         return PlainTextResponse(load_guide())
 
-    @app.get("/agents.md")
-    async def agents_md():
-        return PlainTextResponse(load_guide(), media_type="text/markdown")
-
     ui = WEBUI_DIR if webui_dir is None else webui_dir
     assets = (ui / "assets").resolve()
 

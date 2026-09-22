@@ -271,7 +271,7 @@ REST under `/api`, JSON in and out:
 - `GET /api/gpu` (power, temperature, utilisation time series from Prometheus, for the dashboard)
 - `GET /api/mascot` (a manifest mapping each state to the URL(s) to use for it: custom images from `mascot_dir` if any exist for that state, else the built-in one, else none), `GET /mascot/<file>` (serves a custom image from `mascot_dir` only, 404 otherwise), `GET /mascot/builtin/<file>` (serves a built-in image only)
 - `GET /api/stream`: a single SSE stream of state changes that keeps the UI live
-- `GET /llms.txt` (and the identical `GET /agents.md`): the same agent guide as `pasar guide`, as plain text
+- `GET /llms.txt`: the same agent guide as `pasar guide`, as plain text
 
 Job views (in `GET /api/jobs`, `GET /api/jobs/{id}` and the `stream` SSE payload) carry a `spans` list, one `[start_time, end_time, end_kind]` triple per attempt, so the UI can draw each attempt's timeline bar without a separate request.
 

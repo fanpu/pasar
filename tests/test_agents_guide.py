@@ -49,13 +49,6 @@ def test_llms_txt_returns_the_same_guide_text(daemon):
     assert r.text == load_guide()
 
 
-def test_agents_md_alias_returns_the_same_guide_text(daemon):
-    client = TestClient(create_app(daemon, allowed_hosts=["testserver"]))
-    r = client.get("/agents.md")
-    assert r.status_code == 200
-    assert r.text == load_guide()
-
-
 def test_llms_txt_is_not_swallowed_by_the_spa_catch_all(daemon):
     # If /llms.txt were registered after the `/{path:path}` SPA route, it would 404 or return
     # the unbuilt-webui placeholder instead of the guide.
