@@ -57,7 +57,7 @@ def test_usage_history_is_bounded_and_resets_per_attempt(daemon, executor, probe
 
     executor.exit("pasar-job-1-1", code=1)
     daemon.clock.advance(2)
-    daemon.tick()  # fails, requeues, relaunches (retries default 0 -> stays failed unless retried)
+    daemon.tick()  # fails; retries default 0, so it stays failed until an explicit restart
     assert daemon.job(1).state == State.FAILED
 
     # Restart so a second attempt launches and history restarts.
@@ -88,10 +88,24 @@ def test_spa_fallback_and_assets(daemon, tmp_path):
     assert r.status_code == 404 and r.headers["content-type"].startswith("application/json")
 
 
+def test_assets_traversal_is_404(daemon, tmp_path):
+    ui = make_webui(tmp_path)
+    outside = tmp_path / "secret.txt"
+    outside.write_text("nope")
+    link = ui / "assets" / "escape"
+    link.symlink_to(outside)
+    c = TestClient(create_app(daemon, allowed_hosts=["testserver"], webui_dir=ui))
+    assert c.get("/assets/..%2Findex.html").status_code == 404
+    assert c.get("/assets/%2e%2e/%2e%2e/etc/passwd").status_code == 404
+    assert c.get("/assets/escape").status_code == 404
+
+
 def test_unbuilt_ui_says_how_to_build(daemon, tmp_path):
     c = TestClient(create_app(daemon, allowed_hosts=["testserver"], webui_dir=tmp_path / "none"))
     r = c.get("/")
-    assert r.status_code == 503 and "npm run build" in r.text
+    assert r.status_code == 503
+    assert "npm run build" in r.text
+    assert "uv tool install --force ." in r.text
 
 
 def test_mascot_routes(daemon, tmp_path, monkeypatch):

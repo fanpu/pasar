@@ -184,3 +184,17 @@ def test_housekeeping_removes_old_job_files(daemon, executor, clock, make_spec):
     assert not daemon.job_dir(1).exists()
     assert daemon.job_dir(2).exists()  # still queued
     assert os.path.exists(daemon.data_dir / "pasar.db")
+
+
+def test_housekeeping_prunes_usage_history_of_old_finished_jobs(daemon, executor, clock,
+                                                                  make_spec):
+    daemon.submit(make_spec())
+    daemon.tick()
+    daemon.usage_history[1].append((clock(), 1024))
+    executor.exit("pasar-job-1-1", code=0)
+    daemon.tick()
+    assert 1 in daemon.usage_history
+    clock.advance(2 * 86400)  # past the RECENT window, well short of log_retention_days
+    daemon.housekeep()
+    assert 1 not in daemon.usage_history
+    assert daemon.job_dir(1).exists()  # files aren't touched by this, only the in-memory history

@@ -25,7 +25,9 @@ _MAX_INT = 2**62  # keeps user-supplied numbers well clear of sqlite's signed-64
 
 WEBUI_DIR = Path(__file__).parent / "webui"
 _UNBUILT = ("<!doctype html><meta charset=utf-8><title>pasar</title>"
-            "<p>pasar web UI is not built. Run: <code>cd web && npm ci && npm run build</code></p>")
+            "<p>pasar web UI is not built. In a clone: build it "
+            "(<code>cd web && npm ci && npm run build</code>) and reinstall "
+            "(<code>uv tool install --force .</code>), or run pasard from the clone.</p>")
 
 
 def _bounded(v):

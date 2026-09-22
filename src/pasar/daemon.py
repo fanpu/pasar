@@ -28,6 +28,7 @@ LOG_TAIL_LINES = 50
 ACTIVE = (State.RUNNING, State.STOPPING)
 _BASE_ENV_KEYS = ("PATH", "HOME", "USER", "LANG", "SHELL")
 USAGE_HISTORY = 1800  # samples per job (an hour at the default 2s tick), current attempt only
+RECENT = 86400  # matches api.RECENT: usage_history for jobs finished longer ago than this is dropped
 
 
 class NotFound(Exception):
@@ -426,6 +427,9 @@ class Daemon:
             att = self.store.current_attempt(job.id)
             finished.append(((att.end_time if att and att.end_time else job.queue_time), job.id))
         finished.sort()
+        for ended, job_id in finished:
+            if now - ended >= RECENT:
+                self.usage_history.pop(job_id, None)
         cutoff = now - self.cfg.log_retention_days * 86400
         keep = []
         for ended, job_id in finished:

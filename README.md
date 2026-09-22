@@ -17,9 +17,12 @@ A web UI shows what's running, what's waiting, and why, alongside the command-li
 
 ## Install
 
-Requires Linux with systemd, Python 3.11+, and [uv](https://docs.astral.sh/uv/).
+Requires Linux with systemd, Python 3.11+, [uv](https://docs.astral.sh/uv/), and Node 20+ (only
+needed once, to build the web UI).
 
-    uv tool install git+https://github.com/fanpu/pasar
+    git clone https://github.com/fanpu/pasar
+    cd pasar/web && npm ci && npm run build && cd ..
+    uv tool install --force .
     mkdir -p ~/.config/systemd/user
     curl -o ~/.config/systemd/user/pasard.service \
         https://raw.githubusercontent.com/fanpu/pasar/main/contrib/pasard.service
@@ -49,12 +52,14 @@ See [docs/jobs.md](docs/jobs.md) for writing jobs that checkpoint and resume, an
 
 ## Web UI
 
-Build the static assets that `pasard` serves:
+The web UI is built from a clone as part of [Install](#install) above (`cd web && npm ci && npm
+run build`, then `uv tool install --force .` — hatch bundles the built assets into the installed
+tool). If you skipped it, or change the frontend later, rebuild and reinstall the same way; a
+plain `uv run pasard` from the clone always serves whatever is currently built in `web/`, no
+reinstall needed.
 
-    cd web && npm ci && npm run build
-
-Then open `http://127.0.0.1:8750/` (or one of the extra `bind` addresses from your config; add
-its DNS name to `allowed_hosts` if it isn't localhost).
+Once built, open `http://127.0.0.1:8750/` (or one of the extra `bind` addresses from your config;
+add its DNS name to `allowed_hosts` if it isn't localhost).
 
 For frontend development, run a Vite dev server instead — it hot-reloads and proxies `/api` and
 `/mascot` to a running `pasard`:
