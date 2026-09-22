@@ -13,6 +13,9 @@
   }
   let { jobs, pool, now, onopen }: Props = $props();
 
+  // Unique per component instance so clipPath ids never collide if several Timelines mount.
+  const uid = Math.random().toString(36).slice(2);
+
   // jsdom has no layout, so a measured width of 0 falls back to a sensible default.
   let wrapperWidth = $state(0);
   const width = $derived(wrapperWidth || 800);
@@ -59,7 +62,10 @@
     onopen(job.id);
   }
   function onBlockKeydown(e: KeyboardEvent, job: JobView) {
-    if (e.key === "Enter") open(job);
+    if (e.key === "Enter" || e.key === " " || e.key === "Spacebar") {
+      e.preventDefault(); // stop Space from scrolling the page
+      open(job);
+    }
   }
 </script>
 
@@ -67,7 +73,7 @@
   <h3>Schedule <span class="dim">memory over time · solid = running, dashed = projected from estimates</span></h3>
   <div class="tlwrap" bind:clientWidth={wrapperWidth}>
     {#if isEmpty}
-      <div class="tlempty">
+      <div class="tlempty" style="height: {height}px">
         <img src={mascot.pick("hmm")} alt="" width="64" height="64" />
         <p>Nothing scheduled.</p>
       </div>
@@ -81,7 +87,7 @@
           <line x1={x(t)} x2={x(t)} y1={T} y2={height - B} class="hourline" />
           <text x={x(t)} y={height - 7} text-anchor="middle" class="axislabel">{hm(t)}</text>
         {/each}
-        {#each laidOut as b (`${b.id}:${b.kind}:${b.start}`)}
+        {#each laidOut as b, i (`${b.id}:${b.kind}:${b.start}`)}
           {@const job = jobsById.get(b.id)}
           {#if job}
             {@const X = x(b.start) + 1}
@@ -90,6 +96,7 @@
             {@const h = y(b.lo) - y(b.hi) - 2}
             {@const c = jobColor(job.id)}
             {@const label = w > 60 ? `#${job.id} ${job.name}` : `#${job.id}`}
+            {@const clipId = `tl-clip-${uid}-${job.id}-${b.kind}-${i}`}
             <g
               role="button"
               tabindex="0"
@@ -114,9 +121,12 @@
               {#if b.kind !== "past"}
                 <rect x={X} y={Y} width="4" height={h} rx="2" fill={c} />
               {/if}
-              <text x={X + 11} y={Y + 17} class="blklabel" class:past={b.kind === "past"}>{label}</text>
+              <clipPath id={clipId}>
+                <rect x={X} y={Y} width={Math.max(0, w - 6)} height={h} />
+              </clipPath>
+              <text clip-path="url(#{clipId})" x={X + 11} y={Y + 17} class="blklabel" class:past={b.kind === "past"}>{label}</text>
               {#if h > 34 && w > 80}
-                <text x={X + 11} y={Y + 32} class="blksub">
+                <text clip-path="url(#{clipId})" x={X + 11} y={Y + 32} class="blksub">
                   {b.kind === "proj" ? `~${hm(b.start)}–${hm(b.end)}` : `until ~${hm(b.end)}`} · ★{job.bid}
                 </text>
               {/if}
@@ -159,7 +169,7 @@
   .nowline { stroke: var(--accent); stroke-width: 2; }
   .nowdot { fill: var(--accent); }
 
-  .tlempty { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 8px; height: 220px; color: var(--ink-2); font-weight: 700; }
+  .tlempty { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 8px; color: var(--ink-2); font-weight: 700; }
   .tlempty img { width: 64px; height: 64px; }
   .tlempty p { margin: 0; }
 
@@ -168,8 +178,4 @@
 
   .tip { position: fixed; pointer-events: none; background: #3b3340; color: #fff; border-radius: 12px; padding: 8px 11px; font-size: 12.5px; font-weight: 700; box-shadow: 0 6px 18px rgba(0, 0, 0, 0.18); z-index: 40; line-height: 1.45; }
   .tip .dim { color: #cbbfcb; }
-
-  @media (max-width: 760px) {
-    .tlempty { height: 150px; }
-  }
 </style>
