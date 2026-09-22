@@ -41,17 +41,25 @@ needed once, to build the web UI).
 See [docs/jobs.md](docs/jobs.md) for writing jobs that checkpoint and resume, and
 [docs/design.md](docs/design.md) for how scheduling works.
 
-## For AI agents
+## For AI agents and API users
 
-Tell your agent to run `pasar guide`, or fetch `http://127.0.0.1:8750/llms.txt` — it's a
-self-contained guide to connecting, submitting well-formed jobs, checkpointing, monitoring, and
-etiquette on a shared GPU, matching the version installed on this machine.
+Start with the agent guide, [`src/pasar/agents.md`](src/pasar/agents.md). It is a self-contained
+guide to connecting, submitting well-formed jobs, checkpointing, monitoring, the HTTP API
+(endpoints and request bodies), and etiquette on a shared GPU. The copy that matches the installed
+version is always one command or request away:
+
+    pasar guide                                  # works even when pasard is down
+    curl http://127.0.0.1:8750/llms.txt          # same text, served by pasard
+
+pasard listens on `127.0.0.1:8750`. To reach it from another machine, add an address to `bind`
+and its DNS name to `allowed_hosts` (see [Configure](#configure)), then point the CLI at it with
+`PASAR_URL=http://<host>:8750` or call the HTTP API there directly.
 
 ## Configure
 
 `~/.config/pasar/config.toml` (all optional):
 
-    bind = ["127.0.0.1:8750"]   # extra addresses to bind; 127.0.0.1:8750 is always included
+    bind = ["100.64.0.1:8750"]   # extra addresses (e.g. a Tailscale IP); 127.0.0.1:8750 is always on
     system_reserve = "16G"
     prometheus_url = "http://127.0.0.1:9090"
     allowed_hosts = ["mybox.example.ts.net"]   # extra Host-header names to accept
