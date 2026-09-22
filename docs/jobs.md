@@ -36,8 +36,8 @@ if pasar_job.resuming():
     pasar_job.resumed(start)
 
 for step in range(start, total_steps):
-    train_step()
-    pasar_job.progress(step, total_steps)
+    loss = train_step()
+    pasar_job.progress(step, total_steps, loss=loss)
     if step % 500 == 0:
         save_checkpoint()
         pasar_job.checkpoint(step)
@@ -47,7 +47,8 @@ Without Python, append JSON lines yourself:
 
     echo '{"event": "checkpoint", "step": 1200}' >> "$PASAR_EVENTS"
 
-Events: `checkpoint`, `resumed`, `progress` (`step`, `total_steps`), `note` (`text`).
+Events: `checkpoint`, `resumed`, `progress` (`step`, `total_steps`, plus any numeric metrics like
+`loss` — these are charted in the job panel), `note` (`text`).
 
 ## 5. Estimate memory and time
 

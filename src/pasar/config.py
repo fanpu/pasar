@@ -36,9 +36,12 @@ class Config:
 
     def addresses(self) -> list[str]:
         """Return list of addresses with DEFAULT_ADDRESS first, then bind entries.
-        Duplicates are removed while preserving order."""
-        result = [DEFAULT_ADDRESS]
-        seen = {DEFAULT_ADDRESS}
+        Duplicates are removed while preserving order. The `PASAR_ADDRESS` env var, when set,
+        replaces DEFAULT_ADDRESS as the first entry (lets a throwaway daemon run next to a real
+        pasard on the default port)."""
+        first = os.environ.get("PASAR_ADDRESS") or DEFAULT_ADDRESS
+        result = [first]
+        seen = {first}
         for addr in self.bind:
             if addr not in seen:
                 result.append(addr)

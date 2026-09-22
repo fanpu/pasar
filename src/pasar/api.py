@@ -239,6 +239,11 @@ def create_app(daemon: Daemon, *, prom: Prometheus | None = None, wake=lambda: N
         daemon.job(job_id)
         return daemon.store.metric_summaries(job_id)
 
+    @app.get("/api/jobs/{job_id}/usage")
+    async def job_usage(job_id: int):
+        daemon.job(job_id)
+        return [[t, v] for t, v in daemon.usage_history.get(job_id, ())]
+
     @app.get("/api/jobs/{job_id}/logs")
     async def logs(job_id: int, offset: int = Query(0, ge=0), follow: bool = False):
         daemon.job(job_id)

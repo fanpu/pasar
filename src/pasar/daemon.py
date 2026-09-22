@@ -5,6 +5,7 @@ import logging
 import os
 import shutil
 import time
+from collections import deque
 from dataclasses import replace
 from pathlib import Path
 
@@ -26,6 +27,7 @@ UNSET = object()
 LOG_TAIL_LINES = 50
 ACTIVE = (State.RUNNING, State.STOPPING)
 _BASE_ENV_KEYS = ("PATH", "HOME", "USER", "LANG", "SHELL")
+USAGE_HISTORY = 1800  # samples per job (an hour at the default 2s tick), current attempt only
 
 
 class NotFound(Exception):
@@ -74,6 +76,7 @@ class Daemon:
         self.gpu: dict[int, int] = {}
         self.external = 0
         self.usage: dict[int, int] = {}
+        self.usage_history: dict[int, deque[tuple[float, int]]] = {}
         self.units: dict[int, UnitState] = {}
         self.oom_killed: set[int] = set()
         self.decision = Decision()
@@ -198,7 +201,7 @@ class Daemon:
         now = self.clock()
         self._sample_machine()
         self._poll()
-        self._measure()
+        self._measure(now)
         self._enforce(now)
         self._schedule(now)
         self.changed()
@@ -292,7 +295,7 @@ class Daemon:
         if self.metrics is not None:
             self.metrics.record(job_id, att.n, att.start_time, now)
 
-    def _measure(self) -> None:
+    def _measure(self, now: float) -> None:
         self.usage = {}
         claimed: set[int] = set()
         for job_id, st in self.units.items():
@@ -304,6 +307,7 @@ class Daemon:
             att = self.store.current_attempt(job_id)
             if used > att.peak_mem:
                 self.store.update_attempt(job_id, att.n, peak_mem=used)
+            self.usage_history.setdefault(job_id, deque(maxlen=USAGE_HISTORY)).append((now, used))
         self.external = sum(v for pid, v in self.gpu.items() if pid not in claimed)
 
     def _enforce(self, now: float) -> None:
@@ -402,6 +406,7 @@ class Daemon:
             self._fail_launch(job, n, unit, now, str(e))
             return
         self.store.insert_attempt(Attempt(job.id, n, unit, now))
+        self.usage_history[job.id] = deque(maxlen=USAGE_HISTORY)
         self.store.update_job(job.id, state=State.RUNNING, reason=None, summary="")
 
     # ---- startup and upkeep

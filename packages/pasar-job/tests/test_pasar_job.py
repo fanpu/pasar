@@ -5,6 +5,18 @@ import sys
 import textwrap
 
 import pasar_job
+import pytest
+
+
+@pytest.fixture
+def events_file(monkeypatch, tmp_path):
+    path = tmp_path / "events.jsonl"
+    monkeypatch.setenv("PASAR_EVENTS", str(path))
+    return path
+
+
+def read_events(path):
+    return [json.loads(line) for line in path.read_text().splitlines()]
 
 
 def test_noop_outside_pasar(monkeypatch, tmp_path):
@@ -52,3 +64,16 @@ def test_memory_limit_bytes(monkeypatch):
     assert pasar_job.memory_limit_bytes() == 1024
     monkeypatch.delenv("PASAR_MEM_LIMIT_BYTES")
     assert pasar_job.apply_memory_limit() is None
+
+
+def test_progress_metrics(events_file):
+    pasar_job.progress(10, 100, loss=1.84, lr=3e-5)
+    rec = read_events(events_file)[-1]
+    assert rec == {"event": "progress", "step": 10, "total_steps": 100, "loss": 1.84, "lr": 3e-5}
+
+
+@pytest.mark.parametrize("bad", [{"event": 1.0}, {"loss": float("nan")}, {"loss": "high"},
+                                 {"loss": float("inf")}, {"lr": True}])
+def test_progress_rejects_bad_metrics(events_file, bad):
+    with pytest.raises(ValueError):
+        pasar_job.progress(1, **bad)

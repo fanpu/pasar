@@ -63,3 +63,9 @@ def test_allowed_hosts_defaults_empty_and_parses_from_toml(tmp_path):
     p.write_text('allowed_hosts = ["mybox.example.ts.net"]\n')
     cfg = load_config(p)
     assert cfg.allowed_hosts == ["mybox.example.ts.net"]
+
+
+def test_pasar_address_env_replaces_default(monkeypatch):
+    monkeypatch.setenv("PASAR_ADDRESS", "127.0.0.1:18750")
+    cfg = Config(bind=["100.64.0.1:8750"])
+    assert cfg.addresses() == ["127.0.0.1:18750", "100.64.0.1:8750"]

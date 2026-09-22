@@ -6,6 +6,7 @@ Every function is a no-op outside pasar, so scripts can call them unconditionall
 from __future__ import annotations
 
 import json
+import math
 import os
 import signal
 import sys
@@ -66,8 +67,17 @@ def resumed(step: int | None = None) -> None:
     _emit("resumed", step=step)
 
 
-def progress(step: int, total_steps: int | None = None) -> None:
-    _emit("progress", step=step, total_steps=total_steps)
+_RESERVED = {"event", "step", "total_steps"}
+
+
+def progress(step: int, total_steps: int | None = None, **metrics: float) -> None:
+    """Report progress, optionally with numeric metrics (e.g. loss=1.84) the UI can chart."""
+    for name, value in metrics.items():
+        if name in _RESERVED:
+            raise ValueError(f"reserved metric name: {name}")
+        if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value):
+            raise ValueError(f"metric {name} must be a finite number, got {value!r}")
+    _emit("progress", step=step, total_steps=total_steps, **metrics)
 
 
 def note(text: str) -> None:

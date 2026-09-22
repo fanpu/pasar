@@ -91,6 +91,8 @@ def job_view(daemon, job: Job, now: float, projection: dict) -> dict:
                                   "ts": progress["ts"]},
         "last_checkpoint": ckpt and {"step": ckpt["step"], "ts": ckpt["ts"]},
         "projected": [list(s) for s in projection.get(job.id, [])],
+        "spans": [[a.start_time, a.end_time, a.end_kind.value if a.end_kind else None]
+                  for a in atts],
     }
 
 

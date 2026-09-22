@@ -187,7 +187,7 @@ Jobs append one JSON object per line to `$PASAR_EVENTS`. pasard adds timestamps 
 ```json
 {"event": "checkpoint", "step": 1200}
 {"event": "resumed", "step": 1200}
-{"event": "progress", "step": 1350, "total_steps": 10000}
+{"event": "progress", "step": 1350, "total_steps": 10000, "loss": 1.84}
 {"event": "note", "text": "switched to lr 1e-5"}
 ```
 
@@ -203,7 +203,7 @@ if pasar_job.resuming():
     pasar_job.resumed(step)
 for step in range(start, total):
     ...
-    pasar_job.progress(step, total)
+    pasar_job.progress(step, total, loss=loss)
     if step % 500 == 0:
         save_checkpoint()
         pasar_job.checkpoint(step)
@@ -341,6 +341,11 @@ The repo ships a minimal built-in set. Users can point `mascot_dir` (default `~/
 | `hot_temp_c` | `85` |
 | `log_retention_days` / `log_retention_size` | `30` / `20GiB` |
 | `mascot_dir` | `~/.config/pasar/mascot/` |
+
+The `PASAR_ADDRESS` environment variable, when set, replaces the default `127.0.0.1:8750` as the
+first address pasard binds to (`bind` entries still follow), so a throwaway daemon can run next to
+a real pasard on the default port; the CLI's `PASAR_URL` is unaffected and still selects which
+server it talks to.
 
 ## Failure handling
 
