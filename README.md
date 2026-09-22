@@ -46,6 +46,27 @@ See [docs/jobs.md](docs/jobs.md) for writing jobs that checkpoint and resume, an
     prometheus_url = "http://127.0.0.1:9090"
     allowed_hosts = ["mybox.example.ts.net"]   # extra Host-header names to accept
 
+## Web UI
+
+Build the static assets that `pasard` serves:
+
+    cd web && npm ci && npm run build
+
+Then open `http://127.0.0.1:8750/` (or one of the extra `bind` addresses from your config; add
+its DNS name to `allowed_hosts` if it isn't localhost).
+
+For frontend development, run a Vite dev server instead — it hot-reloads and proxies `/api` and
+`/mascot` to a running `pasard`:
+
+    cd web && npm run dev
+
+The dev server proxies to `PASAR_URL` (default `http://127.0.0.1:8750`). Pass `-- --host <addr>`
+to reach it over a private network, and set `PASAR_DEV_HOSTS=name1,name2` for extra Host names it
+should accept.
+
+Custom mascot images go in `~/.config/pasar/mascot/`, named after the states listed in
+[docs/design.md](docs/design.md).
+
 ## Licence
 
 MIT, see [LICENSE](LICENSE).
