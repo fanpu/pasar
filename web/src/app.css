@@ -52,4 +52,36 @@ button { font: inherit; cursor: pointer; }
 
 .spacer { flex: 1; }
 
+/* job panel drawer (shared by JobPanel, Facts and AttemptsBar) */
+.scrim { display: block; position: fixed; inset: 0; margin: 0; padding: 0; border: 0; background: rgba(74, 63, 77, .18); opacity: 0; pointer-events: none; transition: opacity .2s; z-index: 20; cursor: default; }
+.scrim.open { opacity: 1; pointer-events: auto; }
+.drawer { position: fixed; top: 0; right: 0; bottom: 0; width: min(620px, 100vw); background: var(--bg); border-left: 1.5px solid var(--line); box-shadow: -10px 0 30px rgba(214, 170, 190, .25); transform: translateX(102%); transition: transform .25s ease; z-index: 30; overflow-y: auto; padding: 18px 20px 40px; }
+.drawer.open { transform: none; }
+.dhead { display: flex; align-items: center; gap: 10px; }
+.dhead h2 { margin: 0; font-size: 19px; font-weight: 900; }
+.x { margin-left: auto; background: var(--card); border: 1.5px solid var(--line); border-radius: 99px; width: 34px; height: 34px; font-weight: 900; color: var(--ink-2); }
+.note { margin: 6px 0 12px; color: var(--ink-2); font-weight: 600; }
+.acts { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 14px; }
+.acterr { color: var(--fail); font-weight: 800; font-size: 12.5px; margin: -6px 0 12px; }
+.facts { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; margin-bottom: 12px; }
+.fact { background: var(--card); border: 1.5px solid var(--line); border-radius: 18px; padding: 10px 12px; }
+.fact .l { font-size: 11.5px; font-weight: 800; color: var(--ink-2); }
+.fact .v { font-size: 17px; font-weight: 900; margin-top: 1px; }
+.fact .s { font-size: 12px; font-weight: 700; color: var(--ink-2); }
+.kv { display: grid; grid-template-columns: 110px 1fr; gap: 6px 12px; font-size: 13px; font-weight: 700; margin-top: 12px; }
+.kv .k { color: var(--ink-2); }
+.tabs { display: none; }
+
+@media (max-width: 760px) {
+  .drawer { width: 100vw; border-left: 0; padding: 12px 14px 90px; }
+  .facts { grid-template-columns: 1fr 1fr; }
+  .tabs { display: flex; gap: 4px; background: var(--card); border: 1.5px solid var(--line); border-radius: 99px; padding: 4px; margin: 4px 0 12px; position: sticky; top: 0; z-index: 2; }
+  .tabs button { flex: 1; border: 0; background: none; border-radius: 99px; padding: 7px 0; font-weight: 800; color: var(--ink-2); }
+  .tabs button.on { background: var(--accent); color: #fff; }
+  .drawer [data-tab] { display: none; }
+  .drawer[data-show="overview"] [data-tab~="overview"], .drawer[data-show="logs"] [data-tab~="logs"], .drawer[data-show="metrics"] [data-tab~="metrics"], .drawer[data-show="events"] [data-tab~="events"] { display: block; }
+  .drawer .acts { position: fixed; left: 0; right: 0; bottom: 0; margin: 0; padding: 10px 14px 16px; background: var(--card); border-top: 1.5px solid var(--line); }
+  .drawer .acts .btn { flex: 1; }
+}
+
 @media (prefers-reduced-motion: reduce) { * { animation: none !important; transition: none !important; } }

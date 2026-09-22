@@ -11,9 +11,13 @@
   import Timeline from "./components/Timeline.svelte";
   import JobTable from "./components/JobTable.svelte";
   import Toast from "./components/Toast.svelte";
-  import type { Snapshot } from "./lib/types";
+  import JobPanel from "./components/JobPanel.svelte";
+  import type { JobDetail, Snapshot } from "./lib/types";
 
   const live = new Live();
+
+  // Task 12 fills in the restart-with-changes form; for now we just remember the job it's for.
+  let restartWith = $state<JobDetail | null>(null);
 
   let recent = $state<Transition | null>(null);
   let bounceKey = $state(0);
@@ -139,7 +143,15 @@
   {/if}
 
   {#if router.route.name === "job"}
-    <!-- Task 10: job detail panel -->
+    {@const jobId = router.route.id}
+    <JobPanel
+      id={jobId}
+      live={live.snapshot?.jobs.find((j) => j.id === jobId) ?? null}
+      now={live.snapshot?.status.now ?? Date.now() / 1000}
+      grafanaUrl={live.snapshot?.status.grafana_url ?? null}
+      onclose={() => router.go("/")}
+      onrestartwith={(job) => { restartWith = job; }}
+    />
   {/if}
 </div>
 <Toast message={toast?.message ?? null} image={toast?.image ?? ""} />

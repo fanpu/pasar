@@ -1,5 +1,5 @@
 import { GIB } from "../lib/format";
-import type { JobView, StatusView } from "../lib/types";
+import type { AttemptView, JobDetail, JobView, StatusView } from "../lib/types";
 
 export { GIB };
 
@@ -68,4 +68,29 @@ export function status(overrides: Partial<StatusView> = {}): StatusView {
     grafana_url: null,
     ...overrides,
   };
+}
+
+export function attempt(overrides: Partial<AttemptView> = {}): AttemptView {
+  return {
+    job_id: 1,
+    n: 1,
+    unit: "u1",
+    start_time: NOW - 600,
+    end_time: null,
+    end_kind: null,
+    exit_code: null,
+    signal: null,
+    reason: null,
+    summary: "",
+    log_tail: "",
+    peak_mem: 0,
+    wasted_work: null,
+    restart_cost: null,
+    ...overrides,
+  };
+}
+
+export function jobDetail(overrides: Partial<JobDetail> = {}): JobDetail {
+  const { attempts, ...rest } = overrides;
+  return { ...job(rest as Partial<JobView>), attempts: attempts ?? [] };
 }
