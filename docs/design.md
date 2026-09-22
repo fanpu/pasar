@@ -264,7 +264,7 @@ REST under `/api`, JSON in and out:
 - `GET /api/jobs/{id}/logs` (range, or SSE with `?follow=1`)
 - `GET /api/jobs/{id}/events`, `GET /api/jobs/{id}/metrics`
 - `GET /api/jobs/{id}/usage`: memory history (cgroup + NVML) of the job's current attempt, in memory only (not persisted, empty after a pasard restart)
-- `GET /api/status` (pool, pressure, GPU stats, projected schedule)
+- `GET /api/status` (pool, reserved/free memory, pressure, blocked/waiting queue state, recent machine events)
 - `GET /api/gpu` (power, temperature, utilisation time series from Prometheus, for the dashboard)
 - `GET /api/mascot` (a manifest mapping each state to the URL(s) to use for it: custom images from `mascot_dir` if any exist for that state, else the built-in one, else none), `GET /mascot/<file>` (serves a custom image from `mascot_dir` only, 404 otherwise), `GET /mascot/builtin/<file>` (serves a built-in image only)
 - `GET /api/stream`: a single SSE stream of state changes that keeps the UI live

@@ -153,8 +153,8 @@ settings first with its flags, e.g. `pasar restart 42 --mem 48G --bid 1500 --tim
 `last_checkpoint` (`step`, `ts`), `retries`, `retries_used`, `command`, `cwd`, `note`, `tags`,
 `submitter`, `git_commit`, `lost` (time lost to preemption/failure, `known` may be `false`).
 
-`pasar wait <id>` blocks (polling every 2s, or `--interval`) and exits when the job reaches a
-terminal state:
+`pasar wait <id>` blocks, polling until the job reaches a terminal state, and exits with a code
+that reflects the outcome:
 
 | Exit code | Meaning |
 |---|---|
@@ -206,7 +206,7 @@ whatever `PASAR_URL` would be (default `http://127.0.0.1:8750`).
 | `GET /api/jobs/{id}/events` | The job's raw protocol events (checkpoint/resumed/progress/note). |
 | `GET /api/jobs/{id}/metrics` | Stored per-attempt metric summaries (avg/max/total). |
 | `GET /api/jobs/{id}/usage` | In-memory time series of this attempt's measured memory usage. |
-| `GET /api/status` | Pool size, free memory, pressure, projected schedule. |
+| `GET /api/status` | Pool size, reserved/free memory, pressure, blocked/waiting queue state, recent machine events. |
 | `GET /api/gpu` | GPU power/temperature/utilisation history from Prometheus, if configured. |
 | `GET /api/stream` | SSE stream of `{status, jobs}` snapshots, one per state change. |
 | `GET /llms.txt` | This guide, as `text/plain`. |
