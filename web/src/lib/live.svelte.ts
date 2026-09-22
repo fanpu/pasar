@@ -1,4 +1,5 @@
 import { getGpu } from "./api";
+import { assignTagColors } from "./colors";
 import type { GpuSeries, Snapshot } from "./types";
 
 type Listener = (prev: Snapshot | null, next: Snapshot) => void;
@@ -62,6 +63,7 @@ export class Live {
       const next = JSON.parse(e.data) as Snapshot;
       const prev = this.snapshot;
       for (const fn of this.#listeners) fn(prev, next);
+      assignTagColors(next.jobs);
       this.snapshot = next;
       this.connected = true;
     };

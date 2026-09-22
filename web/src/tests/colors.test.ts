@@ -1,11 +1,33 @@
 import { describe, expect, it } from "vitest";
-import { jobColor, mutedJobColor, JOB_COLORS } from "../lib/colors";
+import { assignTagColors, jobColor, mutedJobColor, JOB_COLORS } from "../lib/colors";
 
 describe("colors", () => {
-  it("untagged jobs keep the old per-id colour", () => {
-    expect(JOB_COLORS).toEqual(["#3b8fd9", "#d9577f", "#8a63d2", "#23a47a", "#c9761f"]);
-    expect(jobColor({ id: 42, tags: [] })).toBe(JOB_COLORS[((42 % 5) + 5) % 5]);
-    expect(jobColor({ id: 45, tags: [] })).toBe(JOB_COLORS[((45 % 5) + 5) % 5]);
+  it("untagged jobs are coloured by id, cycling through all ten colours", () => {
+    expect(JOB_COLORS).toHaveLength(10);
+    expect(new Set(JOB_COLORS).size).toBe(10);
+    expect(jobColor({ id: 42, tags: [] })).toBe(JOB_COLORS[2]);
+    expect(jobColor({ id: 45, tags: [] })).toBe(JOB_COLORS[5]);
+    expect(jobColor({ id: 52, tags: [] })).toBe(JOB_COLORS[2]);
+  });
+
+  it("tags on screen together get different colours, oldest first", () => {
+    const tags = ["heads", "seedsmany", "gdnseeds"];
+    const hashed = new Set(tags.map((t) => jobColor({ id: 1, tags: [t] })));
+    expect(hashed.size).toBeLessThan(3); // plain hashing collides for these three
+    const jobs = tags.map((t, i) => ({ id: i + 1, tags: [t] }));
+    assignTagColors(jobs);
+    expect(new Set(jobs.map(jobColor)).size).toBe(3);
+    const oldest = jobColor(jobs[0]);
+    assignTagColors(jobs.slice(0, 1));
+    expect(jobColor(jobs[0])).toBe(oldest); // the oldest tag keeps its colour
+    assignTagColors([]);
+  });
+
+  it("more tags than colours wrap around instead of looping forever", () => {
+    const jobs = Array.from({ length: 25 }, (_, i) => ({ id: i, tags: [`t${i}`] }));
+    assignTagColors(jobs);
+    expect(new Set(jobs.slice(0, 10).map(jobColor)).size).toBe(10);
+    assignTagColors([]);
   });
 
   it("jobs sharing a first tag share a colour, regardless of id", () => {

@@ -305,7 +305,7 @@
    * colour so it never repeats the job's own chip/timeline colour. */
   function progressColor(job: JobView, i: number): string {
     const base = JOB_COLORS.indexOf(jobColor(job));
-    return JOB_COLORS[(Math.max(0, base) + 1 + i) % 5];
+    return JOB_COLORS[(Math.max(0, base) + 1 + i) % JOB_COLORS.length];
   }
 
   const progSeries = $derived(progressSeries(events));
