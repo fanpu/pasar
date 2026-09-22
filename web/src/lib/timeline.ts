@@ -46,6 +46,24 @@ export function zoomAround(w: Window, anchor: number, factor: number, now: numbe
   return clampWindow(t0, t0 + span, now);
 }
 
+/** Held-key speeds: W/S change the window's length by a factor of e^ZOOM_RATE per second, and
+ * A/D move it by PAN_RATE window-lengths per second. */
+export const ZOOM_RATE = 2.5;
+export const PAN_RATE = 0.8;
+
+/** One animation step of held W/A/S/D keys, `dt` seconds long. `zoom` is +1 for out (S), -1 for
+ * in (W); `pan` is +1 for later (D), -1 for earlier (A). Zooming keeps `anchor` in place. */
+export function keyStep(w: Window, zoom: number, pan: number, dt: number, anchor: number,
+                        now: number): Window {
+  let out = w;
+  if (zoom !== 0) out = zoomAround(out, anchor, Math.exp(zoom * ZOOM_RATE * dt), now);
+  if (pan !== 0) {
+    const d = pan * PAN_RATE * dt * (out.t1 - out.t0);
+    out = clampWindow(out.t0 + d, out.t1 + d, now);
+  }
+  return out;
+}
+
 /** The live window for a given length. Up to the default length, `LIVE_LEAD` of it lies
  * before `now`; longer windows are for looking back, so they reach only a little ahead
  * (`WINDOW_AFTER`, or a tenth of the window if that's more). */

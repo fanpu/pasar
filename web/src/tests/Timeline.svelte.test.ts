@@ -95,4 +95,30 @@ describe("Timeline", () => {
     // 11h live window reaches 4h ahead (07:26 – 18:26), moved back 5h30
     expect(screen.getByText(/01:56 – 12:56/)).toBeInTheDocument();
   });
+
+  it("A and D move the window; W/S zoom", async () => {
+    render(Timeline, { jobs: [], pool: 105 * GIB, now: NOW, onopen: () => {} });
+    await fireEvent.keyDown(window, { key: "a" });
+    await fireEvent.keyUp(window, { key: "a" });
+    // a tap moves 0.8 × 5.5h / 30 = 8.8 min earlier: 12:56 → 12:47
+    expect(screen.getByText(/12:47 – 18:17/)).toBeInTheDocument();
+    await fireEvent.keyDown(window, { key: "W" });
+    await fireEvent.keyUp(window, { key: "W" });
+    expect(screen.queryByText(/12:47 – 18:17/)).toBeNull();
+  });
+
+  it("ignores the keys while typing or while a dialog is open", async () => {
+    render(Timeline, { jobs: [], pool: 105 * GIB, now: NOW, onopen: () => {} });
+    const input = document.createElement("input");
+    document.body.appendChild(input);
+    await fireEvent.keyDown(input, { key: "d" });
+    const dialog = document.createElement("div");
+    dialog.setAttribute("aria-modal", "true");
+    document.body.appendChild(dialog);
+    await fireEvent.keyDown(window, { key: "d" });
+    await fireEvent.keyDown(window, { key: "d", ctrlKey: true });
+    expect(screen.getByText("memory over time")).toBeInTheDocument();
+    input.remove();
+    dialog.remove();
+  });
 });

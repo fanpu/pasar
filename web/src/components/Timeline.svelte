@@ -4,7 +4,7 @@
   import { jobColor } from "../lib/colors";
   import { mascot } from "../lib/mascot.svelte";
   import {
-    clampWindow, layout, liveWindow, LIVE_HISTORY, tickLabel, tickStep, timeTicks, when,
+    clampWindow, keyStep, layout, liveWindow, LIVE_HISTORY, tickLabel, tickStep, timeTicks, when,
     WINDOW_AFTER, WINDOW_BEFORE, zoomAround, type BlockKind, type Window,
   } from "../lib/timeline";
   import type { JobView } from "../lib/types";
@@ -115,6 +115,7 @@
     drag = { x0: e.clientX, t0, moved: false };
   }
   function onpointermove(e: PointerEvent) {
+    if (svgEl) hoverX = e.clientX - svgEl.getBoundingClientRect().left;
     if (!drag) return;
     const dx = e.clientX - drag.x0;
     if (!drag.moved) {
@@ -135,6 +136,58 @@
     drag = null;
     dragging = false;
   }
+  // Perfetto-style keys: hold W/S to zoom in/out (around the pointer when it's over the chart),
+  // A/D to move earlier/later.
+  const KEYS = new Set(["w", "a", "s", "d"]);
+  const held = new Set<string>();
+  let hoverX: number | null = null;
+  let raf = 0;
+  let lastFrame = 0;
+
+  function typing(target: EventTarget | null): boolean {
+    const el = target as HTMLElement | null;
+    if (!el || !el.tagName) return false;
+    return ["INPUT", "TEXTAREA", "SELECT"].includes(el.tagName) || el.isContentEditable;
+  }
+  function stepKeys(dt: number) {
+    const zoom = (held.has("s") ? 1 : 0) - (held.has("w") ? 1 : 0);
+    const pan = (held.has("d") ? 1 : 0) - (held.has("a") ? 1 : 0);
+    if (zoom === 0 && pan === 0) return;
+    const anchor = hoverX !== null && hoverX >= L && hoverX <= width - R ? timeAt(hoverX) : (t0 + t1) / 2;
+    setWindow(keyStep(win, zoom, pan, dt, anchor, now));
+  }
+  function frame(ts: number) {
+    if (held.size === 0) {
+      raf = 0;
+      return;
+    }
+    stepKeys(Math.min(0.1, (ts - lastFrame) / 1000));
+    lastFrame = ts;
+    raf = requestAnimationFrame(frame);
+  }
+  function onwindowkeydown(e: KeyboardEvent) {
+    const k = e.key.toLowerCase();
+    if (!KEYS.has(k) || e.ctrlKey || e.metaKey || e.altKey) return;
+    if (typing(e.target) || document.querySelector('[aria-modal="true"]')) return;
+    e.preventDefault();
+    if (held.has(k)) return; // auto-repeat: the animation loop is already running
+    held.add(k);
+    stepKeys(1 / 30); // a quick tap still moves a little
+    if (!raf) {
+      lastFrame = performance.now();
+      raf = requestAnimationFrame(frame);
+    }
+  }
+  function onwindowkeyup(e: KeyboardEvent) {
+    held.delete(e.key.toLowerCase());
+  }
+  function releaseKeys() {
+    held.clear();
+  }
+  $effect(() => () => {
+    if (raf) cancelAnimationFrame(raf);
+  });
+
   $effect(() => {
     const el = svgEl;
     if (!el) return;
@@ -200,6 +253,8 @@
   }
 </script>
 
+<svelte:window onkeydown={onwindowkeydown} onkeyup={onwindowkeyup} onblur={releaseKeys} />
+
 <div class="sec">
   <h3>
     Schedule
@@ -235,6 +290,7 @@
       {onpointermove}
       {onpointerup}
       onpointercancel={onpointerup}
+      onpointerleave={() => (hoverX = null)}
     >
       {#each [0, pool / 2, pool] as g (g)}
         <line x1={L} x2={width - R} y1={y(g)} y2={y(g)} class="gridline" />
@@ -301,7 +357,7 @@
     <span><svg width="22" height="12"><rect x="1" y="1" width="20" height="10" rx="4" fill="#fff" stroke="#8a63d2" stroke-width="1.5" stroke-dasharray="3 2" /></svg>projected</span>
     <span><svg width="22" height="12"><rect x="1" y="1" width="20" height="10" rx="4" fill="#f2edf0" /></svg>finished</span>
     <span><svg width="10" height="14"><rect x="4" y="0" width="2" height="14" fill="#ff8fab" /></svg>now</span>
-    <span class="hint">drag to move · ctrl + scroll to zoom</span>
+    <span class="hint">drag or A/D to move · W/S or ctrl + scroll to zoom</span>
   </div>
 </div>
 

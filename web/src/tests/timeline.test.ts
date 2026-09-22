@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { clampWindow, layout, liveWindow, MAX_AHEAD, MAX_SPAN, MIN_SPAN, stack, tickLabel, tickStep, timeTicks, when, zoomAround } from "../lib/timeline";
+import { clampWindow, keyStep, layout, liveWindow, MAX_AHEAD, MAX_SPAN, MIN_SPAN, stack, tickLabel, tickStep, timeTicks, when, zoomAround } from "../lib/timeline";
 import { GIB, job, NOW } from "./fixtures";
 
 const M = 60;
@@ -110,5 +110,22 @@ describe("time ticks", () => {
   it("dates moments that aren't today", () => {
     expect(when(NOW, NOW)).toBe("14:26");
     expect(when(NOW - 86400, NOW)).toBe("Sep 20 14:26");
+  });
+});
+
+describe("W/A/S/D steps", () => {
+  const w = { t0: NOW - 3600, t1: NOW + 3600 };
+  it("W zooms in and S zooms out around the anchor", () => {
+    const zin = keyStep(w, -1, 0, 0.2, NOW - 3600, NOW);
+    expect(zin.t0).toBeCloseTo(NOW - 3600);
+    expect(zin.t1 - zin.t0).toBeCloseTo(7200 * Math.exp(-0.5));
+    const zout = keyStep(w, 1, 0, 0.2, NOW, NOW);
+    expect(zout.t1 - zout.t0).toBeCloseTo(7200 * Math.exp(0.5));
+    expect((zout.t0 + zout.t1) / 2).toBeCloseTo(NOW);
+  });
+  it("A and D pan by a share of the window", () => {
+    expect(keyStep(w, 0, 1, 0.5, NOW, NOW)).toEqual({ t0: NOW - 3600 + 2880, t1: NOW + 3600 + 2880 });
+    expect(keyStep(w, 0, -1, 0.5, NOW, NOW)).toEqual({ t0: NOW - 3600 - 2880, t1: NOW + 3600 - 2880 });
+    expect(keyStep(w, 0, 0, 0.5, NOW, NOW)).toEqual(w);
   });
 });
