@@ -51,6 +51,42 @@ describe("LogView", () => {
     expect(close).toHaveBeenCalled();
   });
 
+  it("keeps the follow connection open when follow flips false, closing only on the server's end event", async () => {
+    // Idempotent by offset (rather than a fixed once-per-call sequence): @testing-library/svelte's
+    // rerender() below updates props as one bundled object, so unrelated prop changes can cause
+    // Svelte to notice `id` "changed" too and re-run the backlog effect; the assertions in this
+    // test only care about the follow connection, so the backlog mock just needs to always
+    // converge back to the same drained state.
+    vi.mocked(api.getLog).mockImplementation(async (_id, offset) =>
+      offset === 0 ? { text: "line1\n", offset: 6 } : { text: "", offset: 6 },
+    );
+    let onText!: (t: string) => void;
+    let onEnd!: () => void;
+    const close = vi.fn();
+    vi.mocked(api.followLog).mockImplementation((_id, _offset, onTextCb, onEndCb) => {
+      onText = onTextCb;
+      onEnd = onEndCb;
+      return close;
+    });
+
+    const { container, rerender } = render(LogView, { id: 1, follow: true });
+    await waitFor(() => expect(api.followLog).toHaveBeenCalledTimes(1));
+
+    // The job ends while the panel is open: `follow` flips false before the server's last bytes
+    // (and its `end` event) have necessarily arrived.
+    await rerender({ id: 1, follow: false });
+    expect(close).not.toHaveBeenCalled();
+
+    onText("line2\n");
+    await waitFor(() => expect(container.textContent).toContain("line2"));
+    expect(close).not.toHaveBeenCalled();
+
+    onEnd();
+    // followLog itself is responsible for closing its EventSource on `end`; LogView shouldn't
+    // call stop() again on top of that (it wasn't holding the connection open past `end` either).
+    expect(api.followLog).toHaveBeenCalledTimes(1);
+  });
+
   it("does not follow when follow is false", async () => {
     vi.mocked(api.getLog)
       .mockResolvedValueOnce({ text: "line1\n", offset: 6 })

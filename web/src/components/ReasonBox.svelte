@@ -9,9 +9,11 @@
   }
   let { job, detail }: Props = $props();
 
-  const image = $derived(
-    mascot.pick(isOom(job.reason) ? "oom" : job.reason === "lost" ? "confused" : "failed"),
-  );
+  // Pull the mascot state out as a primitive first: `job` is a fresh object every snapshot tick
+  // even when nothing relevant changed, and deriving `image` straight off `job.reason` would
+  // re-pick a random variant every tick instead of once per shown state.
+  const reasonState = $derived(isOom(job.reason) ? "oom" : job.reason === "lost" ? "confused" : "failed");
+  const image = $derived(mascot.pick(reasonState));
 
   const tailLines = $derived.by((): string[] => {
     if (detail === null || detail.attempts.length === 0) return [];

@@ -1,6 +1,7 @@
 import { render, screen, fireEvent, waitFor } from "@testing-library/svelte";
 import { describe, expect, it, vi, beforeEach } from "vitest";
 import JobPanel from "../components/JobPanel.svelte";
+import JobForm from "../components/JobForm.svelte";
 import * as api from "../lib/api";
 import { ApiError } from "../lib/api";
 import { attempt, job, jobDetail, NOW } from "./fixtures";
@@ -14,6 +15,7 @@ vi.mock("../lib/api", async (importOriginal) => {
     cancelJob: vi.fn(),
     setBid: vi.fn(),
     restartJob: vi.fn(),
+    submitJob: vi.fn(),
     getLog: vi.fn(),
     followLog: vi.fn(),
     getEvents: vi.fn(),
@@ -115,6 +117,22 @@ describe("JobPanel", () => {
 
     await fireEvent.keyDown(window, { key: "Escape" });
     expect(onclose).toHaveBeenCalled();
+  });
+
+  it("Escape closes only a JobForm modal opened over the panel, not the panel underneath", async () => {
+    const onclose = vi.fn();
+    const onFormClose = vi.fn();
+    const liveJob = job({ id: 42, name: "llama-sft", state: "queued" });
+    vi.mocked(api.getJob).mockResolvedValue(baseDetail({ state: "queued" }));
+    render(JobPanel, { id: 42, live: liveJob, now: NOW, grafanaUrl: null, onclose, onrestartwith: noopRestartWith });
+    await screen.findByText("llama-sft");
+    render(JobForm, { mode: "submit", onclose: onFormClose, ondone: (): void => {} });
+    await screen.findByText("Submit a job");
+
+    await fireEvent.keyDown(window, { key: "Escape" });
+
+    expect(onFormClose).toHaveBeenCalled();
+    expect(onclose).not.toHaveBeenCalled();
   });
 
   it("shows the failure reason and the last 8 log-tail lines for an OOM job", async () => {

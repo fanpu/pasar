@@ -93,8 +93,8 @@
     onopen(id);
   }
   function onActivate(e: KeyboardEvent, id: number): void {
-    if (e.key === "Enter") {
-      e.preventDefault();
+    if (e.key === "Enter" || e.key === " " || e.key === "Spacebar") {
+      e.preventDefault(); // stop Space from scrolling the page
       open(id);
     }
   }

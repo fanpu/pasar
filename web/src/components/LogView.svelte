@@ -1,5 +1,6 @@
 <script lang="ts">
-  import { ApiError, followLog, getLog } from "../lib/api";
+  import { onDestroy } from "svelte";
+import { ApiError, followLog, getLog } from "../lib/api";
 
   interface Props {
     id: number;
@@ -106,12 +107,36 @@
     };
   });
 
-  // Tailing: opens once the backlog finishes loading, closes on id change, `follow` toggling
-  // off, or destroy.
+  // Tailing: opens once the backlog finishes loading and `follow` is true. Once started, it's
+  // *not* torn down just because `follow` later flips false (e.g. the job ends while the panel
+  // is open) — that would drop whatever the server was still sending. Instead it stays open until
+  // the server's own `end` event closes it, an id change starts a new one, or the component is
+  // destroyed.
+  //
+  // Teardown is driven by explicit comparison against `followingId` (not by returning a cleanup
+  // from this effect) so a re-run triggered by something other than a real id change — e.g.
+  // `follow` flipping — never tears the connection down.
+  let followingId: number | null = null;
+  let stopFollowing: (() => void) | null = null;
+
   $effect(() => {
-    if (!follow || endOffset === null) return;
-    const stop = followLog(id, endOffset, (text) => appendText(text), () => {});
-    return () => stop();
+    const forId = id;
+    if (followingId !== null && followingId !== forId) {
+      stopFollowing?.();
+      followingId = null;
+      stopFollowing = null;
+    }
+    if (follow && endOffset !== null && followingId === null) {
+      followingId = forId;
+      stopFollowing = followLog(forId, endOffset, (text) => appendText(text), () => {
+        followingId = null;
+        stopFollowing = null;
+      });
+    }
+  });
+
+  onDestroy(() => {
+    stopFollowing?.();
   });
 
   let containerEl = $state<HTMLDivElement | null>(null);

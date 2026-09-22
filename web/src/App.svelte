@@ -95,10 +95,14 @@
   );
 
   let headerImage = $state(mascot.pick("thinking"));
-  let lastMoodState: MascotState | null = null;
+  // Keyed on the mood state *and* whether the mascot manifest has loaded: without `mascot.loaded`
+  // here, a snapshot arriving before mascot.load() resolves would pick (and then keep) the
+  // built-in art for the current state, never re-picking once the user's own mascot art is ready.
+  let lastMoodKey: string | null = null;
   $effect(() => {
-    if (currentMood.state !== lastMoodState) {
-      lastMoodState = currentMood.state;
+    const key = `${currentMood.state}:${mascot.loaded}`;
+    if (key !== lastMoodKey) {
+      lastMoodKey = key;
       headerImage = mascot.pick(currentMood.state);
     }
   });

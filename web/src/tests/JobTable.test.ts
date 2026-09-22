@@ -129,6 +129,24 @@ describe("JobTable", () => {
     expect(onopen).toHaveBeenCalledWith(12);
   });
 
+  it("activates a row and a phone card with the Space key too", async () => {
+    const onopen = vi.fn();
+    const { container } = render(JobTable, {
+      jobs: [job({ id: 12, state: "running", start_time: NOW - 600 })],
+      pool: 105 * GIB,
+      now: NOW,
+      selected: null,
+      onopen,
+    });
+    const row = container.querySelector("tr.row")!;
+    await fireEvent.keyDown(row, { key: " " });
+    expect(onopen).toHaveBeenCalledWith(12);
+
+    const card = container.querySelector(".card")!;
+    await fireEvent.keyDown(card, { key: " " });
+    expect(onopen).toHaveBeenCalledTimes(2);
+  });
+
   it("shows an empty state with no jobs", () => {
     render(JobTable, { jobs: [], pool: 105 * GIB, now: NOW, selected: null, onopen: () => {} });
     // getByText's default normalizer collapses whitespace, so match against the collapsed form;

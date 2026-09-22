@@ -6,9 +6,14 @@ import type { MascotManifest } from "./types";
  * manifest, falling back to the repo's built-in SVG when the user hasn't supplied one. */
 export class Mascot {
   manifest = $state.raw<MascotManifest>({});
+  // Flips once load() resolves. A primitive (rather than the manifest object itself) so callers
+  // that re-pick a mascot image keyed on "has the manifest arrived yet" don't need to compare
+  // object identity — before this flips, pick() only ever returns built-in art.
+  loaded = $state(false);
 
   async load(fetcher: () => Promise<MascotManifest> = getMascot): Promise<void> {
     this.manifest = await fetcher();
+    this.loaded = true;
   }
 
   pick(state: MascotState, rand: () => number = Math.random): string {

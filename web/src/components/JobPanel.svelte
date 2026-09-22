@@ -43,6 +43,7 @@
   let notFound = $state(false);
   let loadError = $state<string | null>(null);
   let headingEl = $state<HTMLElement | null>(null);
+  let drawerEl = $state<HTMLElement | null>(null);
   let activeTab = $state<TabKey>("overview");
   let showBid = $state(false);
   let busy = $state<"cancel" | "restart" | null>(null);
@@ -211,8 +212,16 @@
     })();
   });
 
+  // On Escape, only the topmost modal layer should close. The BidDialog (rendered by this
+  // component) and JobForm (rendered over this panel by App) both mark themselves
+  // aria-modal="true"; if either is open, let it handle Escape instead of also closing this panel.
   function onkeydown(e: KeyboardEvent): void {
-    if (e.key === "Escape" && !showBid) onclose();
+    if (e.key !== "Escape") return;
+    const modals = document.querySelectorAll('[aria-modal="true"]');
+    for (const m of modals) {
+      if (m !== drawerEl) return;
+    }
+    onclose();
   }
 
   const mascotImg = $derived(mascot.pick(notFound || loadError ? "hmm" : "thinking"));
@@ -338,7 +347,7 @@
 
 <svelte:window onkeydown={onkeydown} />
 <button type="button" class="scrim open" aria-label="Close" onclick={onclose}></button>
-<div class="drawer open" role="dialog" aria-modal="true" aria-labelledby="jobpanel-heading" data-show={activeTab}>
+<div class="drawer open" role="dialog" aria-modal="true" aria-labelledby="jobpanel-heading" data-show={activeTab} bind:this={drawerEl}>
   {#if notFound}
     <div class="dhead">
       <h2 id="jobpanel-heading" tabindex="-1" bind:this={headingEl}>No job #{id}.</h2>
