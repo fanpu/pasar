@@ -14,7 +14,7 @@ It is built for a small, cooperative group (people and the agents they steer) sh
 
 ## Non-goals (for now)
 
-- Multiple GPUs or multiple nodes, gang scheduling.
+- Multiple GPUs or multiple nodes, gang scheduling. (Explicit, opt-in burst jobs on rented cloud GPUs are proposed in [cloud.md](cloud.md).)
 - Authentication, users, quotas, accounting. Everyone on the box is trusted.
 - Slurm compatibility. Ideas are borrowed where they fit.
 - Containers. The command itself picks its environment (e.g. `.venv/bin/python train.py`).
@@ -381,6 +381,7 @@ server it talks to.
 
 ## Later
 
+- Cloud jobs on rented GPUs (Modal first, other providers behind the same interface): see [cloud.md](cloud.md).
 - Multiple GPUs and nodes.
 - Job dependencies (run the eval after the training job).
 - Notifications through Alertmanager, pausing launches while `GpuHot` fires.
