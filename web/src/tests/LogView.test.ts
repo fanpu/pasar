@@ -69,4 +69,50 @@ describe("LogView", () => {
 
     expect(await findByText("No output yet.")).toBeInTheDocument();
   });
+
+  it("keeps at most the last 5000 lines", async () => {
+    const total = 5005;
+    const text = Array.from({ length: total }, (_, i) => `line${i}`).join("\n") + "\n";
+    vi.mocked(api.getLog)
+      .mockResolvedValueOnce({ text, offset: text.length })
+      .mockResolvedValueOnce({ text: "", offset: text.length });
+
+    const { container } = render(LogView, { id: 1, follow: false });
+
+    await waitFor(() => expect(container.querySelectorAll(".ln").length).toBe(5000));
+    const texts = Array.from(container.querySelectorAll(".ln")).map((el) => el.textContent);
+    expect(texts[0]).toBe("line5");
+    expect(texts[texts.length - 1]).toBe(`line${total - 1}`);
+  });
+
+  it("shows an inline error (not 'No output yet.') on a getLog failure and retries, resuming from the last offset without duplicating text", async () => {
+    vi.useFakeTimers();
+    try {
+      const getLog = vi.mocked(api.getLog);
+      getLog
+        .mockResolvedValueOnce({ text: "line1\n", offset: 6 })
+        .mockRejectedValueOnce(new Error("network down"))
+        .mockResolvedValueOnce({ text: "line2\n", offset: 12 })
+        .mockResolvedValueOnce({ text: "", offset: 12 });
+
+      const { container } = render(LogView, { id: 1, follow: false });
+
+      await vi.advanceTimersByTimeAsync(0);
+      expect(getLog).toHaveBeenCalledTimes(2);
+      expect(container.textContent).toContain("Couldn't load the log: network down");
+      expect(container.textContent).toContain("line1");
+
+      await vi.advanceTimersByTimeAsync(3000);
+
+      expect(getLog).toHaveBeenCalledTimes(4);
+      // Retries from the offset after the last *successful* chunk (6), not from 0 — so "line1"
+      // is never re-requested or re-appended.
+      expect(getLog.mock.calls[2][1]).toBe(6);
+      expect(container.textContent).not.toContain("Couldn't load the log");
+      const texts = Array.from(container.querySelectorAll(".ln")).map((el) => el.textContent);
+      expect(texts).toEqual(["line1", "line2"]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
 });

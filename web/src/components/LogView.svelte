@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { followLog, getLog } from "../lib/api";
+  import { ApiError, followLog, getLog } from "../lib/api";
 
   interface Props {
     id: number;
@@ -50,8 +50,18 @@
     recompute();
   }
 
+  const RETRY_MS = 3000;
+
+  function errorMessage(e: unknown): string {
+    return e instanceof ApiError ? e.message : e instanceof Error ? e.message : String(e);
+  }
+
   // Full backlog load: reset on every id change and read in ≤1 MiB chunks until an empty one.
+  // A transient getLog failure doesn't drop what's already loaded — it shows an inline error and
+  // retries after a few seconds, resuming from the last successfully read offset rather than
+  // re-appending text already shown.
   let endOffset = $state<number | null>(null);
+  let loadError = $state<string | null>(null);
   let loadGen = 0;
 
   $effect(() => {
@@ -60,23 +70,39 @@
     buffer = "";
     lines = [];
     endOffset = null;
+    loadError = null;
 
     let cancelled = false;
-    (async () => {
-      let offset = 0;
+    let retryTimer: ReturnType<typeof setTimeout> | null = null;
+
+    async function loadFrom(offset: number): Promise<void> {
       while (!cancelled) {
-        const chunk = await getLog(forId, offset);
+        let chunk: { text: string; offset: number };
+        try {
+          chunk = await getLog(forId, offset);
+        } catch (e) {
+          if (cancelled || myGen !== loadGen) return;
+          loadError = errorMessage(e);
+          retryTimer = setTimeout(() => {
+            retryTimer = null;
+            if (!cancelled && myGen === loadGen) void loadFrom(offset);
+          }, RETRY_MS);
+          return;
+        }
         if (cancelled || myGen !== loadGen) return;
+        loadError = null;
         offset = chunk.offset;
         if (chunk.text === "") break;
         appendText(chunk.text);
       }
       if (cancelled || myGen !== loadGen) return;
       endOffset = offset;
-    })();
+    }
+    void loadFrom(0);
 
     return () => {
       cancelled = true;
+      if (retryTimer !== null) clearTimeout(retryTimer);
     };
   });
 
@@ -110,7 +136,9 @@
 </script>
 
 {#if lines.length === 0}
-  <div class="log" style="height: {height}px">No output yet.</div>
+  <div class="log" style="height: {height}px">
+    {loadError ? `Couldn't load the log: ${loadError}` : "No output yet."}
+  </div>
 {:else}
   <div class="logwrap">
     <div class="log" style="height: {height}px" role="log" bind:this={containerEl} onscroll={onscroll}>
@@ -118,6 +146,7 @@
         <div class="ln {line.cls}">{line.text}</div>
       {/each}
     </div>
+    {#if loadError}<div class="logerr small">Couldn't load the log: {loadError}</div>{/if}
     {#if !stickToBottom}
       <button type="button" class="jumpend" onclick={jumpToEnd}>jump to end</button>
     {/if}
@@ -126,6 +155,7 @@
 
 <style>
   .logwrap { position: relative; }
+  .logerr { color: var(--fail); font-weight: 800; margin-top: 6px; }
   .jumpend {
     position: absolute; bottom: 10px; left: 50%; transform: translateX(-50%);
     background: var(--accent); color: #fff; border: 0; border-radius: 99px;

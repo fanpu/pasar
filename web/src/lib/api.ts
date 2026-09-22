@@ -72,17 +72,55 @@ export function submitJob(body: SubmitBody): Promise<JobView> {
   return request("POST", "/api/jobs", body);
 }
 
+const FOLLOW_RECONNECT_MS = 2000;
+
+/** Tails a job's log over SSE from `offset`. The browser's `EventSource` auto-reconnects on
+ * network errors to the *same* URL — i.e. the original `offset` — which would make the server
+ * replay (and this duplicate-append) everything read since. So reconnection is handled here
+ * instead: `EventSource`'s own retry is bypassed by closing on every error and reopening from
+ * the latest offset actually seen, after a short delay. */
 export function followLog(
   id: number,
   offset: number,
   onText: (text: string) => void,
   onEnd: () => void,
 ): () => void {
-  const es = new EventSource(`/api/jobs/${id}/logs?follow=1&offset=${offset}`);
-  es.onmessage = (e) => onText(JSON.parse(e.data).text);
-  es.addEventListener("end", () => {
-    onEnd();
-    es.close();
-  });
-  return () => es.close();
+  let latestOffset = offset;
+  let es: EventSource | null = null;
+  let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+  let stopped = false;
+
+  function connect(fromOffset: number): void {
+    const source = new EventSource(`/api/jobs/${id}/logs?follow=1&offset=${fromOffset}`);
+    es = source;
+    source.onmessage = (e) => {
+      const data = JSON.parse(e.data) as { text: string; offset: number };
+      latestOffset = data.offset;
+      onText(data.text);
+    };
+    source.addEventListener("end", () => {
+      stopped = true;
+      source.close();
+      onEnd();
+    });
+    source.onerror = () => {
+      source.close();
+      if (stopped) return;
+      reconnectTimer = setTimeout(() => {
+        reconnectTimer = null;
+        if (!stopped) connect(latestOffset);
+      }, FOLLOW_RECONNECT_MS);
+    };
+  }
+
+  connect(offset);
+
+  return () => {
+    stopped = true;
+    if (reconnectTimer !== null) {
+      clearTimeout(reconnectTimer);
+      reconnectTimer = null;
+    }
+    es?.close();
+  };
 }
