@@ -2,8 +2,8 @@
 
 pasar is a job scheduler for one GPU machine (an NVIDIA GB10 with unified CPU/GPU memory). Jobs
 carry a **bid** (an integer priority, default **1000**); bids are free, and a higher bid can
-**preempt** a lower one to run now. A job can take the **whole GPU** (the default) or a **memory
-slice** (`--mem`) and share the box with other jobs. Every job is a real systemd unit, so it
+**preempt** a lower one to run now. A job takes the **whole GPU** by default (recommended), or a
+**memory slice** (`--mem`) to share the box with other jobs when it suits sharing. Every job is a real systemd unit, so it
 survives a pasard restart and can be inspected with normal Linux tools. This guide matches the
 pasar version installed on this machine; run `pasar guide` any time to reprint it, or fetch it
 over HTTP at `/llms.txt` (see below).
@@ -34,7 +34,7 @@ in this guide requires it.
 The `--` is required: everything after it is passed to the shell verbatim, including its own
 flags. Give the full environment invocation — pasar does not activate anything for you:
 
-    pasar submit --time 2h --mem 24G --note "lr sweep point 3" \
+    pasar submit --time 2h --note "lr sweep point 3" \
       -- .venv/bin/python train.py --lr 3e-5
 
 Options:
@@ -42,7 +42,7 @@ Options:
 | Flag | Meaning | Default |
 |---|---|---|
 | `--time DURATION` | **Required.** Estimated runtime, e.g. `2h30m`, `90m`, `45s`. Used to order the queue and project start times. Overrunning it is fine — the job is not killed for taking longer. | — |
-| `--mem SIZE` | Reserve a memory slice (e.g. `24G`) so this job can share the GPU with others. pasar adds a safety margin on top (`max(2 GiB, 10%)`) to cover CUDA context and allocator slack — this is a **unified-memory** box, so ordinary CUDA allocations count against the same pool as everything else. | omit for the whole GPU pool |
+| `--mem SIZE` | Reserve a memory slice (e.g. `24G`) so this job can share the GPU with others — only for jobs that suit sharing (see below). pasar adds a safety margin on top (`max(2 GiB, 10%)`) to cover CUDA context and allocator slack — this is a **unified-memory** box, so ordinary CUDA allocations count against the same pool as everything else. | whole GPU (recommended) |
 | `--bid N` | Priority. A higher bid can preempt lower-bid running jobs; equal bids never preempt each other. | `1000` |
 | `--no-preempt` | This job can never be stopped to make room for another. | preemptible |
 | `--grace DURATION` | Time between SIGTERM and SIGKILL when stopped, e.g. `180s`. Raise it if checkpointing takes longer than the default. | `120s` |
@@ -54,6 +54,23 @@ Options:
 | `--cwd DIR` | Working directory the command runs in. | current directory |
 | `--no-env` | Don't capture your current environment for the job. | environment is captured |
 
+**Take the whole GPU unless your job is a good candidate for sharing.** Whole GPU (no `--mem`) is
+the default and the recommendation. Sharing only pays off when a job leaves the GPU idle much of
+the time; otherwise every job on the box finishes later.
+
+Your job is a **good candidate for sharing** if it has any of the following.
+- Heavy CPU work between GPU steps (data loading, preprocessing, tokenization, RL environment steps, Python control flow)
+- Small model or small batch size, so kernels don't fill the GPU
+- Many tiny kernels in eager mode
+- Frequent I/O waits (disk, network, checkpointing)
+
+Your job is a **poor candidate for sharing** if it has any of the following.
+- Large-batch training that already pins compute or memory bandwidth
+- Tight memory usage close to the GPU's capacity
+- A deadline or a need for early results (sharing delays every job's completion)
+
+To share, pass `--mem` with an honest estimate of what the job needs.
+
 **Only bid above 1000 when the work is genuinely worth preempting someone else's running job.**
 Default (1000) is the right choice almost always; bidding high "just in case" pushes other people's
 and other agents' work off the GPU for no reason.
@@ -61,17 +78,17 @@ and other agents' work off the GPU for no reason.
 **Submit work as granular jobs.** One job should be one run: a hyperparameter sweep is one job
 per configuration, not one command that loops over them all. Small jobs let the scheduler pack
 them next to other work, start some as soon as memory frees up, preempt or retry just one point,
-and give each an accurate `--time` and `--mem`. One big looping job holds its resources for the
+and give each an accurate `--time`. One big looping job holds its resources for the
 whole sweep, and losing it loses every point. For example:
 
     for lr in 1e-5 3e-5 1e-4; do
-      pasar submit --time 45m --mem 20G --name "sweep-lr-$lr" --tag sweep-lr \
+      pasar submit --time 45m --name "sweep-lr-$lr" --tag sweep-lr \
         --note "lr sweep for the SFT run" -- .venv/bin/python train.py --lr "$lr"
     done
 
 Submitting returns the new job immediately (state `queued` or `running`):
 
-    $ pasar submit --time 2h --mem 24G --json -- .venv/bin/python train.py
+    $ pasar submit --time 2h --json -- .venv/bin/python train.py
     {"id": 42, "name": "train", "state": "queued", ...}
 
 If you omit `--name`, pasar derives one from the command (e.g. `train.py` above becomes `train`) —
@@ -256,13 +273,13 @@ Reading state is just a `GET`:
 
 ## Etiquette on a shared box
 
-- Estimate `--time` and `--mem` honestly — the scheduler and every other job's projected start
+- Estimate `--time` (and `--mem`, if you share) honestly — the scheduler and every other job's projected start
   time depend on them.
 - Split work into small, independent jobs (one per sweep point, seed or eval) rather than one
   long command that does it all.
 - Leave the bid at **1000** unless the work truly is more urgent than what's already running.
-- If a memory slice is enough, use `--mem` instead of taking the whole GPU — it lets other jobs
-  (yours or someone else's) run alongside you.
+- Take the whole GPU (the default) unless your job is a good candidate for sharing (see
+  "Submitting a job"); sharing a GPU that a job already keeps busy slows every job on it.
 - `pasar cancel` anything you no longer need; a queued or running job you've abandoned blocks
   everyone behind it.
 - Use `--note` to say why the job matters, and `--by` to identify yourself — someone (human or

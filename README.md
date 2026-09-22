@@ -8,8 +8,9 @@ the agents they steer).
 - **Bids set priority.** Default 1000. Bid higher only when the work is worth preempting others.
 - **Preemption with checkpoints.** Higher bids stop lower ones (SIGTERM, grace period, SIGKILL)
   and requeue them; jobs resume from their checkpoints.
-- **Whole GPU or a memory slice.** `--mem 24G` lets jobs share the GPU; pasar adds a safety margin
-  and watches real usage (including unified-memory GPUs, via NVML).
+- **Whole GPU by default, or a memory slice.** Jobs get the whole GPU unless they suit sharing
+  (CPU-heavy steps, small batches, I/O waits); then `--mem 24G` lets them share, and pasar adds a
+  safety margin and watches real usage (including unified-memory GPUs, via NVML).
 - **Knows why jobs died.** Out of memory, crashes, GPU errors, with the last log lines.
 - **Counts lost time** from preemptions and failures.
 - **Agent-friendly.** Every command has `--json`; `pasar wait` exit codes say what happened.
@@ -33,7 +34,7 @@ needed once, to build the web UI).
 
 ## Use
 
-    pasar submit --time 2h --mem 24G --note "lr sweep point 3" -- .venv/bin/python train.py
+    pasar submit --time 2h --note "lr sweep point 3" -- .venv/bin/python train.py
     pasar ls
     pasar logs -f 42
     pasar bid 42 1500

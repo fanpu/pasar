@@ -142,7 +142,7 @@ def build_parser() -> Parser:
 
     s = add("submit", "queue a job")
     s.add_argument("--time", required=True, help="estimated runtime, e.g. 2h30m")
-    s.add_argument("--mem", help="memory to reserve (e.g. 24G); omit for the whole GPU")
+    s.add_argument("--mem", help="share the GPU, reserving this much memory (e.g. 24G); omit for the whole GPU (recommended)")
     s.add_argument("--bid", type=int, help="priority (default 1000); higher bids preempt lower")
     s.add_argument("--no-preempt", action="store_true", help="never preempt this job")
     s.add_argument("--grace", help="time to save a checkpoint when stopped (default 120s)")

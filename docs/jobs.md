@@ -50,9 +50,23 @@ Without Python, append JSON lines yourself:
 Events: `checkpoint`, `resumed`, `progress` (`step`, `total_steps`, plus any numeric metrics like
 `loss` — these are charted in the job panel), `note` (`text`).
 
-## 5. Estimate memory and time
+## 5. Whole GPU or shared, and estimates
 
-`--mem` is what your job needs; pasar adds max(2 GiB, 10%) on top. Going over is tolerated until
+Whole GPU (no `--mem`) is the default and the recommendation. Sharing only pays off when a job
+leaves the GPU idle much of the time; otherwise every job on the box finishes later.
+
+Your job is a **good candidate for sharing** if it has any of the following.
+- Heavy CPU work between GPU steps (data loading, preprocessing, tokenization, RL environment steps, Python control flow)
+- Small model or small batch size, so kernels don't fill the GPU
+- Many tiny kernels in eager mode
+- Frequent I/O waits (disk, network, checkpointing)
+
+Your job is a **poor candidate for sharing** if it has any of the following.
+- Large-batch training that already pins compute or memory bandwidth
+- Tight memory usage close to the GPU's capacity
+- A deadline or a need for early results (sharing delays every job's completion)
+
+To share, `--mem` is what your job needs; pasar adds max(2 GiB, 10%) on top. Going over is tolerated until
 the machine runs short of memory, then the job furthest over its limit is stopped. `--time` is used
 to plan the queue; overrunning is fine.
 

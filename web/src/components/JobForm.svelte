@@ -159,6 +159,8 @@
         <label><input type="radio" name="jf-mem-mode" value="whole" bind:group={memMode} /> whole GPU</label>
         <label><input type="radio" name="jf-mem-mode" value="shared" bind:group={memMode} /> shared</label>
       </div>
+      <p class="hint">Whole GPU is recommended. Share only if the job leaves the GPU idle a lot: heavy CPU
+        work between steps, a small model or batch, many tiny kernels, or I/O waits.</p>
       {#if memMode === "shared"}
         <label for="jf-mem-size">memory size</label>
         <input id="jf-mem-size" type="text" bind:value={size} placeholder="24G" />
