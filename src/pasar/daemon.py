@@ -242,15 +242,18 @@ class Daemon:
         job = self.job(job_id)
         att = self.store.current_attempt(job_id)
         tail = _tail(self.job_dir(job_id) / "output.log", LOG_TAIL_LINES)
-        if job_id in self.oom_killed:
-            # Takes priority even if a preempt/cancel was also requested this tick: the job is
+        if job.stop_requested == "cancel":
+            # A user cancel wins even over a same-window watchdog OOM kill: the user asked for
+            # the job to stop, so it should end CANCELLED, not get a free requeue as a "failed"
+            # attempt. Ordering below this point: oom, then preempt.
+            kind, reason, summary = EndKind.CANCELLED, "cancelled", "cancelled while running"
+        elif job_id in self.oom_killed:
+            # Takes priority even if a preempt was also requested this tick: the job is
             # already dead from the watchdog's kill, and reporting anything else would let it
             # requeue without consuming a retry, looping on the same OOM forever.
             kind, reason = EndKind.FAILED, "oom"
             summary = (f"exceeded its {fmt_gib(self.limit(job))} limit "
                        f"(peak {fmt_gib(att.peak_mem)}) during memory pressure")
-        elif job.stop_requested == "cancel":
-            kind, reason, summary = EndKind.CANCELLED, "cancelled", "cancelled while running"
         elif job.stop_requested == "preempt":
             kind, reason, summary = EndKind.PREEMPTED, "preempted", "preempted by a higher bid"
         elif lost:

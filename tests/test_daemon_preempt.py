@@ -138,6 +138,35 @@ def test_oom_killed_job_is_not_chosen_as_a_same_tick_preemption_victim(
     assert daemon.store.attempts(1)[0].end_kind == EndKind.FAILED
 
 
+def test_user_cancel_wins_over_same_window_oom_kill(daemon, executor, probe, clock, make_spec):
+    # Regression: if a job is cancelled after the watchdog has already killed it for memory
+    # (but before that kill is reported), _finish used to check oom_killed before stop_requested
+    # and report the attempt FAILED/oom, which could requeue the job for a free retry even though
+    # the user cancelled it.
+    daemon.submit(make_spec(mem_request=10 * GiB, retries=2))  # job 1, limit 12 GiB
+    daemon.tick()
+    cg = executor.units["pasar-job-1-1"].control_group
+    probe.cg_mem[cg] = 1 * GiB
+    probe.cg_pids[cg] = [4242]
+    probe.gpu = {4242: 14 * GiB}  # 15 GiB used, over its 12 GiB limit
+    clock.advance(60)
+    daemon.tick()  # over limit, but no pressure yet
+    probe.psi = 25.0
+    daemon.tick()  # pressure starts
+    clock.advance(31)
+    daemon.tick()  # pressure sustained long enough: the watchdog kills job 1 this tick
+    assert executor.killed == ["pasar-job-1-1"]
+    daemon.cancel(1)  # user cancels before the kill has been reported
+    assert daemon.job(1).state == State.STOPPING and daemon.job(1).stop_requested == "cancel"
+    daemon.tick()  # unit reports dead
+    job = daemon.job(1)
+    assert job.state == State.CANCELLED
+    assert job.reason == "cancelled"
+    assert job.retries_used == 0
+    assert daemon.store.attempts(1)[0].end_kind == EndKind.CANCELLED
+    assert job.id not in daemon.oom_killed
+
+
 def test_reconcile_notes_stray_units(daemon, executor):
     executor.units["pasar-job-77-1"] = UnitState("pasar-job-77-1", False, None, None, None, None)
     daemon.reconcile()
