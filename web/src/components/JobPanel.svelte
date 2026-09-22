@@ -487,7 +487,7 @@
       <span>
         {#if jobView.tags.length > 0}
           {#each jobView.tags as tag, i (tag)}
-            {i > 0 ? ", " : ""}<button type="button" class="link" onclick={() => onfilter?.(tag)}>{tag}</button>
+            {i > 0 ? ", " : ""}{#if onfilter}<button type="button" class="link" onclick={() => onfilter(tag)}>{tag}</button>{:else}<span>{tag}</span>{/if}
           {/each}
         {:else}
           –

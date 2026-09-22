@@ -33,32 +33,55 @@
     if (debounceTimer !== null) clearTimeout(debounceTimer);
   });
 
+  // Every other change (a chip click, an add-select, clear) folds in `qDraft` and cancels any
+  // pending debounced search write. Without this, typing then clicking a chip within the 200ms
+  // debounce window loses the typed text: the chip's own onchange carries the old `q`, and the
+  // still-pending timer then fires afterwards and writes the old `q` again.
+  function flushed(): Filter {
+    if (debounceTimer !== null) {
+      clearTimeout(debounceTimer);
+      debounceTimer = null;
+    }
+    return { ...filter, q: qDraft };
+  }
+
   function toggleState(s: StateFilter): void {
-    const states = filter.states.includes(s) ? filter.states.filter((x) => x !== s) : [...filter.states, s];
-    onchange({ ...filter, states }, false);
+    const f = flushed();
+    const states = f.states.includes(s) ? f.states.filter((x) => x !== s) : [...f.states, s];
+    onchange({ ...f, states }, false);
   }
 
   function removeTag(tag: string): void {
-    onchange({ ...filter, tags: filter.tags.filter((t) => t !== tag) }, false);
+    const f = flushed();
+    onchange({ ...f, tags: f.tags.filter((t) => t !== tag) }, false);
   }
   function removeBy(by: string): void {
-    onchange({ ...filter, by: filter.by.filter((b) => b !== by) }, false);
+    const f = flushed();
+    onchange({ ...f, by: f.by.filter((b) => b !== by) }, false);
   }
 
   function onAddTag(e: Event): void {
     const select = e.target as HTMLSelectElement;
     const tag = select.value;
     select.value = "";
-    if (tag && !filter.tags.includes(tag)) onchange({ ...filter, tags: [...filter.tags, tag] }, false);
+    if (!tag) return;
+    const f = flushed();
+    if (!f.tags.includes(tag)) onchange({ ...f, tags: [...f.tags, tag] }, false);
   }
   function onAddBy(e: Event): void {
     const select = e.target as HTMLSelectElement;
     const by = select.value;
     select.value = "";
-    if (by && !filter.by.includes(by)) onchange({ ...filter, by: [...filter.by, by] }, false);
+    if (!by) return;
+    const f = flushed();
+    if (!f.by.includes(by)) onchange({ ...f, by: [...f.by, by] }, false);
   }
 
   function clear(): void {
+    if (debounceTimer !== null) {
+      clearTimeout(debounceTimer);
+      debounceTimer = null;
+    }
     onchange(EMPTY_FILTER, false);
   }
 
@@ -81,8 +104,10 @@
     {#each STATE_FILTERS as s (s)}
       <button
         type="button"
-        class="st s-{s}"
+        class="st"
+        data-state={s}
         class:off={!filter.states.includes(s) && counts[s] === 0}
+        class:on={filter.states.includes(s)}
         aria-pressed={filter.states.includes(s)}
         onclick={() => toggleState(s)}
       >
@@ -130,8 +155,20 @@
   .search input::placeholder { color: var(--ink-3); }
 
   .states { display: flex; gap: 6px; flex-wrap: wrap; }
-  .st { padding: 4px 10px; border-radius: 99px; font-size: 12px; font-weight: 800; border: 0; }
-  .st.off { background: transparent; border: 1.5px dashed var(--line-2); color: var(--ink-3); }
+  /* Unselected (even with a nonzero count) stays neutral and outlined; only the pressed
+     (aria-pressed) chip fills solid in the state's own colour, so it's obvious at a glance which
+     states are actually filtering the list. */
+  .st {
+    padding: 4px 10px; border-radius: 99px; font-size: 12px; font-weight: 800;
+    border: 1.5px solid var(--line-2); background: var(--card); color: var(--ink-2);
+  }
+  .st.off { background: transparent; border-style: dashed; color: var(--ink-3); }
+  .st.on { border-color: transparent; color: #fff; }
+  .st.on[data-state="running"] { background: var(--run); }
+  .st.on[data-state="queued"] { background: var(--queue); }
+  .st.on[data-state="completed"] { background: var(--done); }
+  .st.on[data-state="failed"] { background: var(--fail); }
+  .st.on[data-state="cancelled"] { background: var(--gray); }
 
   .facets { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; }
   .fchip {

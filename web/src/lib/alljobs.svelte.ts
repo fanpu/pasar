@@ -18,6 +18,10 @@ export class AllJobs {
   #clock: () => number;
   #lastFetch: number | null = null;
   #fetching = false;
+  // The most recent `live` an active `update()` call has seen, kept so a fetch that was started
+  // several ticks ago can still overlay it on resolve — the `live` array closed over at fetch time
+  // would otherwise be however-many-ticks stale.
+  #latestLive: JobView[] = [];
 
   constructor(opts?: AllJobsOptions) {
     this.#fetchAll = opts?.fetchAll ?? getAllJobs;
@@ -32,6 +36,7 @@ export class AllJobs {
    * in `live` are left as they were. */
   update(active: boolean, live: JobView[]): void {
     if (!active) return;
+    this.#latestLive = live;
     const cache = this.jobs;
     const needsFetch = cache === null
       || live.some((j) => !cache.some((c) => c.id === j.id))
@@ -41,7 +46,11 @@ export class AllJobs {
       this.#fetching = true;
       this.#fetchAll().then(
         (jobs) => {
-          this.jobs = jobs;
+          // Overlay whatever `live` is *now* (not whatever it was when this fetch started) —
+          // several snapshot ticks, each with their own overlay, may have landed while the fetch
+          // was in flight, and assigning the fetched list as-is would replace those fresher rows
+          // with the older ones the fetch happened to return.
+          this.jobs = this.#mergedWithLive(jobs, this.#latestLive);
           this.#lastFetch = this.#clock();
           this.#fetching = false;
         },
@@ -55,7 +64,17 @@ export class AllJobs {
 
   #overlay(live: JobView[]): void {
     const cache = this.jobs;
-    if (cache === null || live.length === 0) return;
+    if (cache === null) return;
+    const next = this.#mergedWithLive(cache, live);
+    if (next !== cache) this.jobs = next;
+  }
+
+  /** Returns `cache` overlaid with `live` by id (live wins on content differences; jobs in `cache`
+   * that aren't in `live` are kept as-is; jobs in `live` but not `cache` are appended). Returns
+   * `cache` itself (same reference) when nothing actually changed, so callers can skip a
+   * reassignment — see the note in `#overlay`'s caller about why that matters for reactivity. */
+  #mergedWithLive(cache: JobView[], live: JobView[]): JobView[] {
+    if (live.length === 0) return cache;
     const liveById = new Map(live.map((j) => [j.id, j]));
     let changed = false;
     const next = cache.map((j) => {
@@ -74,7 +93,7 @@ export class AllJobs {
         changed = true;
       }
     }
-    if (changed) this.jobs = next;
+    return changed ? next : cache;
   }
 }
 

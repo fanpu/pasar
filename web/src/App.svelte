@@ -36,9 +36,25 @@
     const active = filterActive;
     untrack(() => allJobs.update(active, liveJobs));
   });
-  const source = $derived(allJobs.jobs ?? live.snapshot?.jobs ?? []);
+  // While a filter is active, `source` is the (kept-fresh) all-jobs cache: the table, counts and
+  // total need the full history, not just the live snapshot's ~24h window. Once cleared, there's
+  // no reason to keep reading the cache — it stops being refreshed the instant `filterActive`
+  // goes false (see `allJobs.update` above), so it would otherwise go stale (e.g. a job finishing
+  // wouldn't update the "running" chip's count).
+  const source = $derived(filterActive ? (allJobs.jobs ?? live.snapshot?.jobs ?? []) : (live.snapshot?.jobs ?? []));
   const filterCounts = $derived(stateCounts(source, filter));
-  const filterKnown = $derived(knownValues(source));
+  // The "+ tag"/"+ submitter" dropdowns list every value ever seen, so they read from the live
+  // snapshot *and* the cache (when it's been loaded) regardless of whether the filter is active
+  // right now — unlike `source`, they shouldn't go blank (or lose history) just because the
+  // filter was cleared.
+  const knownSource = $derived.by(() => {
+    const liveJobs = live.snapshot?.jobs ?? [];
+    const cache = allJobs.jobs;
+    if (cache === null) return liveJobs;
+    const liveIds = new Set(liveJobs.map((j) => j.id));
+    return [...liveJobs, ...cache.filter((j) => !liveIds.has(j.id))];
+  });
+  const filterKnown = $derived(knownValues(knownSource));
   const tableJobs = $derived(
     filterActive ? sortJobs(source.filter((j) => matches(j, filter)), effectiveSort(filter)) : (live.snapshot?.jobs ?? []),
   );
@@ -190,6 +206,7 @@
       total={source.length}
       counts={filterCounts}
       known={filterKnown}
+      sourceJobs={source}
       onfilter={setFilter}
     />
   {/if}

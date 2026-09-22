@@ -114,4 +114,61 @@ describe("TagSummary", () => {
     await fireEvent.click(screen.getByText("retry 1 failed"));
     expect(await screen.findByText("Retry 1 failed demo job?")).toBeInTheDocument();
   });
+
+  it("freezes the modal's target count when it opens, so the jobs list changing afterward doesn't grow or shrink the batch", async () => {
+    const twoQueued = [job({ id: 1, state: "queued" }), job({ id: 2, state: "queued" })];
+    const { rerender } = render(TagSummary, { tag: "demo", jobs: twoQueued });
+    await fireEvent.click(screen.getByText("cancel 2 queued"));
+    expect(await screen.findByText("Cancel 2 queued demo jobs?")).toBeInTheDocument();
+
+    // A third job becomes queued after the modal opened (e.g. the parent re-rendered from a live
+    // tick) — the modal must not pick it up.
+    const threeQueued = [...twoQueued, job({ id: 3, state: "queued" })];
+    await rerender({ tag: "demo", jobs: threeQueued });
+
+    expect(screen.getByText("Cancel 2 queued demo jobs?")).toBeInTheDocument();
+    expect(screen.getByText("Cancel 2 jobs")).toBeInTheDocument();
+  });
+
+  it("running only counts the frozen targets, not a job that disappeared from the list mid-batch", async () => {
+    const twoQueued = [job({ id: 1, state: "queued" }), job({ id: 2, state: "queued" })];
+    let resolveFirst!: (v: JobView) => void;
+    const first = new Promise<JobView>((res) => { resolveFirst = res; });
+    vi.mocked(api.cancelJob).mockImplementationOnce(() => first);
+    vi.mocked(api.cancelJob).mockImplementationOnce(async (id: number) => job({ id }));
+
+    const { rerender } = render(TagSummary, { tag: "demo", jobs: twoQueued });
+    await fireEvent.click(screen.getByText("cancel 2 queued"));
+    await fireEvent.click(screen.getByText("Cancel 2 jobs"));
+
+    // Job 1 is cancelled (leaves the parent's list) while the batch is still running.
+    await rerender({ tag: "demo", jobs: [twoQueued[1]] });
+    expect(screen.getByText("Cancel 2 jobs")).toBeInTheDocument();
+
+    resolveFirst(job({ id: 1 }));
+    await waitFor(() => expect(screen.getByText("cancelled 2")).toBeInTheDocument());
+  });
+
+  it("pressing confirm twice before Svelte disables the button still runs the batch only once", async () => {
+    let resolveFirst!: (v: JobView) => void;
+    const first = new Promise<JobView>((res) => { resolveFirst = res; });
+    vi.mocked(api.cancelJob).mockImplementationOnce(() => first);
+    vi.mocked(api.cancelJob).mockImplementation(async (id: number) => job({ id }));
+
+    render(TagSummary, { tag: "demo", jobs });
+    await fireEvent.click(screen.getByText("cancel 2 queued"));
+    const confirmBtn = await screen.findByText("Cancel 2 jobs");
+
+    // Both onclick handlers run synchronously, back to back, before either has a chance to await
+    // or let Svelte re-render the (about to be) disabled button — exactly the race the `running`
+    // guard inside runBulk protects against.
+    fireEvent.click(confirmBtn);
+    fireEvent.click(confirmBtn);
+
+    expect(api.cancelJob).toHaveBeenCalledTimes(1);
+    resolveFirst(job({ id: 2 }));
+    await waitFor(() => expect(screen.getByText("cancelled 2")).toBeInTheDocument());
+    // Still exactly one call per queued job — a second confirm never started its own batch.
+    expect(api.cancelJob).toHaveBeenCalledTimes(2);
+  });
 });

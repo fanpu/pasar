@@ -22,6 +22,11 @@
   let confirming = $state<Action | null>(null);
   let running = $state(false);
   let result = $state<string | null>(null);
+  // Snapshotted when the modal opens (see `open`), not re-derived on every tick: without this,
+  // a job that's cancelled or retried mid-batch leaves `queuedJobs`/`failedJobs`, which would
+  // shrink the title and button counts while the batch is still running, and could pick up (or
+  // drop) a job the user never actually confirmed.
+  let targets = $state<JobView[]>([]);
 
   function plural(n: number): string {
     return n === 1 ? "job" : "jobs";
@@ -29,6 +34,7 @@
 
   function open(action: Action): void {
     result = null;
+    targets = action === "cancel" ? queuedJobs : failedJobs;
     confirming = action;
   }
   function close(): void {
@@ -38,12 +44,15 @@
 
   /** Runs `call` for every job in `targets` one at a time (not in parallel), so a burst of cancels
    * or restarts doesn't hammer the server all at once. Failures are collected but don't stop the
-   * rest of the batch — the first error message is reported alongside the count. */
-  async function runBulk(targets: JobView[], call: (id: number) => Promise<unknown>, verb: string): Promise<void> {
+   * rest of the batch — the first error message is reported alongside the count. A `running` guard
+   * up front makes a second confirm click (e.g. a double-click landing before Svelte re-renders
+   * the now-disabled button) a no-op instead of running the whole batch twice. */
+  async function runBulk(list: JobView[], call: (id: number) => Promise<unknown>, verb: string): Promise<void> {
+    if (running) return;
     running = true;
     let ok = 0;
     let firstError: string | null = null;
-    for (const job of targets) {
+    for (const job of list) {
       try {
         await call(job.id);
         ok++;
@@ -53,15 +62,15 @@
     }
     running = false;
     confirming = null;
-    const failedCount = targets.length - ok;
+    const failedCount = list.length - ok;
     result = failedCount === 0 ? `${verb} ${ok}` : `${verb} ${ok} · ${failedCount} couldn't be: ${firstError}`;
   }
 
   function confirmCancel(): void {
-    void runBulk(queuedJobs, cancelJob, "cancelled");
+    void runBulk(targets, cancelJob, "cancelled");
   }
   function confirmRetry(): void {
-    void runBulk(failedJobs, (id) => restartJob(id, {}), "retried");
+    void runBulk(targets, (id) => restartJob(id, {}), "retried");
   }
 </script>
 
@@ -100,19 +109,19 @@
 </div>
 
 {#if confirming === "cancel"}
-  <Modal title={`Cancel ${queuedJobs.length} queued ${tag} ${plural(queuedJobs.length)}?`} onclose={close}>
+  <Modal title={`Cancel ${targets.length} queued ${tag} ${plural(targets.length)}?`} onclose={close}>
     <div class="macts">
       <button type="button" class="btn danger" disabled={running} onclick={confirmCancel}>
-        Cancel {queuedJobs.length} {plural(queuedJobs.length)}
+        Cancel {targets.length} {plural(targets.length)}
       </button>
       <button type="button" class="btn" disabled={running} onclick={close}>Back</button>
     </div>
   </Modal>
 {:else if confirming === "retry"}
-  <Modal title={`Retry ${failedJobs.length} failed ${tag} ${plural(failedJobs.length)}?`} onclose={close}>
+  <Modal title={`Retry ${targets.length} failed ${tag} ${plural(targets.length)}?`} onclose={close}>
     <div class="macts">
       <button type="button" class="btn primary" disabled={running} onclick={confirmRetry}>
-        Retry {failedJobs.length} {plural(failedJobs.length)}
+        Retry {targets.length} {plural(targets.length)}
       </button>
       <button type="button" class="btn" disabled={running} onclick={close}>Back</button>
     </div>

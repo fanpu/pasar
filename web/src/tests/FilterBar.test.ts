@@ -71,6 +71,35 @@ describe("FilterBar", () => {
     expect(onchange).toHaveBeenCalledWith({ ...EMPTY_FILTER, by: ["opus-triage"] }, false);
   });
 
+  it("keeps a just-typed search when a chip is clicked within the debounce window", async () => {
+    const onchange = vi.fn();
+    render(FilterBar, { filter: EMPTY_FILTER, counts: { ...ZERO_COUNTS, running: 2 }, known: { tags: [], by: [] }, onchange });
+    fireEvent.input(screen.getByRole("searchbox"), { target: { value: "lr" } });
+
+    // Click a state chip before the 200ms debounce timer fires.
+    await fireEvent.click(screen.getByRole("button", { name: /running/ }));
+    expect(onchange).toHaveBeenCalledTimes(1);
+    expect(onchange).toHaveBeenCalledWith({ ...EMPTY_FILTER, q: "lr", states: ["running"] }, false);
+
+    // The pending debounce must have been cancelled by the chip click, not fired afterwards with
+    // the stale (pre-typing) `q`.
+    vi.advanceTimersByTime(200);
+    expect(onchange).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps a just-typed search when the clear button is clicked within the debounce window", async () => {
+    const onchange = vi.fn();
+    render(FilterBar, {
+      filter: { ...EMPTY_FILTER, tags: ["x"] }, counts: ZERO_COUNTS, known: { tags: ["x"], by: [] }, onchange,
+    });
+    fireEvent.input(screen.getByRole("searchbox"), { target: { value: "lr" } });
+    await fireEvent.click(screen.getByText("clear"));
+    expect(onchange).toHaveBeenCalledWith(EMPTY_FILTER, false);
+
+    vi.advanceTimersByTime(200);
+    expect(onchange).toHaveBeenCalledTimes(1);
+  });
+
   it("shows clear only when the filter is active, and it resets to empty", async () => {
     const onchange = vi.fn();
     const { rerender } = render(FilterBar, {

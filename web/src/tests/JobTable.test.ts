@@ -1,8 +1,14 @@
-import { render, screen, fireEvent, within } from "@testing-library/svelte";
+import { render, screen, fireEvent, waitFor, within } from "@testing-library/svelte";
 import { describe, expect, it, vi } from "vitest";
 import JobTable from "../components/JobTable.svelte";
+import * as api from "../lib/api";
 import { EMPTY_FILTER, type Filter } from "../lib/jobfilter";
 import { GIB, job, NOW } from "./fixtures";
+
+vi.mock("../lib/api", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../lib/api")>();
+  return { ...actual, cancelJob: vi.fn(), restartJob: vi.fn() };
+});
 
 describe("JobTable", () => {
   it("shows group headings in order and omits empty groups", () => {
@@ -284,5 +290,66 @@ describe("JobTable", () => {
     expect(within(empty).getByText("No jobs match.")).toBeInTheDocument();
     await fireEvent.click(within(empty).getByText("clear"));
     expect(onfilter).toHaveBeenCalledWith(EMPTY_FILTER, false);
+  });
+
+  it("offers both directions for every key on the phone sort select, with a neutral placeholder when nothing is chosen", () => {
+    render(JobTable, {
+      jobs: [job({ id: 1 }), job({ id: 2 })],
+      pool: 105 * GIB, now: NOW, selected: null, onopen: () => {}, filter: EMPTY_FILTER,
+    });
+    const select = screen.getByLabelText("sort") as HTMLSelectElement;
+    // Nothing chosen yet: the placeholder is selected, not "newest first" (effectiveSort's fallback).
+    expect(select.value).toBe("");
+    const labels = [...select.options].map((o) => o.textContent);
+    expect(labels).toEqual(expect.arrayContaining([
+      "sort…", "newest first", "oldest first", "bid high → low", "bid low → high",
+    ]));
+  });
+
+  it("picking a direction from the phone sort select applies that sort, even from the unsorted (grouped) view", async () => {
+    const onfilter = vi.fn();
+    render(JobTable, {
+      jobs: [job({ id: 1 }), job({ id: 2 })],
+      pool: 105 * GIB, now: NOW, selected: null, onopen: () => {}, onfilter, filter: EMPTY_FILTER,
+    });
+    const select = screen.getByLabelText("sort") as HTMLSelectElement;
+    await fireEvent.change(select, { target: { value: "id:d" } });
+    expect(onfilter).toHaveBeenCalledWith({ ...EMPTY_FILTER, sort: { key: "id", desc: true } }, false);
+  });
+
+  it("feeds the tag summary every job with the tag from sourceJobs, not just the rows left after other filters narrow the table", () => {
+    const jobsWithTag = [
+      job({ id: 1, tags: ["x"], state: "queued" }),
+      job({ id: 2, tags: ["x"], state: "queued" }),
+      job({ id: 3, tags: ["x"], state: "failed", end_time: NOW - 10 }),
+    ];
+    render(JobTable, {
+      // The table itself is narrowed (by an extra state filter) down to just the failed job...
+      jobs: [jobsWithTag[2]],
+      pool: 105 * GIB, now: NOW, selected: null, onopen: () => {},
+      filter: { ...EMPTY_FILTER, tags: ["x"], states: ["failed"] }, total: 3,
+      sourceJobs: jobsWithTag,
+    });
+    // ...but the tag summary strip and its bulk actions still cover the whole tag: both queued
+    // jobs plus the one failed job, regardless of the state filter also in effect.
+    expect(screen.getByText("cancel 2 queued")).toBeInTheDocument();
+    expect(screen.getByText("retry 1 failed")).toBeInTheDocument();
+  });
+
+  it("keys the tag summary by tag, so a bulk-action result line doesn't carry over when the active tag changes", async () => {
+    vi.mocked(api.cancelJob).mockResolvedValue(job({ id: 10 }));
+    const jobsForA = [job({ id: 10, tags: ["a"], state: "queued" })];
+    const { rerender } = render(JobTable, {
+      jobs: jobsForA, pool: 105 * GIB, now: NOW, selected: null, onopen: () => {},
+      filter: { ...EMPTY_FILTER, tags: ["a"] }, sourceJobs: jobsForA,
+    });
+    await fireEvent.click(screen.getByText("cancel 1 queued"));
+    await fireEvent.click(await screen.findByText("Cancel 1 job"));
+    await waitFor(() => expect(screen.getByText("cancelled 1")).toBeInTheDocument());
+
+    const jobsForB = [job({ id: 11, tags: ["b"], state: "queued" })];
+    await rerender({ jobs: jobsForB, filter: { ...EMPTY_FILTER, tags: ["b"] }, sourceJobs: jobsForB });
+
+    expect(screen.queryByText("cancelled 1")).toBeNull();
   });
 });

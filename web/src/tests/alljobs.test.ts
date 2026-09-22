@@ -132,6 +132,22 @@ describe("AllJobs", () => {
     expect(store.jobs?.[0].run_time).toBe(45);
   });
 
+  it("overlays the latest live jobs onto a fetch that resolves with older data (a tick landed while the fetch was in flight)", async () => {
+    const d = deferred<JobView[]>();
+    const fetchAll = vi.fn().mockReturnValue(d.promise);
+    const store = new AllJobs({ fetchAll });
+    store.update(true, []); // triggers the fetch, left pending
+
+    // A newer live tick arrives before the fetch resolves.
+    store.update(true, [job({ id: 1, name: "fresher" })]);
+
+    // The fetch resolves with what was correct when it *started* — older than the tick above.
+    d.resolve([job({ id: 1, name: "stale" })]);
+    await d.promise;
+
+    expect(store.jobs?.find((j) => j.id === 1)?.name).toBe("fresher");
+  });
+
   it("clears the in-flight flag on a rejected fetch, so a later update can retry", async () => {
     const d1 = deferred<JobView[]>();
     const fetchAll = vi.fn().mockReturnValueOnce(d1.promise);

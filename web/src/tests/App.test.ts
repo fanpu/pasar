@@ -1,7 +1,9 @@
 import { render, screen, fireEvent, waitFor, within } from "@testing-library/svelte";
+import { tick } from "svelte";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import App from "../App.svelte";
 import * as api from "../lib/api";
+import { AllJobs } from "../lib/alljobs.svelte";
 import { mascot } from "../lib/mascot.svelte";
 import { router } from "../lib/router.svelte";
 import { job, jobDetail, status } from "./fixtures";
@@ -89,10 +91,14 @@ describe("App", () => {
     // reassign `jobs` on every tick and re-trigger App's own update effect without end.
     const steady = () => job({ id: 5, name: "steady", tags: ["sweep-a"], state: "running", start_time: 1000, run_time: 30 });
     vi.mocked(api.getAllJobs).mockResolvedValue([steady()]);
+    // Spy on the real method (not a mock replacement) so we can count how many times App's effect
+    // actually invokes it — a self-triggering loop would call this far more than once per tick.
+    const updateSpy = vi.spyOn(AllJobs.prototype, "update");
 
     const { container } = render(App);
     const es = FakeEventSource.last!;
     es.emit({ status: status(), jobs: [steady()] });
+    await tick();
 
     const table = await waitFor(() => {
       const t = container.querySelector("table");
@@ -101,13 +107,52 @@ describe("App", () => {
     });
     expect(within(table).getByText("steady")).toBeInTheDocument();
 
-    // Several more ticks with a content-identical (but reference-distinct) live job.
+    const callsBefore = updateSpy.mock.calls.length;
+    // Several more ticks with a content-identical (but reference-distinct) live job, each flushed
+    // individually via `tick()` so Svelte's effects actually run between emissions — emitting all
+    // ten synchronously (the old version of this test) let Svelte coalesce them into a single
+    // flush and never actually exercised a repeated self-trigger.
     for (let i = 0; i < 10; i++) {
       es.emit({ status: status({ version: i + 2 }), jobs: [steady()] });
+      await tick();
     }
 
-    // Still just the one row, still responsive — no runaway loop, no crash.
+    // Still just the one row, still responsive — no runaway loop, no crash. And `update` ran
+    // exactly once per tick: if the effect that calls it ever again depends on its own write (the
+    // bug `untrack` in App.svelte guards against), this would run away far past 10.
     expect(within(table).getAllByText("steady").length).toBe(1);
+    expect(updateSpy.mock.calls.length).toBe(callsBefore + 10);
+    updateSpy.mockRestore();
+  });
+
+  it("uses only the live snapshot for state counts once the filter is cleared, while the '+ tag' dropdown keeps the tags seen while it was active", async () => {
+    history.pushState({}, "", "/?tag=sweep-a");
+    dispatchEvent(new PopStateEvent("popstate"));
+    const historic = job({ id: 900, name: "ancient", tags: ["ancient-tag"], state: "completed", end_time: 1 });
+    vi.mocked(api.getAllJobs).mockResolvedValue([historic]);
+    const liveJob = job({ id: 1, name: "now-running", tags: ["sweep-a"], state: "running", start_time: 1000 });
+
+    render(App);
+    const es = FakeEventSource.last!;
+    es.emit({ status: status(), jobs: [liveJob] });
+    await waitFor(() => expect(document.querySelector("table")).not.toBeNull());
+    // Wait for the all-jobs fetch to land so the cache is populated (it must not fall out of
+    // `filterKnown` again just because the filter below gets cleared).
+    await waitFor(() => expect(api.getAllJobs).toHaveBeenCalled());
+    await screen.findByLabelText("add tag filter");
+
+    // Clear the filter.
+    history.pushState({}, "", "/");
+    dispatchEvent(new PopStateEvent("popstate"));
+    await tick();
+
+    // The state chip must reflect the live snapshot only (one running job) — not a frozen copy
+    // of whatever the all-jobs cache last held.
+    expect(screen.getByRole("button", { name: /running 1/ })).toBeInTheDocument();
+    // The "+ tag" dropdown still offers a tag only ever seen in the (now-unused) cache, because it
+    // reads the live snapshot *plus* the cache, not just whichever one `source` currently is.
+    const addTag = screen.getByLabelText("add tag filter") as HTMLSelectElement;
+    expect([...addTag.options].map((o) => o.value)).toContain("ancient-tag");
   });
 
   it("clicking a tag in the job panel filters and closes the panel with a single history push", async () => {

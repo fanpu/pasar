@@ -21,21 +21,50 @@
     total?: number;
     counts?: Record<StateFilter, number>;
     known?: { tags: string[]; by: string[] };
+    // The full (unfiltered-by-search/state/other-tags) job list `jobs` was drawn from, for the tag
+    // summary strip: it covers every job with the active tag regardless of what else is filtered,
+    // not just the rows currently on screen. Defaults to `jobs` so callers/tests that don't pass
+    // it (and aren't exercising more than one filter at once) keep working.
+    sourceJobs?: JobView[];
     onfilter?: (f: Filter, replace?: boolean) => void;
   }
   let {
     jobs, now, selected, onopen,
-    filter = EMPTY_FILTER, total = jobs.length, counts = ZERO_COUNTS, known = { tags: [], by: [] }, onfilter = () => {},
+    filter = EMPTY_FILTER, total = jobs.length, counts = ZERO_COUNTS, known = { tags: [], by: [] },
+    sourceJobs = jobs, onfilter = () => {},
   }: Props = $props();
 
   const active = $derived(isActive(filter));
 
+  // Jobs carrying the single active tag, out of the *full* source list — not `jobs` (the rows
+  // left after search/state/other filters are also applied). The tag summary and its bulk actions
+  // always cover every job with that tag, regardless of what else is currently filtering the table.
+  const tagJobs = $derived(
+    filter.tags.length === 1 ? sourceJobs.filter((j) => j.tags.includes(filter.tags[0])) : [],
+  );
+
   // New key → desc for these (the "biggest/most recent first" reading); asc for the rest.
   const DESC_DEFAULT = new Set<SortKey>(["id", "bid", "memory", "time", "submitted", "ended"]);
-  const SORT_OPTIONS: { key: SortKey; label: string }[] = [
-    { key: "id", label: "newest" }, { key: "state", label: "state" }, { key: "bid", label: "bid" },
-    { key: "memory", label: "memory" }, { key: "time", label: "time" }, { key: "by", label: "submitter" },
+  interface SortOption { key: SortKey; desc: boolean; label: string }
+  // Both directions for every key, so the phone select (which replaces the hidden column headers)
+  // can pick a direction too, not just a key. Encoded as "<key>:<a|d>" for the <option> value.
+  const SORT_OPTIONS: SortOption[] = [
+    { key: "id", desc: true, label: "newest first" },
+    { key: "id", desc: false, label: "oldest first" },
+    { key: "state", desc: false, label: "state" },
+    { key: "state", desc: true, label: "state, reversed" },
+    { key: "bid", desc: true, label: "bid high → low" },
+    { key: "bid", desc: false, label: "bid low → high" },
+    { key: "memory", desc: true, label: "memory high → low" },
+    { key: "memory", desc: false, label: "memory low → high" },
+    { key: "time", desc: true, label: "time high → low" },
+    { key: "time", desc: false, label: "time low → high" },
+    { key: "by", desc: false, label: "submitter A → Z" },
+    { key: "by", desc: true, label: "submitter Z → A" },
   ];
+  function optValue(o: { key: SortKey; desc: boolean }): string {
+    return `${o.key}:${o.desc ? "d" : "a"}`;
+  }
 
   function sortFor(key: SortKey): { key: SortKey; desc: boolean } {
     // Compare against the *actual* (nullable) filter.sort, not effectiveSort's fallback default —
@@ -56,13 +85,16 @@
     return effectiveSort(filter).desc ? "▼" : "▲";
   }
   function onSortSelect(e: Event): void {
-    const key = (e.target as HTMLSelectElement).value as SortKey | "";
-    if (key) onSort(key);
+    const value = (e.target as HTMLSelectElement).value;
+    if (!value) return;
+    const [key, dir] = value.split(":") as [SortKey, "a" | "d"];
+    onfilter({ ...filter, sort: { key, desc: dir === "d" } }, false);
   }
-  const sortSelectValue = $derived.by(() => {
-    const key = effectiveSort(filter).key;
-    return SORT_OPTIONS.some((o) => o.key === key) ? key : "";
-  });
+  // Compares against the *actual* (nullable) `filter.sort`, not `effectiveSort`'s fallback — the
+  // fallback defaults to id/desc even when nothing has been chosen yet, which would otherwise
+  // make the phone select show "newest first" as already picked and swallow the first change
+  // event when the user picks it themselves.
+  const sortSelectValue = $derived(filter.sort ? optValue(filter.sort) : "");
 
   function addTag(tag: string): void {
     if (filter.tags.includes(tag)) return;
@@ -280,12 +312,14 @@
     <span class="spacer"></span>
     <select class="sortsel" aria-label="sort" value={sortSelectValue} onchange={onSortSelect}>
       <option value="" disabled>sort…</option>
-      {#each SORT_OPTIONS as opt (opt.key)}<option value={opt.key}>sort: {opt.label}</option>{/each}
+      {#each SORT_OPTIONS as opt (optValue(opt))}<option value={optValue(opt)}>{opt.label}</option>{/each}
     </select>
   </h3>
   <FilterBar {filter} {counts} {known} onchange={onfilter} />
   {#if filter.tags.length === 1}
-    <TagSummary tag={filter.tags[0]} {jobs} />
+    {#key filter.tags[0]}
+      <TagSummary tag={filter.tags[0]} jobs={tagJobs} />
+    {/key}
   {/if}
   {#if jobs.length === 0}
     {#if active}
