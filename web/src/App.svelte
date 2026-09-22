@@ -9,6 +9,7 @@
   import Banner from "./components/Banner.svelte";
   import Tiles from "./components/Tiles.svelte";
   import Timeline from "./components/Timeline.svelte";
+  import JobTable from "./components/JobTable.svelte";
   import Toast from "./components/Toast.svelte";
   import type { Snapshot } from "./lib/types";
 
@@ -128,10 +129,13 @@
       now={live.snapshot.status.now}
       onopen={(id) => router.go(`/jobs/${id}`)}
     />
-    <section class="sec">
-      <h3>Jobs</h3>
-      <!-- Task 9: job table -->
-    </section>
+    <JobTable
+      jobs={live.snapshot.jobs}
+      pool={live.snapshot.status.pool}
+      now={live.snapshot.status.now}
+      selected={router.route.name === "job" ? router.route.id : null}
+      onopen={(id) => router.go(`/jobs/${id}`)}
+    />
   {/if}
 
   {#if router.route.name === "job"}
