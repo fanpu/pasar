@@ -14,8 +14,11 @@
     pool: number;
     now: number;
     onopen: (id: number) => void;
+    // When given, blocks for a job it returns true for are faded (opacity 0.25) — used to dim
+    // jobs that don't match the current filter without hiding them from the schedule entirely.
+    dim?: (job: JobView) => boolean;
   }
-  let { jobs, pool, now, onopen }: Props = $props();
+  let { jobs, pool, now, onopen, dim }: Props = $props();
 
   // Unique per component instance so clipPath ids never collide if several Timelines mount.
   const uid = Math.random().toString(36).slice(2);
@@ -345,6 +348,7 @@
             tabindex="0"
             aria-label={ariaLabel(job, b.kind, b.start, b.end)}
             class="blk"
+            style={dim?.(job) ? "opacity: 0.25" : undefined}
             onclick={() => open(job)}
             onkeydown={(e) => onBlockKeydown(e, job)}
             onmousemove={(e) => showTip(e, job, b.kind, b.start, b.end)}

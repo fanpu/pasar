@@ -25,10 +25,13 @@
     // GPU whose power/temperature charts this panel shows. Optional so existing callers/tests
     // that don't have the full job list keep working — the note is simply omitted.
     jobs?: JobView[];
+    // Lets the tags list act as filter shortcuts. Optional so existing callers/tests that don't
+    // care about filtering keep working — the tags then render as plain text, as before.
+    onfilter?: (tag: string) => void;
     onclose: () => void;
     onrestartwith: (job: JobDetail) => void;
   }
-  let { id, live, now, grafanaUrl, jobs = [], onclose, onrestartwith }: Props = $props();
+  let { id, live, now, grafanaUrl, jobs = [], onfilter, onclose, onrestartwith }: Props = $props();
 
   const FINISHED = new Set<JobView["state"]>(["completed", "failed", "cancelled"]);
   const TABS = [
@@ -480,7 +483,16 @@
       <span class="k">git</span><span class="mono">{gitShort(jobView.git_commit)}</span>
       <span class="k">grace</span><span>{graceText(jobView)}</span>
       <span class="k">retries</span><span>{jobView.retries_used} of {jobView.retries} used</span>
-      <span class="k">tags</span><span>{jobView.tags.length > 0 ? jobView.tags.join(", ") : "–"}</span>
+      <span class="k">tags</span>
+      <span>
+        {#if jobView.tags.length > 0}
+          {#each jobView.tags as tag, i (tag)}
+            {i > 0 ? ", " : ""}<button type="button" class="link" onclick={() => onfilter?.(tag)}>{tag}</button>
+          {/each}
+        {:else}
+          –
+        {/if}
+      </span>
       <span class="k">submitted</span><span>{hm(jobView.submit_time)}</span>
       {#if grafanaUrl}
         <span class="k">grafana</span>

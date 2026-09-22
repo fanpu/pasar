@@ -52,6 +52,8 @@ button { font: inherit; cursor: pointer; }
 
 .spacer { flex: 1; }
 
+.link { background: none; border: 0; padding: 0; margin: 0; font: inherit; color: inherit; cursor: pointer; text-decoration: underline dotted; }
+
 /* job panel drawer (shared by JobPanel, Facts and AttemptsBar) */
 .scrim { display: block; position: fixed; inset: 0; margin: 0; padding: 0; border: 0; background: rgba(74, 63, 77, .18); opacity: 0; pointer-events: none; transition: opacity .2s; z-index: 20; cursor: default; }
 .scrim.open { opacity: 1; pointer-events: auto; }

@@ -185,6 +185,18 @@ describe("JobPanel", () => {
     expect(tailText).not.toMatch(/\bline2\b/);
   });
 
+  it("renders tags as buttons that call onfilter with the tag", async () => {
+    const onfilter = vi.fn();
+    const liveJob = job({ id: 42, name: "llama-sft", state: "queued", tags: ["sweep-a", "big"] });
+    vi.mocked(api.getJob).mockResolvedValue(baseDetail({ state: "queued", tags: ["sweep-a", "big"] }));
+    render(JobPanel, {
+      id: 42, live: liveJob, now: NOW, grafanaUrl: null, onclose: noop, onrestartwith: noopRestartWith, onfilter,
+    });
+    const btn = await screen.findByRole("button", { name: "sweep-a" });
+    await fireEvent.click(btn);
+    expect(onfilter).toHaveBeenCalledWith("sweep-a");
+  });
+
   it("shows a not-found message when getJob 404s and the job isn't in the live snapshot", async () => {
     vi.mocked(api.getJob).mockRejectedValue(new ApiError(404, "not found"));
     render(JobPanel, { id: 42, live: null, now: NOW, grafanaUrl: null, onclose: noop, onrestartwith: noopRestartWith });

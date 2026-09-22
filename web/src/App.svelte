@@ -5,6 +5,11 @@
   import { mood, latestTemp, type MascotState } from "./lib/mood";
   import { mascot } from "./lib/mascot.svelte";
   import { transitions, type Transition } from "./lib/transitions";
+  import { AllJobs } from "./lib/alljobs.svelte";
+  import {
+    effectiveSort, filterToSearch, isActive, knownValues, matches, parseFilter, sortJobs, stateCounts,
+    type Filter,
+  } from "./lib/jobfilter";
   import Header from "./components/Header.svelte";
   import Banner from "./components/Banner.svelte";
   import Tiles from "./components/Tiles.svelte";
@@ -16,6 +21,30 @@
   import type { JobDetail, JobView, Snapshot } from "./lib/types";
 
   const live = new Live();
+  const allJobs = new AllJobs();
+
+  // The filter lives in the URL (see router.svelte.ts) so back/forward and bookmarks work, and it
+  // survives opening a job. While it's active, the full job history (past and present) is kept
+  // fresh in `allJobs`; the table and schedule chart both read from it via `source`.
+  const filter = $derived(parseFilter(router.search));
+  const filterActive = $derived(isActive(filter));
+  $effect(() => {
+    allJobs.update(filterActive, live.snapshot?.jobs ?? []);
+  });
+  const source = $derived(allJobs.jobs ?? live.snapshot?.jobs ?? []);
+  const filterCounts = $derived(stateCounts(source, filter));
+  const filterKnown = $derived(knownValues(source));
+  const tableJobs = $derived(
+    filterActive ? sortJobs(source.filter((j) => matches(j, filter)), effectiveSort(filter)) : (live.snapshot?.jobs ?? []),
+  );
+
+  function setFilter(f: Filter, replace = false): void {
+    router.setSearch(filterToSearch(f), replace);
+  }
+  function addTagFilter(tag: string): void {
+    if (!filter.tags.includes(tag)) setFilter({ ...filter, tags: [...filter.tags, tag] }, false);
+    router.go("/");
+  }
 
   let showSubmit = $state(false);
   let restartWith = $state<JobDetail | null>(null);
@@ -141,13 +170,19 @@
       pool={live.snapshot.status.pool}
       now={live.snapshot.status.now}
       onopen={(id) => router.go(`/jobs/${id}`)}
+      dim={filterActive ? (j) => !matches(j, filter) : undefined}
     />
     <JobTable
-      jobs={live.snapshot.jobs}
+      jobs={tableJobs}
       pool={live.snapshot.status.pool}
       now={live.snapshot.status.now}
       selected={router.route.name === "job" ? router.route.id : null}
       onopen={(id) => router.go(`/jobs/${id}`)}
+      {filter}
+      total={source.length}
+      counts={filterCounts}
+      known={filterKnown}
+      onfilter={setFilter}
     />
   {/if}
 
@@ -159,6 +194,7 @@
       now={live.snapshot?.status.now ?? Date.now() / 1000}
       grafanaUrl={live.snapshot?.status.grafana_url ?? null}
       jobs={live.snapshot?.jobs ?? []}
+      onfilter={addTagFilter}
       onclose={() => router.go("/")}
       onrestartwith={(job) => { restartWith = job; }}
     />

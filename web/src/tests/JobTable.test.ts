@@ -1,6 +1,7 @@
 import { render, screen, fireEvent, within } from "@testing-library/svelte";
 import { describe, expect, it, vi } from "vitest";
 import JobTable from "../components/JobTable.svelte";
+import { EMPTY_FILTER, type Filter } from "../lib/jobfilter";
 import { GIB, job, NOW } from "./fixtures";
 
 describe("JobTable", () => {
@@ -206,5 +207,69 @@ describe("JobTable", () => {
     expect(within(tagged).getByText("sweep-a")).toBeInTheDocument();
     expect(within(tagged).getByText("big")).toBeInTheDocument();
     expect(untagged.querySelector(".jtags")).toBeNull();
+  });
+
+  it("clicking a tag pill filters by that tag instead of opening the job", async () => {
+    const onopen = vi.fn();
+    const onfilter = vi.fn();
+    const { container } = render(JobTable, {
+      jobs: [job({ id: 30, state: "running", start_time: NOW - 600, tags: ["sweep-a"] })],
+      pool: 105 * GIB, now: NOW, selected: null, onopen, onfilter,
+    });
+    const table = container.querySelector("table")!;
+    await fireEvent.click(within(table).getByText("sweep-a"));
+    expect(onfilter).toHaveBeenCalledWith({ ...EMPTY_FILTER, tags: ["sweep-a"] }, false);
+    expect(onopen).not.toHaveBeenCalled();
+  });
+
+  it("clicking the submitter filters by it instead of opening the job", async () => {
+    const onopen = vi.fn();
+    const onfilter = vi.fn();
+    const { container } = render(JobTable, {
+      jobs: [job({ id: 31, state: "completed", end_time: NOW - 60, submitter: "opus-triage" })],
+      pool: 105 * GIB, now: NOW, selected: null, onopen, onfilter,
+    });
+    const table = container.querySelector("table")!;
+    await fireEvent.click(within(table).getByText("opus-triage"));
+    expect(onfilter).toHaveBeenCalledWith({ ...EMPTY_FILTER, by: ["opus-triage"] }, false);
+    expect(onopen).not.toHaveBeenCalled();
+  });
+
+  it("clicking a header sorts by it, and clicking it again flips the direction", async () => {
+    const onfilter = vi.fn();
+    const { rerender } = render(JobTable, {
+      jobs: [job({ id: 1, bid: 500 }), job({ id: 2, bid: 900 })],
+      pool: 105 * GIB, now: NOW, selected: null, onopen: () => {}, onfilter, filter: EMPTY_FILTER,
+    });
+    await fireEvent.click(screen.getByRole("button", { name: "bid" }));
+    expect(onfilter).toHaveBeenCalledWith({ ...EMPTY_FILTER, sort: { key: "bid", desc: true } }, false);
+
+    onfilter.mockClear();
+    const sortedByBid: Filter = { ...EMPTY_FILTER, sort: { key: "bid", desc: true } };
+    await rerender({ filter: sortedByBid });
+    await fireEvent.click(screen.getByRole("button", { name: /bid/ }));
+    expect(onfilter).toHaveBeenCalledWith({ ...sortedByBid, sort: { key: "bid", desc: false } }, false);
+  });
+
+  it("shows a flat, filtered list with a match count when a filter is active", () => {
+    render(JobTable, {
+      jobs: [job({ id: 1, state: "completed", end_time: NOW - 60 })],
+      pool: 105 * GIB, now: NOW, selected: null, onopen: () => {},
+      filter: { ...EMPTY_FILTER, tags: ["x"] }, total: 42,
+    });
+    expect(screen.getByText("1 match · of 42")).toBeInTheDocument();
+    expect(screen.queryByText("Recently finished")).toBeNull();
+  });
+
+  it("shows 'No jobs match.' with a clear button when the filter matches nothing", async () => {
+    const onfilter = vi.fn();
+    const { container } = render(JobTable, {
+      jobs: [], pool: 105 * GIB, now: NOW, selected: null, onopen: () => {},
+      onfilter, filter: { ...EMPTY_FILTER, q: "nope" }, total: 5,
+    });
+    const empty = container.querySelector<HTMLElement>(".empty")!;
+    expect(within(empty).getByText("No jobs match.")).toBeInTheDocument();
+    await fireEvent.click(within(empty).getByText("clear"));
+    expect(onfilter).toHaveBeenCalledWith(EMPTY_FILTER, false);
   });
 });

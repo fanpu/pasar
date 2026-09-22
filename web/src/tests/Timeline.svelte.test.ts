@@ -43,6 +43,14 @@ describe("Timeline", () => {
     expect(screen.getByText("Nothing scheduled.")).toBeInTheDocument();
   });
 
+  it("fades blocks the given dim predicate matches, and leaves the rest alone", () => {
+    const kept = job({ id: 42, name: "keep", state: "running", spans: [[NOW - 600, null, null]], projected: [[NOW - 600, NOW + 600]] });
+    const faded = job({ id: 43, name: "fade", state: "running", spans: [[NOW - 600, null, null]], projected: [[NOW - 600, NOW + 600]] });
+    render(Timeline, { jobs: [kept, faded], pool: 105 * GIB, now: NOW, onopen: () => {}, dim: (j) => j.id === 43 });
+    expect(screen.getByRole("button", { name: /#42 keep/ })).not.toHaveAttribute("style");
+    expect(screen.getByRole("button", { name: /#43 fade/ }).getAttribute("style")).toContain("opacity: 0.25");
+  });
+
   it("clips a block's label so long names can't spill into neighbouring blocks", () => {
     const { container } = render(Timeline, {
       jobs: [job({ id: 42, name: "llama-sft-lr3e-5-a-very-long-experiment-name", state: "running", limit: 30 * GIB, spans: [[NOW - 600, null, null]], projected: [[NOW - 600, NOW + 600]] })],

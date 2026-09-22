@@ -1,25 +1,33 @@
-import { render, waitFor } from "@testing-library/svelte";
+import { render, screen, waitFor, within } from "@testing-library/svelte";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import App from "../App.svelte";
 import * as api from "../lib/api";
 import { mascot } from "../lib/mascot.svelte";
+import { job, status } from "./fixtures";
 
 vi.mock("../lib/api", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../lib/api")>();
-  return { ...actual, getGpu: vi.fn(), getMascot: vi.fn() };
+  return { ...actual, getGpu: vi.fn(), getMascot: vi.fn(), getAllJobs: vi.fn() };
 });
 
 class FakeEventSource {
+  static last: FakeEventSource | null = null;
   onmessage: ((e: MessageEvent) => void) | null = null;
   onerror: ((e: Event) => void) | null = null;
-  constructor(public url: string) {}
+  constructor(public url: string) {
+    FakeEventSource.last = this;
+  }
   close(): void {}
+  emit(data: unknown): void {
+    this.onmessage?.(new MessageEvent("message", { data: JSON.stringify(data) }));
+  }
 }
 
 describe("App", () => {
   beforeEach(() => {
     vi.mocked(api.getGpu).mockReset().mockResolvedValue({ power_w: [], temp_c: [], util_pct: [] });
-    vi.mocked(api.getMascot).mockReset();
+    vi.mocked(api.getMascot).mockReset().mockResolvedValue({});
+    vi.mocked(api.getAllJobs).mockReset().mockResolvedValue([]);
     vi.stubGlobal("EventSource", FakeEventSource);
     history.pushState({}, "", "/");
     // Reset the shared mascot singleton so an earlier test's loaded manifest doesn't leak in.
@@ -50,5 +58,24 @@ describe("App", () => {
       const img = container.querySelector<HTMLImageElement>(".mascot")!;
       expect(img.src).toContain("/mascot/thinking-1.png");
     });
+  });
+
+  it("filters the job list to a tag given in the URL, using jobs from the all-jobs fetch", async () => {
+    history.pushState({}, "", "/?tag=sweep-a");
+    dispatchEvent(new PopStateEvent("popstate"));
+    const matching = job({ id: 101, name: "match-me", tags: ["sweep-a"], state: "completed", end_time: 1000 });
+    const other = job({ id: 102, name: "not-me", tags: ["other"], state: "completed", end_time: 1000 });
+    vi.mocked(api.getAllJobs).mockResolvedValue([matching, other]);
+
+    const { container } = render(App);
+    FakeEventSource.last!.emit({ status: status(), jobs: [] });
+
+    const table = await waitFor(() => {
+      const t = container.querySelector("table");
+      expect(t).not.toBeNull();
+      return t!;
+    });
+    expect(await within(table).findByText("match-me")).toBeInTheDocument();
+    expect(within(table).queryByText("not-me")).toBeNull();
   });
 });
