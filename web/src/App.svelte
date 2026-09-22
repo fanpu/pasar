@@ -12,12 +12,17 @@
   import JobTable from "./components/JobTable.svelte";
   import Toast from "./components/Toast.svelte";
   import JobPanel from "./components/JobPanel.svelte";
-  import type { JobDetail, Snapshot } from "./lib/types";
+  import JobForm from "./components/JobForm.svelte";
+  import type { JobDetail, JobView, Snapshot } from "./lib/types";
 
   const live = new Live();
 
-  // Task 12 fills in the restart-with-changes form; for now we just remember the job it's for.
+  let showSubmit = $state(false);
   let restartWith = $state<JobDetail | null>(null);
+
+  function afterFormDone(newJob: JobView): void {
+    router.go(`/jobs/${newJob.id}`);
+  }
 
   let recent = $state<Transition | null>(null);
   let bounceKey = $state(0);
@@ -106,7 +111,7 @@
   });
 
   function openSubmit(): void {
-    // Submit form: a later task wires this up.
+    showSubmit = true;
   }
 
   onMount(() => {
@@ -153,6 +158,13 @@
       onclose={() => router.go("/")}
       onrestartwith={(job) => { restartWith = job; }}
     />
+  {/if}
+
+  {#if showSubmit}
+    <JobForm mode="submit" onclose={() => (showSubmit = false)} ondone={afterFormDone} />
+  {/if}
+  {#if restartWith}
+    <JobForm mode="restart" job={restartWith} onclose={() => (restartWith = null)} ondone={afterFormDone} />
   {/if}
 </div>
 <Toast message={toast?.message ?? null} image={toast?.image ?? ""} />
