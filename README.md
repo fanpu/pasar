@@ -3,6 +3,8 @@
 A friendly GPU job scheduler for a single machine shared by a small, cooperative group (and
 the agents they steer).
 
+*Pasar* is Malay for "market", a nod to Singapore's heritage: jobs bid for their turn on the GPU.
+
 - **Bids set priority.** Default 1000. Bid higher only when the work is worth preempting others.
 - **Preemption with checkpoints.** Higher bids stop lower ones (SIGTERM, grace period, SIGKILL)
   and requeue them; jobs resume from their checkpoints.
