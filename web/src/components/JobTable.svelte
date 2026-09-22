@@ -132,9 +132,16 @@
             <tr class="row" class:sel={selected === job.id} tabindex="0" onclick={() => open(job.id)} onkeydown={(e) => onActivate(e, job.id)}>
               <td>
                 <div class="jid">
-                  <JobChip id={job.id} />
+                  <JobChip id={job.id} tags={job.tags} />
                   <div>
                     <div class="jname">{job.name}</div>
+                    {#if job.tags.length > 0}
+                      <div class="jtags">
+                        {#each job.tags as tag (tag)}
+                          <span class="tagpill" style="background: {jobColor(job)}1f; color: {jobColor(job)}">{tag}</span>
+                        {/each}
+                      </div>
+                    {/if}
                     <div class="jsub" class:fail={jobSub(job).failed}>{jobSub(job).text}</div>
                   </div>
                 </div>
@@ -149,7 +156,7 @@
                   <div class="meter">
                     <div class="small">{gib(job.usage ?? 0)} / {gib(job.limit)} GiB</div>
                     <div class="bar">
-                      <i class:over={job.over_limit} style="width: {memPct(job)}%; {job.over_limit ? '' : `background: ${jobColor(job.id)}`}"></i>
+                      <i class:over={job.over_limit} style="width: {memPct(job)}%; {job.over_limit ? '' : `background: ${jobColor(job)}`}"></i>
                     </div>
                   </div>
                 {:else}
@@ -184,11 +191,18 @@
         {#each group.jobs as job (job.id)}
           <div class="card" role="button" tabindex="0" class:sel={selected === job.id} onclick={() => open(job.id)} onkeydown={(e) => onActivate(e, job.id)}>
             <div class="top">
-              <JobChip id={job.id} />
+              <JobChip id={job.id} tags={job.tags} />
               <b>{job.name}</b>
               <span class="spacer"></span>
               <span class="bid" class:hi={job.bid > 1000}>★ {job.bid}</span>
             </div>
+            {#if job.tags.length > 0}
+              <div class="jtags card-tags">
+                {#each job.tags as tag (tag)}
+                  <span class="tagpill" style="background: {jobColor(job)}1f; color: {jobColor(job)}">{tag}</span>
+                {/each}
+              </div>
+            {/if}
             <div class="meta">
               <StatePill {job} />
               {#if job.state === "failed"}
@@ -219,6 +233,9 @@
   .jname { font-weight: 800; }
   .jsub { font-size: 12px; color: var(--ink-2); font-weight: 600; max-width: 320px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .jsub.fail { color: var(--fail); }
+  .jtags { display: flex; flex-wrap: wrap; gap: 4px; margin: 2px 0; }
+  .tagpill { padding: 1px 8px; border-radius: 99px; font-size: 10.5px; font-weight: 800; line-height: 1.5; }
+  .card-tags { margin: 6px 0 0 43px; }
 
   .bar i.over { background: var(--stop); }
 

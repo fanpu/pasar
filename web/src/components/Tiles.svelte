@@ -41,7 +41,7 @@
     <div class="n">{gib(status.reserved)}&nbsp;<span>/ {gib(status.pool)} GiB reserved</span></div>
     <div class="pool">
       {#each activeJobs as j (j.id)}
-        <i style="width: {pct(reserved(j))}%; background: {jobColor(j.id)}"></i>
+        <i style="width: {pct(reserved(j))}%; background: {jobColor(j)}"></i>
       {/each}
       {#if status.external > 0}
         <i style="width: {pct(status.external)}%; background: var(--ink-3)"></i>
@@ -49,7 +49,7 @@
     </div>
     <div class="poolkey">
       {#each activeJobs as j (j.id)}
-        <span><i style="background: {jobColor(j.id)}"></i>#{j.id} {gib(reserved(j))} GiB</span>
+        <span><i style="background: {jobColor(j)}"></i>#{j.id} {gib(reserved(j))} GiB</span>
       {/each}
       {#if status.external > 0}
         <span><i style="background: var(--ink-3)"></i>other</span>

@@ -3,10 +3,11 @@
 
   interface Props {
     id: number;
+    tags?: string[];
   }
-  let { id }: Props = $props();
+  let { id, tags = [] }: Props = $props();
 
-  const color = $derived(jobColor(id));
+  const color = $derived(jobColor({ id, tags }));
 </script>
 
 <div class="chip" style="background: {color}22; color: {color}; box-shadow: inset 0 0 0 2px {color}">{id}</div>

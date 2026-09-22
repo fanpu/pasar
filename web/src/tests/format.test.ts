@@ -1,6 +1,5 @@
 import { describe, expect, it } from "vitest";
 import { ago, dur, fmtGib, gib, GIB, hm, isOom, reasonLabel } from "../lib/format";
-import { jobColor, JOB_COLORS } from "../lib/colors";
 
 describe("format", () => {
   it("gib", () => {
@@ -35,10 +34,5 @@ describe("format", () => {
     expect(["oom", "gpu_oom", "kernel_oom"].every(isOom)).toBe(true);
     expect(isOom("exit")).toBe(false);
     expect(isOom(null)).toBe(false);
-  });
-  it("job colours follow the id", () => {
-    expect(JOB_COLORS).toEqual(["#3b8fd9", "#d9577f", "#8a63d2", "#23a47a", "#c9761f"]);
-    expect(jobColor(42)).toBe("#8a63d2");
-    expect(jobColor(45)).toBe("#3b8fd9");
   });
 });

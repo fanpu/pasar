@@ -303,9 +303,9 @@
 
   /** i-th progress series' colour, drawn from the job palette starting just after the job's own
    * colour so it never repeats the job's own chip/timeline colour. */
-  function progressColor(jobId: number, i: number): string {
-    const base = ((jobId % 5) + 5) % 5;
-    return JOB_COLORS[(base + 1 + i) % 5];
+  function progressColor(job: JobView, i: number): string {
+    const base = JOB_COLORS.indexOf(jobColor(job));
+    return JOB_COLORS[(Math.max(0, base) + 1 + i) % 5];
   }
 
   const progSeries = $derived(progressSeries(events));
@@ -377,7 +377,7 @@
     <img src={mascotImg} alt="" width="72" height="72" />
   {:else}
     <div class="dhead">
-      <JobChip id={jobView.id} />
+      <JobChip id={jobView.id} tags={jobView.tags} />
       <h2 id="jobpanel-heading" tabindex="-1" bind:this={headingEl}>{jobView.name}</h2>
       <StatePill job={jobView} />
       <button class="x" type="button" onclick={onclose} aria-label="Close">✕</button>
@@ -434,7 +434,7 @@
             <LineChart
               label="memory"
               points={usage}
-              color={jobColor(jobView.id)}
+              color={jobColor(jobView)}
               format={memoryFormat}
               max={jobView.limit * 1.1}
               note={`limit ${fmtGib(jobView.limit)}`}
@@ -445,7 +445,7 @@
             <LineChart label="temperature" points={gpu.temp_c} color={JOB_COLORS[4]} format={tempFormat} note={gpuNote} />
           {/if}
           {#each Object.entries(progSeries) as [key, points], i (key)}
-            <LineChart label={key} {points} color={progressColor(jobView.id, i)} format={progressFormat} />
+            <LineChart label={key} {points} color={progressColor(jobView, i)} format={progressFormat} />
           {/each}
         </div>
         {#if isFinishedState && hasMetricsSummary}

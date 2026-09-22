@@ -189,4 +189,22 @@ describe("JobTable", () => {
     const cell = screen.getByTitle("from progress reports (estimated 10m)");
     expect(cell).toHaveTextContent("/ ~1h00");
   });
+
+  it("shows a job's tags as pills, and only when it has tags", () => {
+    const { container } = render(JobTable, {
+      jobs: [
+        job({ id: 20, state: "running", start_time: NOW - 600, tags: ["sweep-a", "big"] }),
+        job({ id: 21, state: "running", start_time: NOW - 300 }),
+      ],
+      pool: 105 * GIB,
+      now: NOW,
+      selected: null,
+      onopen: () => {},
+    });
+    const tagged = container.querySelectorAll<HTMLElement>("tr.row")[0];
+    const untagged = container.querySelectorAll<HTMLElement>("tr.row")[1];
+    expect(within(tagged).getByText("sweep-a")).toBeInTheDocument();
+    expect(within(tagged).getByText("big")).toBeInTheDocument();
+    expect(untagged.querySelector(".jtags")).toBeNull();
+  });
 });
