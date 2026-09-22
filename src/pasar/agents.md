@@ -58,6 +58,17 @@ Options:
 Default (1000) is the right choice almost always; bidding high "just in case" pushes other people's
 and other agents' work off the GPU for no reason.
 
+**Submit work as granular jobs.** One job should be one run: a hyperparameter sweep is one job
+per configuration, not one command that loops over them all. Small jobs let the scheduler pack
+them next to other work, start some as soon as memory frees up, preempt or retry just one point,
+and give each an accurate `--time` and `--mem`. One big looping job holds its resources for the
+whole sweep, and losing it loses every point. For example:
+
+    for lr in 1e-5 3e-5 1e-4; do
+      pasar submit --time 45m --mem 20G --name "sweep-lr-$lr" --tag sweep-lr \
+        --note "lr sweep for the SFT run" -- .venv/bin/python train.py --lr "$lr"
+    done
+
 Submitting returns the new job immediately (state `queued` or `running`):
 
     $ pasar submit --time 2h --mem 24G --json -- .venv/bin/python train.py
@@ -247,6 +258,8 @@ Reading state is just a `GET`:
 
 - Estimate `--time` and `--mem` honestly — the scheduler and every other job's projected start
   time depend on them.
+- Split work into small, independent jobs (one per sweep point, seed or eval) rather than one
+  long command that does it all.
 - Leave the bid at **1000** unless the work truly is more urgent than what's already running.
 - If a memory slice is enough, use `--mem` instead of taking the whole GPU — it lets other jobs
   (yours or someone else's) run alongside you.

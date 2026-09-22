@@ -53,6 +53,11 @@ version is always one command or request away:
     pasar guide                                  # works even when pasard is down
     curl http://127.0.0.1:8750/llms.txt          # same text, served by pasard
 
+Submit work as granular as possible: one job per run. A hyperparameter sweep should be many
+jobs (one per configuration), not one command that loops over every point. Small jobs give the
+scheduler room to pack, preempt and retry them individually, and their time and memory estimates
+are more accurate.
+
 pasard listens on `127.0.0.1:8750`. To reach it from another machine, add an address to `bind`
 and its DNS name to `allowed_hosts` (see [Configure](#configure)), then point the CLI at it with
 `PASAR_URL=http://<host>:8750` or call the HTTP API there directly.
