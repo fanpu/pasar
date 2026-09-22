@@ -9,7 +9,7 @@ scheduler, protocol or UI.
 ## Goals
 
 - **Burst compute on request.** `pasar submit --on modal --gpu H100 …` runs a job in the cloud, with the
-  same job record, logs, events, progress, checkpoints, restart and `pasar wait` as a local job.
+  same job record, logs, events, progress, checkpoints, cancel and `pasar wait` as a local job.
 - **Never spend money by accident.** Cloud jobs only exist when a person asks for them: no automatic
   placement, no spillover, nothing enabled until it is configured with a budget.
 - **The same command on both backends.** `.venv/bin/python train.py` works unchanged in the cloud.
@@ -21,8 +21,8 @@ scheduler, protocol or UI.
 ## Non-goals (for now)
 
 - Automatic placement or spillover ("run in the cloud if the local wait is long").
-- Moving a job between local and cloud, or between providers, mid-life. A job's placement is fixed at
-  submit. `pasar restart --on …` is the explicit way to move it, starting from scratch.
+- Moving a job between local and cloud, or between providers. A job's placement is fixed at submit.
+- Restarting or retrying cloud jobs (see [No restarts](#no-restarts)). Running again is a new submit.
 - Multi-node jobs. One job is one container, which may have several GPUs (`--gpu H100:8`).
 - Arbitrary images or non-uv projects. The first version needs a uv project with a `uv.lock`
   (see [Environment](#environment)).
@@ -36,7 +36,8 @@ Cloud GPUs cost money, so the guardrails come before anything else:
 1. **Off by default.** A cloud target exists only if `config.toml` defines it, and it can't be
    enabled without a `budget`.
 2. **Explicit per job.** Only `--on <target>` (or `"target"` in the API) sends a job to the cloud.
-   Nothing else (restart, retry, bid change, preemption) changes a job's placement.
+   Nothing else (bid change, preemption) changes a job's placement, and cloud jobs can't be
+   restarted or retried: every new paid run is a new, explicit submit.
 3. **Budget gate.** A cloud job starts only if today's spend plus the committed cost of running jobs
    plus this job's estimated cost (`--time` × rate) fits within `budget.daily`. Otherwise it waits in
    the queue as `blocked: budget`.
@@ -57,7 +58,7 @@ Cloud GPUs cost money, so the guardrails come before anything else:
 | **Target** | Where a job runs: `local` (the default) or the name of a configured cloud target, e.g. `modal`. Fixed at submit. |
 | **Provider** | The code that talks to one cloud API (`modal`, later `runpod`, …). Several targets can use one provider, e.g. two Modal workspaces. |
 | **GPU spec** | `--gpu H100`, `--gpu A100-80GB:4`. pasar parses `<type>[:<count>]`, and each provider maps types to its own names. Required for cloud jobs; there is no memory pool to size, so `--mem` is not allowed. |
-| **Bundle** | A snapshot of the job's code, taken at submit: every file `git ls-files --cached --others --exclude-standard` lists, plus the uv environment spec. Retries, preemption requeues and restarts reuse it. |
+| **Bundle** | A snapshot of the job's code, taken at submit: every file `git ls-files --cached --others --exclude-standard` lists, plus the uv environment spec. Only a requeue after the provider reclaims the GPU reuses it (see [No restarts](#no-restarts)). |
 | **Environment spec** | `pyproject.toml`, `uv.lock`, `.python-version`. Its hash is the image cache key. |
 | **Persist dir** | Per-job storage that survives attempts (`$PASAR_PERSIST_DIR`), for checkpoints and outputs. |
 | **Wrapper** | `python -m pasar_job.run`, the entry point inside the container. It runs the command and talks to pasard through stdout. |
@@ -174,9 +175,9 @@ provider.
 - **In the container**, the bundle is unpacked at `/pasar/work/<repo name>`, the working directory is
   the same path relative to the repository root as locally, and the project's `.venv` is a symlink to
   the image's environment. So `.venv/bin/python train.py` and `uv run train.py` both just work.
-- **Freezing at submit** differs from local jobs, whose restarts see the working tree as it is now.
-  It is deliberate: sweeps often edit code between submits, and a cloud retry should run the code
-  that was asked for. `pasar restart --refresh` takes a new snapshot.
+- **Frozen at submit.** A cloud job runs the code as it was when it was submitted, even if it waits
+  in the queue while you edit. Local jobs, by contrast, run whatever the working tree holds when
+  each attempt starts.
 
 Packages that compile from source (flash-attn and the like) can build in the image step with `gpu=`
 set. Cases that need more than uv (system packages) get an optional `[tool.pasar.cloud]` table in
@@ -234,8 +235,23 @@ Bids still order each lane. `--preempt` isn't supported for cloud jobs: the lane
 resource to take back, and stopping someone's paid-for run to start another one wastes money.
 
 Clouds preempt too (spot reclaims, host failures). When a provider reports that it ended an attempt,
-the attempt ends `preempted` (reason `cloud_preempted`), the job requeues without using a retry, and
-it resumes from its persist-dir checkpoint as usual.
+the attempt ends `preempted` (reason `cloud_preempted`), the job requeues, and it resumes from its
+persist-dir checkpoint using the same snapshot. This is the only way a cloud job gets a second
+attempt, and it goes through the budget gate again like any launch.
+
+### No restarts
+
+Cloud jobs can't be restarted, and `--retries` is rejected for them. A restart would start paying
+for another run with whatever code is in the working tree now, often without anyone looking closely
+at the cost again, which is too easy to do by accident. To run again, submit a new job: the working
+tree is snapshotted fresh, the estimated cost is shown again, and the budget is checked again.
+
+- `pasar restart` and `POST /api/jobs/{id}/restart` return an error for cloud jobs, which gives the
+  equivalent `pasar submit` command.
+- The UI hides **restart** and **restart…** on cloud jobs and shows **copy submit command** instead.
+- A new submit gets a new persist dir. To continue from an earlier job's checkpoint, pass
+  `--resume-from <id>`: the new job's persist dir starts as a copy of the old one (on Modal, copied
+  within the Volume, so nothing is downloaded).
 
 ## Job lifecycle and records
 
@@ -268,7 +284,7 @@ warning, since unlike local ones they cost money.
 ```
 pasar submit --on modal --gpu H100[:N] --time 2h [--env KEY]… [--max-cost 20] -- <command>
 pasar pull <id> [path] [--to DIR]
-pasar restart <id> [--refresh] [--on local|<target>]
+pasar submit --on modal … --resume-from <id> -- <command>   # continue an earlier cloud job's checkpoints
 pasar cloud                         # targets, budget, spend today, running jobs, rates
 ```
 
