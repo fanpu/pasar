@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { layout, stack, timeTicks } from "../lib/timeline";
+import { clampWindow, layout, liveWindow, MAX_AHEAD, MAX_SPAN, MIN_SPAN, stack, tickLabel, tickStep, timeTicks, when, zoomAround } from "../lib/timeline";
 import { GIB, job, NOW } from "./fixtures";
 
 const M = 60;
@@ -54,5 +54,61 @@ describe("timeline layout", () => {
     const t = timeTicks(NOW - 90 * M, NOW + 240 * M, 600);
     expect(t.every((x) => x % 3600 === 0 && x >= NOW - 90 * M && x <= NOW + 240 * M)).toBe(true);
     expect(t.length).toBe(6);  // 12:56–18:26 contains 13:00 … 18:00
+  });
+
+  it("keeps history inside a wider window", () => {
+    const old = job({ id: 3, state: "completed", spans: [[NOW - 5 * 86400, NOW - 5 * 86400 + 3600, "completed"]] });
+    expect(layout([old], pool, NOW)).toEqual([]);
+    const [b] = layout([old], pool, NOW, NOW - 7 * 86400, NOW);
+    expect(b).toMatchObject({ id: 3, kind: "past" });
+    expect(layout([old], pool, NOW, NOW - 3 * 86400, NOW)).toEqual([]);
+  });
+});
+
+describe("timeline window", () => {
+  it("live window puts the same share before now as the default", () => {
+    const w = liveWindow(NOW, 330 * M);
+    expect(w).toEqual({ t0: NOW - 90 * M, t1: NOW + 240 * M });
+  });
+
+  it("long live windows mostly look back", () => {
+    expect(liveWindow(NOW, 86400)).toEqual({ t0: NOW - 20 * 3600, t1: NOW + 4 * 3600 });
+    expect(liveWindow(NOW, 30 * 86400)).toEqual({ t0: NOW - 27 * 86400, t1: NOW + 3 * 86400 });
+  });
+
+  it("zooms around the anchor and clamps the span", () => {
+    const w = { t0: NOW - 3600, t1: NOW + 3600 };
+    const z = zoomAround(w, NOW - 3600, 2, NOW);
+    expect(z).toEqual({ t0: NOW - 3600, t1: NOW + 3 * 3600 });
+    expect(zoomAround(w, NOW, 0.01, NOW).t1 - zoomAround(w, NOW, 0.01, NOW).t0).toBe(MIN_SPAN);
+    const far = zoomAround(w, NOW, 1e6, NOW);
+    expect(far.t1 - far.t0).toBe(MAX_SPAN);
+    expect(far.t1).toBeLessThanOrEqual(NOW + MAX_AHEAD);
+  });
+
+  it("never reaches past the projection horizon", () => {
+    expect(clampWindow(NOW + 30 * 86400, NOW + 31 * 86400, NOW)).toEqual({ t0: NOW + MAX_AHEAD - 86400, t1: NOW + MAX_AHEAD });
+  });
+});
+
+describe("time ticks", () => {
+  it("picks coarser steps as the window widens", () => {
+    expect(tickStep(NOW, NOW + 3600, 800)).toBe(10 * M);
+    expect(tickStep(NOW, NOW + 86400, 800)).toBe(3 * 3600);
+    expect(tickStep(NOW, NOW + 30 * 86400, 800)).toBe(7 * 86400);
+  });
+
+  it("lands day ticks on midnight and labels them with the date", () => {
+    const t = timeTicks(NOW, NOW + 7 * 86400, 800);
+    expect(t.length).toBeGreaterThan(2);
+    expect(t.every((x) => x % 86400 === 0)).toBe(true);  // TZ=UTC in tests
+    expect(tickLabel(t[0], 86400)).toBe("Sep 22");
+    expect(tickLabel(NOW - 26 * M, 3600)).toBe("14:00");
+    expect(tickLabel(Date.UTC(2026, 8, 22) / 1000, 3600)).toBe("Sep 22");
+  });
+
+  it("dates moments that aren't today", () => {
+    expect(when(NOW, NOW)).toBe("14:26");
+    expect(when(NOW - 86400, NOW)).toBe("Sep 20 14:26");
   });
 });

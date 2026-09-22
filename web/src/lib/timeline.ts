@@ -11,9 +11,50 @@ export interface Block {
   hi: number; // bytes
 }
 
-/** How far the window reaches before/after `now`, in seconds. */
+/** How far the live window reaches before/after `now`, in seconds. */
 export const WINDOW_BEFORE = 90 * 60;
 export const WINDOW_AFTER = 240 * 60;
+
+/** Zoom limits for the window's length, in seconds. */
+export const MIN_SPAN = 30 * 60;
+export const MAX_SPAN = 90 * 86400;
+/** The window can't reach further ahead than the projection does. */
+export const MAX_AHEAD = 7 * 86400;
+/** How far back the live snapshot lists finished jobs (matches the API's `RECENT`); windows
+ * reaching further back fetch history. */
+export const LIVE_HISTORY = 86400;
+/** Share of the live window that lies before `now`. */
+export const LIVE_LEAD = WINDOW_BEFORE / (WINDOW_BEFORE + WINDOW_AFTER);
+
+export interface Window { t0: number; t1: number }
+
+/** Keeps a window within the zoom limits and no further ahead than `now + MAX_AHEAD`. */
+export function clampWindow(t0: number, t1: number, now: number): Window {
+  const span = Math.min(MAX_SPAN, Math.max(MIN_SPAN, t1 - t0));
+  const mid = (t0 + t1) / 2;
+  let a = mid - span / 2;
+  const limit = now + MAX_AHEAD;
+  if (a + span > limit) a = limit - span;
+  return { t0: a, t1: a + span };
+}
+
+/** Zooms by `factor` (< 1 zooms in) keeping the time under `anchor` fixed on screen. */
+export function zoomAround(w: Window, anchor: number, factor: number, now: number): Window {
+  const span = Math.min(MAX_SPAN, Math.max(MIN_SPAN, (w.t1 - w.t0) * factor));
+  const frac = (anchor - w.t0) / (w.t1 - w.t0);
+  const t0 = anchor - frac * span;
+  return clampWindow(t0, t0 + span, now);
+}
+
+/** The live window for a given length. Up to the default length, `LIVE_LEAD` of it lies
+ * before `now`; longer windows are for looking back, so they reach only a little ahead
+ * (`WINDOW_AFTER`, or a tenth of the window if that's more). */
+export function liveWindow(now: number, span: number): Window {
+  const after = span <= WINDOW_BEFORE + WINDOW_AFTER
+    ? span * (1 - LIVE_LEAD)
+    : Math.max(WINDOW_AFTER, span / 10);
+  return { t0: now + after - span, t1: now + after };
+}
 
 /** Height a job's block occupies when it isn't the live "run" block: the whole pool for a
  * whole-GPU job, otherwise its memory limit. */
@@ -29,18 +70,17 @@ function runHeight(job: JobView, pool: number): number {
 }
 
 /** Turns jobs into unstacked timeline blocks (`lo`/`hi` are placeholders — `stack` positions
- * them). Window `[now - WINDOW_BEFORE, now + WINDOW_AFTER)` only affects which segments are
- * dropped up front; blocks are not clipped to it — the renderer clamps for drawing. */
-export function blocks(jobs: JobView[], pool: number, now: number): Block[] {
-  const t0 = now - WINDOW_BEFORE;
-  const t1 = now + WINDOW_AFTER;
+ * them). The window `[t0, t1)` (default: the live window around `now`) only affects which
+ * segments are dropped up front; blocks are not clipped to it — the renderer clamps for drawing. */
+export function blocks(jobs: JobView[], pool: number, now: number,
+                       t0 = now - WINDOW_BEFORE, t1 = now + WINDOW_AFTER): Block[] {
   const result: Block[] = [];
 
   for (const job of jobs) {
     const height = baseHeight(job, pool);
 
     for (const [start, end] of job.spans) {
-      if (end !== null && end > t0) {
+      if (end !== null && end > t0 && start < t1) {
         result.push({ id: job.id, kind: "past", start, end, lo: 0, hi: height });
       }
     }
@@ -48,7 +88,7 @@ export function blocks(jobs: JobView[], pool: number, now: number): Block[] {
     const isLive = job.state === "running" || job.state === "stopping";
     const openSpan = isLive ? job.spans.find(([, end]) => end === null) : undefined;
 
-    if (openSpan) {
+    if (openSpan && openSpan[0] < t1) {
       const [start] = openSpan;
       const end = job.projected.length > 0
         ? job.projected[0][1]
@@ -101,17 +141,64 @@ export function stack(bs: Block[], pool: number): Block[] {
   return result;
 }
 
-/** `stack(blocks(jobs, pool, now), pool)`. */
-export function layout(jobs: JobView[], pool: number, now: number): Block[] {
-  return stack(blocks(jobs, pool, now), pool);
+/** `stack(blocks(jobs, pool, now, t0, t1), pool)`. */
+export function layout(jobs: JobView[], pool: number, now: number,
+                       t0 = now - WINDOW_BEFORE, t1 = now + WINDOW_AFTER): Block[] {
+  return stack(blocks(jobs, pool, now, t0, t1), pool);
 }
 
-/** Whole-hour tick marks within `[t0, t1]`; 30-minute steps once there's room (`width >= 900`)
- * and the window is short enough (`<= 6h`) that half-hour marks stay legible. */
+const H = 3600;
+const D = 86400;
+const STEPS = [5 * 60, 10 * 60, 15 * 60, 30 * 60, H, 2 * H, 3 * H, 6 * H, 12 * H, D, 2 * D, 7 * D];
+/** Closest ticks may sit to each other, in pixels. */
+const MIN_TICK_GAP = 70;
+
+/** Seconds to add to a UTC timestamp to get local wall-clock time at that moment. */
+function tzShift(t: number): number {
+  return -new Date(t * 1000).getTimezoneOffset() * 60;
+}
+
+/** The tick step for a window drawn `width` pixels wide: the smallest one that keeps ticks at
+ * least `MIN_TICK_GAP` px apart. */
+export function tickStep(t0: number, t1: number, width: number): number {
+  const perPx = (t1 - t0) / Math.max(1, width - 54);
+  return STEPS.find((s) => s / perPx >= MIN_TICK_GAP) ?? STEPS[STEPS.length - 1];
+}
+
+/** Tick marks within `[t0, t1]` on a local wall-clock grid (whole hours fall on :00, days on
+ * midnight), spaced by `tickStep`. */
 export function timeTicks(t0: number, t1: number, width: number): number[] {
-  const span = t1 - t0;
-  const step = width >= 900 && span <= 6 * 3600 ? 30 * 60 : 60 * 60;
+  const step = tickStep(t0, t1, width);
   const ticks: number[] = [];
-  for (let t = Math.ceil(t0 / step) * step; t <= t1; t += step) ticks.push(t);
+  const shift = tzShift(t0);
+  for (let local = Math.ceil((t0 + shift) / step) * step; ; local += step) {
+    const t = local - tzShift(local - shift);
+    if (t > t1) break;
+    if (t >= t0) ticks.push(t);
+  }
   return ticks;
+}
+
+const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+
+/** "Sep 21". */
+export function dayLabel(ts: number): string {
+  const d = new Date(ts * 1000);
+  return `${MONTHS[d.getMonth()]} ${d.getDate()}`;
+}
+
+/** A tick's label: the date for day steps and at midnight, otherwise the time of day. */
+export function tickLabel(ts: number, step: number): string {
+  const d = new Date(ts * 1000);
+  if (step >= D || (d.getHours() === 0 && d.getMinutes() === 0)) return dayLabel(ts);
+  return `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
+}
+
+/** A moment, as the time of day when it's on the same local day as `now`, else with the date. */
+export function when(ts: number, now: number): string {
+  const a = new Date(ts * 1000);
+  const b = new Date(now * 1000);
+  const hm = `${String(a.getHours()).padStart(2, "0")}:${String(a.getMinutes()).padStart(2, "0")}`;
+  const sameDay = a.getFullYear() === b.getFullYear() && a.getMonth() === b.getMonth() && a.getDate() === b.getDate();
+  return sameDay ? hm : `${dayLabel(ts)} ${hm}`;
 }

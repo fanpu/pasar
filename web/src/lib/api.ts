@@ -41,6 +41,10 @@ async function request<T>(method: string, path: string, body?: unknown): Promise
 export function getJob(id: number): Promise<JobDetail> {
   return request("GET", `/api/jobs/${id}`);
 }
+/** Jobs with an attempt somewhere in `[since, until)`, finished or not. */
+export function getJobsBetween(since: number, until: number): Promise<JobView[]> {
+  return request("GET", `/api/jobs?since=${since}&until=${until}`);
+}
 export function getEvents(id: number): Promise<JobEvent[]> {
   return request("GET", `/api/jobs/${id}/events`);
 }
