@@ -45,6 +45,10 @@ export function getJob(id: number): Promise<JobDetail> {
 export function getJobsBetween(since: number, until: number): Promise<JobView[]> {
   return request("GET", `/api/jobs?since=${since}&until=${until}`);
 }
+/** Every job, past or present. Used when a filter or sort is active. */
+export function getAllJobs(): Promise<JobView[]> {
+  return request("GET", "/api/jobs?all=true");
+}
 export function getEvents(id: number): Promise<JobEvent[]> {
   return request("GET", `/api/jobs/${id}/events`);
 }
