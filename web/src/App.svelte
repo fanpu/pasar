@@ -149,6 +149,7 @@
       live={live.snapshot?.jobs.find((j) => j.id === jobId) ?? null}
       now={live.snapshot?.status.now ?? Date.now() / 1000}
       grafanaUrl={live.snapshot?.status.grafana_url ?? null}
+      jobs={live.snapshot?.jobs ?? []}
       onclose={() => router.go("/")}
       onrestartwith={(job) => { restartWith = job; }}
     />

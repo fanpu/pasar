@@ -14,6 +14,12 @@ vi.mock("../lib/api", async (importOriginal) => {
     cancelJob: vi.fn(),
     setBid: vi.fn(),
     restartJob: vi.fn(),
+    getLog: vi.fn(),
+    followLog: vi.fn(),
+    getEvents: vi.fn(),
+    getUsage: vi.fn(),
+    getMetrics: vi.fn(),
+    getGpu: vi.fn(),
   };
 });
 
@@ -30,6 +36,12 @@ describe("JobPanel", () => {
     vi.mocked(api.cancelJob).mockReset();
     vi.mocked(api.setBid).mockReset();
     vi.mocked(api.restartJob).mockReset();
+    vi.mocked(api.getLog).mockReset().mockResolvedValue({ text: "", offset: 0 });
+    vi.mocked(api.followLog).mockReset().mockReturnValue(() => {});
+    vi.mocked(api.getEvents).mockReset().mockResolvedValue([]);
+    vi.mocked(api.getUsage).mockReset().mockResolvedValue([]);
+    vi.mocked(api.getMetrics).mockReset().mockResolvedValue([]);
+    vi.mocked(api.getGpu).mockReset().mockResolvedValue({ power_w: [], temp_c: [], util_pct: [] });
     vi.spyOn(window, "confirm").mockReturnValue(true);
   });
 
@@ -216,5 +228,84 @@ describe("JobPanel", () => {
     await rerender({ now: NOW + 2 });
 
     expect(await screen.findByText("llama-sft")).toBeInTheDocument();
+  });
+
+  it("shows the memory chart in the metrics tab for a running job with usage history", async () => {
+    const liveJob = job({ id: 42, name: "llama-sft", state: "running", start_time: NOW - 600, limit: 6 * 1024 ** 3 });
+    vi.mocked(api.getJob).mockResolvedValue(baseDetail({ state: "running", start_time: NOW - 600 }));
+    vi.mocked(api.getUsage).mockResolvedValue([[NOW - 60, 2 * 1024 ** 3], [NOW, 3 * 1024 ** 3]]);
+    const { container } = render(JobPanel, {
+      id: 42, live: liveJob, now: NOW, grafanaUrl: null, onclose: noop, onrestartwith: noopRestartWith,
+    });
+
+    await waitFor(() => expect(api.getUsage).toHaveBeenCalledWith(42));
+    await waitFor(() => expect(container.querySelector('[data-tab~="metrics"] svg[role="img"]')).not.toBeNull());
+    const svg = container.querySelector('[data-tab~="metrics"] svg[role="img"]');
+    expect(svg?.getAttribute("aria-label")).toMatch(/^memory: latest/);
+  });
+
+  it("shows 'No metrics for this job.' when there's no usage or GPU history", async () => {
+    const liveJob = job({ id: 42, name: "llama-sft", state: "queued" });
+    vi.mocked(api.getJob).mockResolvedValue(baseDetail({ state: "queued" }));
+    render(JobPanel, { id: 42, live: liveJob, now: NOW, grafanaUrl: null, onclose: noop, onrestartwith: noopRestartWith });
+
+    expect(await screen.findByText("No metrics for this job.")).toBeInTheDocument();
+  });
+
+  it("shows the event timeline in the events tab", async () => {
+    const liveJob = job({ id: 42, name: "llama-sft", state: "running", start_time: NOW - 600 });
+    vi.mocked(api.getJob).mockResolvedValue(baseDetail({
+      state: "running", start_time: NOW - 600, submit_time: NOW - 700,
+      attempts: [attempt({ n: 1, job_id: 42, start_time: NOW - 600 })],
+    }));
+    vi.mocked(api.getEvents).mockResolvedValue([{ attempt: 1, ts: NOW - 100, kind: "checkpoint", step: 400, payload: {} }]);
+    render(JobPanel, { id: 42, live: liveJob, now: NOW, grafanaUrl: null, onclose: noop, onrestartwith: noopRestartWith });
+
+    expect(await screen.findByText("checkpoint · step 400")).toBeInTheDocument();
+  });
+
+  it("shows 'No output yet.' in the logs tab when the log is empty", async () => {
+    const liveJob = job({ id: 42, name: "llama-sft", state: "queued" });
+    vi.mocked(api.getJob).mockResolvedValue(baseDetail({ state: "queued" }));
+    render(JobPanel, { id: 42, live: liveJob, now: NOW, grafanaUrl: null, onclose: noop, onrestartwith: noopRestartWith });
+
+    expect(await screen.findByText("No output yet.")).toBeInTheDocument();
+  });
+
+  it("notes other running jobs sharing the GPU on the power/temperature charts", async () => {
+    const liveJob = job({ id: 42, name: "llama-sft", state: "running", start_time: NOW - 600 });
+    const other = job({ id: 7, name: "other", state: "running" });
+    vi.mocked(api.getJob).mockResolvedValue(baseDetail({ state: "running", start_time: NOW - 600 }));
+    vi.mocked(api.getGpu).mockResolvedValue({
+      power_w: [[NOW - 60, 50], [NOW, 55]], temp_c: [[NOW - 60, 60], [NOW, 61]], util_pct: [],
+    });
+    render(JobPanel, {
+      id: 42, live: liveJob, now: NOW, grafanaUrl: null, jobs: [liveJob, other], onclose: noop, onrestartwith: noopRestartWith,
+    });
+
+    const notes = await screen.findAllByText("GPU-wide · shared with #7");
+    expect(notes.length).toBe(2); // power and temperature charts
+  });
+
+  it("re-fetches events after navigating away and back to the same job", async () => {
+    const jobA = job({ id: 1, name: "job-a", state: "running", start_time: NOW - 600 });
+    const jobB = job({ id: 2, name: "job-b", state: "running", start_time: NOW - 600 });
+    vi.mocked(api.getJob).mockImplementation((jid: number) =>
+      Promise.resolve(baseDetail({ id: jid, name: jid === 1 ? "job-a" : "job-b", state: "running", start_time: NOW - 600 })),
+    );
+    vi.mocked(api.getEvents).mockImplementation((jid: number) =>
+      Promise.resolve([{ attempt: 1, ts: NOW - 50, kind: "note", step: null, payload: { text: `note-${jid}` } }]),
+    );
+
+    const { rerender } = render(JobPanel, {
+      id: 1, live: jobA, now: NOW, grafanaUrl: null, onclose: noop, onrestartwith: noopRestartWith,
+    });
+    expect(await screen.findByText("note-1")).toBeInTheDocument();
+
+    await rerender({ id: 2, live: jobB });
+    expect(await screen.findByText("note-2")).toBeInTheDocument();
+
+    await rerender({ id: 1, live: jobA });
+    expect(await screen.findByText("note-1")).toBeInTheDocument();
   });
 });

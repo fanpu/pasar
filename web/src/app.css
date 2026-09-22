@@ -70,6 +70,26 @@ button { font: inherit; cursor: pointer; }
 .fact .s { font-size: 12px; font-weight: 700; color: var(--ink-2); }
 .kv { display: grid; grid-template-columns: 110px 1fr; gap: 6px 12px; font-size: 13px; font-weight: 700; margin-top: 12px; }
 .kv .k { color: var(--ink-2); }
+
+.charts { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin: 12px 0; }
+.chart { background: var(--card); border: 1.5px solid var(--line); border-radius: 18px; padding: 10px 12px; }
+.chart .l { font-size: 12px; font-weight: 800; color: var(--ink-2); display: flex; justify-content: space-between; }
+.chart .l b { color: var(--ink); }
+.chart svg { width: 100%; height: 56px; display: block; margin-top: 4px; }
+
+.log {
+  background: #2f2933; color: #e9e0ea; border-radius: 18px; padding: 12px 14px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; line-height: 1.55;
+  height: 210px; overflow-y: auto; white-space: pre-wrap; word-break: break-word;
+}
+.log .sep { color: #ff9fbd; }
+.log .err { color: #ff9aa8; }
+
+.events { margin-top: 12px; }
+.ev { display: flex; gap: 10px; padding: 7px 0; border-top: 1.5px solid #f7eff3; font-weight: 700; font-size: 13px; }
+.ev .t { width: 48px; color: var(--ink-3); flex: none; }
+.ev .k { width: 20px; flex: none; text-align: center; }
+
 .tabs { display: none; }
 
 @media (max-width: 760px) {

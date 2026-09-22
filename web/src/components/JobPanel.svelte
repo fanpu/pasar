@@ -1,24 +1,34 @@
 <script lang="ts">
-  import { getJob, cancelJob, setBid, restartJob, ApiError } from "../lib/api";
+  import { getJob, cancelJob, setBid, restartJob, getEvents, getGpu, getMetrics, getUsage, ApiError } from "../lib/api";
   import { mascot } from "../lib/mascot.svelte";
-  import { hm } from "../lib/format";
+  import { fmtGib, gib, hm } from "../lib/format";
+  import { jobColor, JOB_COLORS } from "../lib/colors";
+  import { eventRows } from "../lib/eventlog";
+  import { progressSeries } from "../lib/series";
   import JobChip from "./JobChip.svelte";
   import StatePill from "./StatePill.svelte";
   import Facts from "./Facts.svelte";
   import ReasonBox from "./ReasonBox.svelte";
   import AttemptsBar from "./AttemptsBar.svelte";
   import BidDialog from "./BidDialog.svelte";
-  import type { JobDetail, JobView } from "../lib/types";
+  import LogView from "./LogView.svelte";
+  import LineChart from "./LineChart.svelte";
+  import EventList from "./EventList.svelte";
+  import type { GpuSeries, JobDetail, JobEvent, JobView, MetricSummary, Series } from "../lib/types";
 
   interface Props {
     id: number;
     live: JobView | null;
     now: number;
     grafanaUrl: string | null;
+    // Other jobs from the live snapshot, used only to note which other running jobs share the
+    // GPU whose power/temperature charts this panel shows. Optional so existing callers/tests
+    // that don't have the full job list keep working — the note is simply omitted.
+    jobs?: JobView[];
     onclose: () => void;
     onrestartwith: (job: JobDetail) => void;
   }
-  let { id, live, now, grafanaUrl, onclose, onrestartwith }: Props = $props();
+  let { id, live, now, grafanaUrl, jobs = [], onclose, onrestartwith }: Props = $props();
 
   const FINISHED = new Set<JobView["state"]>(["completed", "failed", "cancelled"]);
   const TABS = [
@@ -43,6 +53,21 @@
     if (detail) return { ...detail, attempts: detail.attempts.length };
     return null;
   });
+
+  // Primitives pulled out of `jobView` so effects that key off them don't re-run on every
+  // snapshot tick — `jobView` (and `live`) get a new object identity each tick even when nothing
+  // relevant changed, but a $derived primitive only propagates when its own value changes.
+  const curState = $derived(jobView?.state ?? null);
+  const curStartTime = $derived(jobView?.start_time ?? null);
+  const curCheckpointTs = $derived(jobView?.last_checkpoint?.ts ?? null);
+  const curProgressTs = $derived(jobView?.progress?.ts ?? null);
+  const isLiveState = $derived(curState === "running" || curState === "stopping");
+  const isFinishedState = $derived(curState !== null && FINISHED.has(curState));
+
+  let usage = $state<Series>([]);
+  let gpu = $state<GpuSeries>({ power_w: [], temp_c: [], util_pct: [] });
+  let events = $state<JobEvent[]>([]);
+  let metricsSummary = $state<MetricSummary[]>([]);
 
   function keyFor(forId: number): string {
     return `${forId}:${live?.state ?? ""}:${live?.attempts ?? ""}`;
@@ -96,6 +121,11 @@
       showBid = false;
       busy = null;
       actionError = null;
+      usage = [];
+      gpu = { power_w: [], temp_c: [], util_pct: [] };
+      events = [];
+      metricsSummary = [];
+      committedEventsKey = "";
     }
     const key = keyFor(id);
     if (key === committedKey) return;
@@ -104,6 +134,81 @@
 
   $effect(() => {
     headingEl?.focus();
+  });
+
+  // Memory usage + GPU power/temperature, polled every 5s while the job is live. Torn down (and
+  // the interval cleared) as soon as the job stops being live, or the panel moves to another job.
+  // `now` ticks on (almost) every snapshot; track it in a plain variable rather than reading it
+  // directly inside the polling effect below, so a fresh `now` doesn't tear down and restart the
+  // 5s interval on every tick.
+  let latestNow = 0;
+  $effect(() => {
+    latestNow = now;
+  });
+
+  $effect(() => {
+    const forId = id;
+    if (!isLiveState) return;
+    const startTime = curStartTime;
+
+    let cancelled = false;
+    async function tick(): Promise<void> {
+      const elapsedMin = startTime !== null ? Math.ceil((latestNow - startTime) / 60) : 5;
+      const minutes = Math.min(240, Math.max(5, elapsedMin));
+      const [u, g] = await Promise.allSettled([getUsage(forId), getGpu(minutes)]);
+      if (cancelled || forId !== id) return;
+      if (u.status === "fulfilled") usage = u.value;
+      if (g.status === "fulfilled") gpu = g.value;
+    }
+    void tick();
+    const timer = setInterval(() => void tick(), 5000);
+    return () => {
+      cancelled = true;
+      clearInterval(timer);
+    };
+  });
+
+  // Per-attempt power/temperature/energy summary for a finished job, fetched once, plus the
+  // memory usage history (shown as a chart if it exists).
+  $effect(() => {
+    const forId = id;
+    if (!isFinishedState) return;
+    let cancelled = false;
+    (async () => {
+      try {
+        const [m, u] = await Promise.all([getMetrics(forId), getUsage(forId)]);
+        if (cancelled || forId !== id) return;
+        metricsSummary = m;
+        usage = u;
+      } catch {
+        // leave whatever was loaded before; the metrics section falls back to "no metrics"
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  });
+
+  // Events power both the Events tab and the metrics tab's progress charts, so they're fetched
+  // once here and shared. Refetches on id change or when the live snapshot reports a new
+  // checkpoint, a new progress tick, or a state change.
+  let committedEventsKey = "";
+  let eventsGen = 0;
+  $effect(() => {
+    const forId = id;
+    const key = `${forId}:${curState ?? ""}:${curCheckpointTs ?? ""}:${curProgressTs ?? ""}`;
+    if (key === committedEventsKey) return;
+    const myGen = ++eventsGen;
+    (async () => {
+      try {
+        const evs = await getEvents(forId);
+        if (myGen !== eventsGen) return;
+        events = evs;
+        committedEventsKey = key;
+      } catch {
+        // leave committedEventsKey stale so the next relevant change retries
+      }
+    })();
   });
 
   function onkeydown(e: KeyboardEvent): void {
@@ -165,6 +270,70 @@
     const to = job.end_time !== null ? `${Math.round(job.end_time * 1000)}` : "now";
     return `${url}?from=${from}&to=${to}`;
   }
+
+  const memoryFormat = (v: number): string => `${gib(v)} GiB`;
+  const powerFormat = (v: number): string => `${Math.round(v)} W`;
+  const tempFormat = (v: number): string => `${Math.round(v)} °C`;
+  function progressFormat(v: number): string {
+    if (v !== 0 && Math.abs(v) < 0.001) return v.toExponential(1);
+    return v.toFixed(3);
+  }
+
+  /** i-th progress series' colour, drawn from the job palette starting just after the job's own
+   * colour so it never repeats the job's own chip/timeline colour. */
+  function progressColor(jobId: number, i: number): string {
+    const base = ((jobId % 5) + 5) % 5;
+    return JOB_COLORS[(base + 1 + i) % 5];
+  }
+
+  const progSeries = $derived(progressSeries(events));
+
+  const otherRunningIds = $derived.by((): number[] => {
+    if (jobView === null) return [];
+    return jobs
+      .filter((j) => j.id !== jobView!.id && j.state === "running")
+      .map((j) => j.id)
+      .sort((a, b) => a - b);
+  });
+  const gpuNote = $derived(
+    otherRunningIds.length > 0
+      ? `GPU-wide · shared with ${otherRunningIds.map((i) => `#${i}`).join(", ")}`
+      : "GPU-wide",
+  );
+
+  interface AttemptMetricRow {
+    attempt: number;
+    avgPower: number | null;
+    maxPower: number | null;
+    maxTemp: number | null;
+    energyWh: number | null;
+  }
+
+  function buildMetricRows(rows: MetricSummary[]): AttemptMetricRow[] {
+    const byAttempt = new Map<number, AttemptMetricRow>();
+    for (const r of rows) {
+      let row = byAttempt.get(r.attempt);
+      if (!row) {
+        row = { attempt: r.attempt, avgPower: null, maxPower: null, maxTemp: null, energyWh: null };
+        byAttempt.set(r.attempt, row);
+      }
+      if (r.metric === "power_w") {
+        row.avgPower = r.avg;
+        row.maxPower = r.max;
+      } else if (r.metric === "temp_c") {
+        row.maxTemp = r.max;
+      } else if (r.metric === "energy_j") {
+        row.energyWh = r.total !== null ? r.total / 3600 : null;
+      }
+    }
+    return [...byAttempt.values()].sort((a, b) => a.attempt - b.attempt);
+  }
+  const metricsSummaryRows = $derived(buildMetricRows(metricsSummary));
+
+  const hasGpuData = $derived(gpu.power_w.length > 0 || gpu.temp_c.length > 0);
+  const hasUsageData = $derived(usage.length > 0);
+  const hasMetricsSummary = $derived(metricsSummaryRows.length > 0);
+  const noMetrics = $derived(!hasGpuData && !hasUsageData && !hasMetricsSummary);
 </script>
 
 <svelte:window onkeydown={onkeydown} />
@@ -234,9 +403,54 @@
       {/if}
     </section>
 
-    <section data-tab="metrics"></section>
-    <section data-tab="logs overview"></section>
-    <section data-tab="events overview"></section>
+    <section data-tab="metrics">
+      {#if noMetrics}
+        <p class="dim">No metrics for this job.</p>
+      {:else}
+        <div class="charts">
+          {#if hasUsageData}
+            <LineChart
+              label="memory"
+              points={usage}
+              color={jobColor(jobView.id)}
+              format={memoryFormat}
+              max={jobView.limit * 1.1}
+              note={`limit ${fmtGib(jobView.limit)}`}
+            />
+          {/if}
+          {#if isLiveState}
+            <LineChart label="power" points={gpu.power_w} color={JOB_COLORS[1]} format={powerFormat} note={gpuNote} />
+            <LineChart label="temperature" points={gpu.temp_c} color={JOB_COLORS[4]} format={tempFormat} note={gpuNote} />
+          {/if}
+          {#each Object.entries(progSeries) as [key, points], i (key)}
+            <LineChart label={key} {points} color={progressColor(jobView.id, i)} format={progressFormat} />
+          {/each}
+        </div>
+        {#if isFinishedState && hasMetricsSummary}
+          <div class="facts">
+            {#each metricsSummaryRows as row (row.attempt)}
+              <div class="fact">
+                <div class="l">attempt {row.attempt}</div>
+                <div class="v">{row.avgPower !== null ? `${Math.round(row.avgPower)} W avg` : "–"}</div>
+                <div class="s">
+                  max {row.maxPower !== null ? `${Math.round(row.maxPower)} W` : "–"}
+                  · {row.maxTemp !== null ? `${Math.round(row.maxTemp)} °C` : "–"}
+                  · {row.energyWh !== null ? `${row.energyWh.toFixed(1)} Wh` : "–"}
+                </div>
+              </div>
+            {/each}
+          </div>
+        {/if}
+      {/if}
+    </section>
+    <section data-tab="logs overview">
+      <LogView id={jobView.id} follow={isLiveState} />
+    </section>
+    <section data-tab="events overview">
+      {#if detail}
+        <EventList rows={eventRows(detail, events)} />
+      {/if}
+    </section>
 
     <div class="kv" data-tab="overview">
       <span class="k">command</span><span class="mono">{jobView.command}</span>
