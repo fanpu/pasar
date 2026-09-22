@@ -13,10 +13,12 @@ from pasar import gitinfo
 from pasar.config import Config
 from pasar.db import Store
 from pasar.diagnose import diagnose
+from pasar.eta import remaining_time
 from pasar.events import read_new, restart_cost, wasted_work
 from pasar.executor.base import Executor, LaunchError, LaunchRequest, UnitState
 from pasar.memory import pool_size, reservation
 from pasar.models import TERMINAL, Attempt, EndKind, Job, JobSpec, State, default_name
+from pasar.projection import MIN_REMAINING
 from pasar.scheduler import Decision, Queued, Running, decide
 from pasar.units import fmt_duration, fmt_gib
 from pasar.watchdog import MachineSample, Watchdog
@@ -159,18 +161,26 @@ class Daemon:
         self.changed()
         return self.job(job_id)
 
-    def set_bid(self, job_id: int, bid: int) -> Job:
-        if bid < 0:
+    def set_bid(self, job_id: int, bid: int | None = None, preempt: bool | None = None) -> Job:
+        """Change a job's bid and/or whether it may preempt lower-bid jobs."""
+        if bid is not None and bid < 0:
             raise ValueError("bid must not be negative")
         job = self.job(job_id)
         if job.state in TERMINAL:
             raise Conflict(f"job {job_id} is already {job.state}")
-        self.store.update_job(job_id, bid=bid)
+        values: dict = {}
+        if bid is not None:
+            values["bid"] = bid
+        if preempt is not None:
+            values["spec"] = replace(job.spec, preempt=preempt)
+        if values:
+            self.store.update_job(job_id, **values)
         self.changed()
         return self.job(job_id)
 
     def restart(self, job_id: int, *, mem_request=UNSET, est_runtime: int | None = None,
-                bid: int | None = None, retries: int | None = None) -> Job:
+                bid: int | None = None, retries: int | None = None,
+                preempt: bool | None = None) -> Job:
         job = self.job(job_id)
         if job.state not in TERMINAL:
             raise Conflict(f"job {job_id} is {job.state}; only finished jobs can be restarted")
@@ -187,6 +197,8 @@ class Daemon:
             spec = replace(spec, est_runtime=est_runtime)
         if retries is not None:
             spec = replace(spec, retries=retries)
+        if preempt is not None:
+            spec = replace(spec, preempt=preempt)
         if not self.pool:
             self._sample_machine()
         self._validate_spec(spec)
@@ -329,9 +341,16 @@ class Daemon:
                 now, "oom_kill", f"killed #{victim}: using {fmt_gib(self.usage[victim])}, "
                                  f"limit {fmt_gib(limits[victim])}")
 
+    def _remaining(self, job: Job, now: float) -> float:
+        left, _ = remaining_time(self.store, job, self.store.attempts(job.id), now)
+        return max(MIN_REMAINING, left)
+
     def snapshot(self) -> tuple[list[Queued], list[Running]]:
-        """The scheduler's view of the world: queued needs and running charges."""
-        queued = [Queued(j.id, j.bid, j.queue_time, self.limit(j), j.spec.preemptible)
+        """The scheduler's view of the world: queued needs and expected run times, running
+        charges and projected ends."""
+        now = self.clock()
+        queued = [Queued(j.id, j.bid, j.queue_time, self.limit(j), j.spec.preemptible,
+                         j.spec.preempt, self._remaining(j, now))
                   for j in self.store.list_jobs([State.QUEUED])]
         running = []
         for j in self.store.list_jobs(ACTIVE):
@@ -341,8 +360,9 @@ class Daemon:
             # stopping job (not a preemption candidate, its charge counts as "incoming" free
             # space) rather than let the scheduler pick an already-dead job as a victim.
             stopping = j.state == State.STOPPING or j.id in self.oom_killed
+            end = now if stopping else now + self._remaining(j, now)
             running.append(Running(j.id, j.bid, att.start_time, charge, j.spec.preemptible,
-                                   stopping=stopping))
+                                   stopping=stopping, end=end, preempt=j.spec.preempt))
         return queued, running
 
     def free(self, running: list[Running]) -> int:
@@ -350,7 +370,7 @@ class Daemon:
 
     def _schedule(self, now: float) -> None:
         queued, running = self.snapshot()
-        self.decision = decide(queued, running, self.free(running))
+        self.decision = decide(queued, running, self.free(running), now)
         for job_id in self.decision.preempt:
             self.store.update_job(job_id, state=State.STOPPING, stop_requested="preempt")
             self.executor.stop(self.store.current_attempt(job_id).unit)

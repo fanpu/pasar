@@ -16,7 +16,7 @@ def test_backfill_then_whole_gpu_job():
 
 def test_projected_preemption_splits_segments():
     running = [Running(1, 900, NOW, 60, True)]
-    queued = [Queued(2, 1000, 1.0, 50, True)]
+    queued = [Queued(2, 1000, 1.0, 50, True, preempt=True)]
     out = project(queued, running, {1: 600, 2: 300}, {1: 0.0, 2: 1.0}, 100, NOW)
     assert out[2] == [(NOW, NOW + 300)]
     assert out[1] == [(NOW, NOW), (NOW + 300, NOW + 900)]
@@ -25,3 +25,14 @@ def test_projected_preemption_splits_segments():
 def test_job_that_never_fits_has_no_segments():
     out = project([Queued(1, 1000, 1.0, 500, True)], [], {1: 60}, {1: 1.0}, 100, NOW)
     assert out[1] == []
+
+
+def test_waiting_job_is_not_delayed_by_backfill():
+    # #2 (bid 1000, whole GPU) waits for #1 to end at +600; #3 (lower bid, 2000s) must not start
+    # ahead of it, but #4 (lower bid, 300s) fits in the gap.
+    running = [Running(1, 1000, NOW, 60, True)]
+    queued = [Queued(2, 1000, 1.0, 100, True), Queued(3, 500, 2.0, 40, True), Queued(4, 500, 3.0, 40, True)]
+    out = project(queued, running, {1: 600, 2: 1000, 3: 2000, 4: 300}, {1: 0, 2: 1.0, 3: 2.0, 4: 3.0}, 100, NOW)
+    assert out[4] == [(NOW, NOW + 300)]
+    assert out[2] == [(NOW + 600, NOW + 1600)]
+    assert out[3] == [(NOW + 1600, NOW + 3600)]

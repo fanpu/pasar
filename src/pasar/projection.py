@@ -1,5 +1,7 @@
 """Forward-simulate the scheduler with estimated runtimes to project start/end times."""
 
+from dataclasses import replace
+
 from pasar.scheduler import Queued, Running, decide
 
 MIN_REMAINING = 60.0
@@ -32,17 +34,19 @@ def project(
     t = now
     for _ in range(10_000):
         used = sum(r.charge for r in run.values())
-        d = decide(list(queue.values()), list(run.values()), capacity - used)
+        d = decide([replace(q, duration=rem[j]) for j, q in queue.items()],
+                   [replace(r, end=ends[j]) for j, r in run.items()], capacity - used, t)
         if d.preempt:
             for j in d.preempt:
                 r = run.pop(j)
                 segments[j].append((starts[j], t))
                 rem[j] = max(MIN_REMAINING, ends[j] - t)
-                queue[j] = Queued(j, r.bid, queue_times.get(j, starts[j]), r.charge, r.preemptible)
+                queue[j] = Queued(j, r.bid, queue_times.get(j, starts[j]), r.charge, r.preemptible,
+                                  r.preempt)
             continue
         for j in d.launch:
             q = queue.pop(j)
-            run[j] = Running(j, q.bid, t, q.need, q.preemptible)
+            run[j] = Running(j, q.bid, t, q.need, q.preemptible, preempt=q.preempt)
             starts[j] = t
             ends[j] = t + rem[j]
         if not run:

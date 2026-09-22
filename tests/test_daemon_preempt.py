@@ -5,11 +5,19 @@ from pasar.models import EndKind, State
 from pasar.units import GiB
 
 
+def test_higher_bid_alone_does_not_preempt(daemon, executor, make_spec):
+    daemon.submit(make_spec(mem_request=60 * GiB))
+    daemon.tick()
+    daemon.submit(make_spec(bid=5000))  # whole GPU, no preempt flag
+    daemon.tick()
+    assert executor.stopped == [] and daemon.job(2).state == State.QUEUED
+
+
 def test_higher_bid_preempts_and_victim_requeues(daemon, executor, clock, make_spec):
     daemon.submit(make_spec(mem_request=60 * GiB))
     daemon.tick()
     clock.advance(10)
-    daemon.submit(make_spec(bid=1500))  # whole GPU
+    daemon.submit(make_spec(bid=1500, preempt=True))  # whole GPU
     daemon.tick()
     assert daemon.job(1).state == State.STOPPING and executor.stopped == ["pasar-job-1-1"]
     assert daemon.job(2).state == State.QUEUED and daemon.decision.waiting == [2]
@@ -23,7 +31,7 @@ def test_higher_bid_preempts_and_victim_requeues(daemon, executor, clock, make_s
     assert daemon.job(2).state == State.RUNNING
 
 
-def test_raising_a_bid_triggers_preemption(daemon, executor, make_spec):
+def test_raising_a_bid_with_preempt_triggers_preemption(daemon, executor, make_spec):
     daemon.submit(make_spec(mem_request=60 * GiB))
     daemon.tick()
     daemon.submit(make_spec(mem_request=60 * GiB))
@@ -31,13 +39,16 @@ def test_raising_a_bid_triggers_preemption(daemon, executor, make_spec):
     assert daemon.job(2).state == State.QUEUED and executor.stopped == []
     daemon.set_bid(2, 1001)
     daemon.tick()
+    assert executor.stopped == []  # a higher bid alone only reorders the queue
+    daemon.set_bid(2, preempt=True)
+    daemon.tick()
     assert executor.stopped == ["pasar-job-1-1"]
 
 
 def test_non_preemptible_job_is_left_alone(daemon, executor, make_spec):
     daemon.submit(make_spec(mem_request=60 * GiB, preemptible=False))
     daemon.tick()
-    daemon.submit(make_spec(bid=5000))
+    daemon.submit(make_spec(bid=5000, preempt=True))
     daemon.tick()
     assert executor.stopped == [] and daemon.decision.blocked == [2]
 
@@ -45,7 +56,7 @@ def test_non_preemptible_job_is_left_alone(daemon, executor, make_spec):
 def test_cancel_during_preemption_wins(daemon, executor, make_spec):
     daemon.submit(make_spec(mem_request=60 * GiB))
     daemon.tick()
-    daemon.submit(make_spec(bid=1500))
+    daemon.submit(make_spec(bid=1500, preempt=True))
     daemon.tick()
     daemon.cancel(1)
     executor.finish_stop("pasar-job-1-1")
@@ -60,7 +71,7 @@ def test_lost_time_from_checkpoint_and_resume(daemon, executor, clock, make_spec
     (daemon.job_dir(1) / "events.jsonl").write_text('{"event":"checkpoint","step":10}\n')
     daemon.tick()  # checkpoint recorded at 1100
     clock.advance(50)
-    daemon.submit(make_spec(bid=2000))
+    daemon.submit(make_spec(bid=2000, preempt=True))
     daemon.tick()  # preempt requested at 1150
     executor.finish_stop("pasar-job-1-1")
     daemon.tick()  # attempt 1 ends at 1150; job 2 launches
@@ -77,7 +88,7 @@ def test_lost_time_from_checkpoint_and_resume(daemon, executor, clock, make_spec
 def test_lost_time_unknown_for_jobs_without_events(daemon, executor, make_spec):
     daemon.submit(make_spec(mem_request=60 * GiB))
     daemon.tick()
-    daemon.submit(make_spec(bid=2000))
+    daemon.submit(make_spec(bid=2000, preempt=True))
     daemon.tick()
     executor.finish_stop("pasar-job-1-1")
     daemon.tick()
@@ -126,7 +137,7 @@ def test_oom_killed_job_is_not_chosen_as_a_same_tick_preemption_victim(
     daemon.tick()  # pressure starts
     # A higher-bid job needing the whole GPU queues up while job 1 is still (over-limit) running:
     # without the fix, job 1 would be an attractive preemption victim for it.
-    daemon.submit(make_spec(bid=2000))
+    daemon.submit(make_spec(bid=2000, preempt=True))
     clock.advance(31)
     daemon.tick()  # pressure sustained long enough: the watchdog kills job 1 this same tick
     assert executor.killed == ["pasar-job-1-1"]

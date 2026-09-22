@@ -26,11 +26,10 @@ def lost_time(attempts: list[Attempt]) -> dict:
 
 def schedule_projection(daemon, now: float) -> dict[int, list[tuple[float, float]]]:
     queued, running = daemon.snapshot()
-    remaining, queue_times = {}, {}
-    for job_id in [q.job_id for q in queued] + [r.job_id for r in running]:
-        job = daemon.job(job_id)
-        remaining[job_id], _ = remaining_time(daemon.store, job, daemon.store.attempts(job_id), now)
-        queue_times[job_id] = job.queue_time
+    remaining = {q.job_id: q.duration for q in queued}
+    remaining |= {r.job_id: r.end - now for r in running}
+    queue_times = {q.job_id: q.queue_time for q in queued}
+    queue_times |= {r.job_id: daemon.job(r.job_id).queue_time for r in running}
     return project(queued, running, remaining, queue_times, daemon.pool - daemon.external, now)
 
 

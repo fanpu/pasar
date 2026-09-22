@@ -34,6 +34,7 @@ class JobSpec:
     mem_request: int | None = None  # bytes; None means the whole GPU
     bid: int = 1000
     preemptible: bool = True
+    preempt: bool = False  # may stop lower-bid running jobs to start now
     grace: int = 120
     retries: int = 0
     name: str = ""
