@@ -12,7 +12,8 @@ the agents they steer).
 - **Counts lost time** from preemptions and failures.
 - **Agent-friendly.** Every command has `--json`; `pasar wait` exit codes say what happened.
 
-A web UI is planned but not built yet; today pasar is a daemon plus a command-line client.
+A web UI shows what's running, what's waiting, and why, alongside the command-line client — see
+[Web UI](#web-ui) below.
 
 ## Install
 
@@ -66,6 +67,15 @@ should accept.
 
 Custom mascot images go in `~/.config/pasar/mascot/`, named after the states listed in
 [docs/design.md](docs/design.md).
+
+### Browser smoke test
+
+    cd web && npm run e2e
+
+Runs a throwaway `pasard` (own port, own XDG dirs — never touches a real install) and drives it
+with Playwright in real Chrome, checked at `/usr/bin/google-chrome`; set `PASAR_CHROME` to use a
+different binary. It doesn't install browsers itself and needs a systemd user session, so it's
+run by hand rather than in CI.
 
 ## Licence
 

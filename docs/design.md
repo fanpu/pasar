@@ -191,6 +191,8 @@ Jobs append one JSON object per line to `$PASAR_EVENTS`. pasard adds timestamps 
 {"event": "note", "text": "switched to lr 1e-5"}
 ```
 
+A `progress` event may carry any extra numeric fields beyond `step`/`total_steps` (like `loss` above); the UI charts each one as its own line on the job's Metrics tab.
+
 Any language works (`echo '{"event":"checkpoint"}' >> "$PASAR_EVENTS"`). The `pasar_job` helper wraps this:
 
 ```python
@@ -259,9 +261,13 @@ REST under `/api`, JSON in and out:
 - `POST /api/jobs/{id}/cancel`, `PATCH /api/jobs/{id}` (bid; patching other queued-job settings is **planned, not yet implemented**), `POST /api/jobs/{id}/restart`
 - `GET /api/jobs/{id}/logs` (range, or SSE with `?follow=1`)
 - `GET /api/jobs/{id}/events`, `GET /api/jobs/{id}/metrics`
+- `GET /api/jobs/{id}/usage`: memory history (cgroup + NVML) of the job's current attempt, in memory only (not persisted, empty after a pasard restart)
 - `GET /api/status` (pool, pressure, GPU stats, projected schedule)
 - `GET /api/gpu` (power, temperature, utilisation time series from Prometheus, for the dashboard)
+- `GET /api/mascot` (manifest of available mascot images per state), `GET /mascot/<file>` (serves a mascot image, custom first then built-in)
 - `GET /api/stream`: a single SSE stream of state changes that keeps the UI live
+
+Job views (in `GET /api/jobs`, `GET /api/jobs/{id}` and the `stream` SSE payload) carry a `spans` list, one `[start_time, end_time, end_kind]` triple per attempt, so the UI can draw each attempt's timeline bar without a separate request.
 
 pasard binds to `127.0.0.1:8750` by default. `bind` in the config can add more addresses, e.g. a Tailscale IP. There is no authentication, so it should never bind to a public interface. pasard also checks the request's `Host` header against an allowlist (bound addresses, localhost, plus `allowed_hosts` in the config) to guard against DNS rebinding.
 
@@ -294,6 +300,7 @@ Old job directories are cleaned up by a size and age policy (default: keep 30 da
 
 ## Web UI
 
+- Built from a Svelte + Vite app in `web/` (`npm ci && npm run build`) into static assets in `src/pasar/webui/`, served by pasard. It's a single-page app with two client-side routes, `/` (dashboard) and `/jobs/<id>` (job detail); pasard serves `index.html` for both so deep links and reloads work.
 - **Dashboard**: a header with the mascot and a one-line status ("2 jobs running, 2 waiting · next up #47 ~16:40"), stat tiles (memory pool, power, temperature, utilisation), then a **timeline** (memory on the vertical axis, time on the horizontal) of running jobs and the projected schedule of queued jobs, then the **job table** (running, stopping, queued, recently finished).
 - **Job detail**: on desktop, a slide-over panel on the right with the dashboard dimmed behind it. On phones, a full page with tabs (Overview, Logs, Metrics, Events). The URL is the same (`/jobs/42`) either way. Contents: state and reason, bid (editable), cancel/restart, elapsed vs estimated time, progress, last checkpoint, memory (current, peak, limit), lost time, an attempts bar (run, lost, waiting), metric charts, live log, event timeline, command, environment and git info.
 - **Failed jobs** show the reason prominently (category, summary, the last log lines) with **restart** and **restart…** (a form pre-filled with the job's settings).
@@ -362,7 +369,7 @@ server it talks to.
 - **systemd backend**: integration tests using real transient units running `sleep` and small scripts (launch, SIGTERM grace, SIGKILL, exit codes, recovery after a pasard restart). Marked so they only run on a systemd host.
 - **GPU**: an opt-in test that allocates GPU memory to check NVML accounting and the watchdog.
 - **API and CLI**: FastAPI test client, and CLI tests against a running test daemon.
-- **Web UI**: component tests plus a Playwright smoke test of the dashboard, job panel and phone layout.
+- **Web UI**: component tests (`npm test`) plus a Playwright smoke test (`npm run e2e`) of the dashboard, job panel and phone layout, run against a throwaway `pasard` with its own port and XDG dirs. Needs a systemd user session, so it isn't part of CI.
 - CI runs everything that doesn't need systemd or a GPU.
 
 ## Later
