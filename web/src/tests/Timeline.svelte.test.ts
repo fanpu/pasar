@@ -2,6 +2,7 @@ import { render, screen, fireEvent, waitFor } from "@testing-library/svelte";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import Timeline from "../components/Timeline.svelte";
 import * as api from "../lib/api";
+import { jobColor } from "../lib/colors";
 import { GIB, job, NOW } from "./fixtures";
 
 vi.mock("../lib/api", async (importOriginal) => ({
@@ -97,6 +98,25 @@ describe("Timeline", () => {
     await fireEvent.keyDown(window, { key: "W" });
     await fireEvent.keyUp(window, { key: "W" });
     expect(screen.queryByText(/12:47 – 18:17/)).toBeNull();
+  });
+
+  it("gives a finished block a muted version of the job's colour instead of the old gray", () => {
+    render(Timeline, {
+      jobs: [job({ id: 42, name: "llama", state: "completed", spans: [[NOW - 3600, NOW - 1800, "completed"]] })],
+      pool: 105 * GIB,
+      now: NOW,
+      onopen: () => {},
+    });
+    const block = screen.getByRole("button", { name: /#42 llama, ran/ });
+    const rect = block.querySelector("rect")!;
+    const c = jobColor({ id: 42, tags: [] });
+    expect(rect.getAttribute("fill")).toBe(`${c}17`);
+    expect(rect.getAttribute("stroke")).toBe(`${c}66`);
+    expect(rect.getAttribute("fill")).not.toBe("#f2edf0");
+    expect(rect.getAttribute("stroke")).not.toBe("#e4d9df");
+    // no left stripe on finished blocks, unlike running/projected ones (the clipPath's own
+    // rect doesn't count — it's nested a level deeper)
+    expect(block.querySelectorAll(":scope > rect").length).toBe(1);
   });
 
   it("ignores the keys while typing or while a dialog is open", async () => {

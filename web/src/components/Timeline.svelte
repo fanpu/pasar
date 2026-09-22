@@ -1,7 +1,7 @@
 <script lang="ts">
   import { getJobsBetween } from "../lib/api";
   import { GIB, fmtGib } from "../lib/format";
-  import { jobColor } from "../lib/colors";
+  import { jobColor, mutedJobColor } from "../lib/colors";
   import { mascot } from "../lib/mascot.svelte";
   import {
     clampWindow, keyStep, layout, liveWindow, LIVE_HISTORY, tickLabel, tickStep, timeTicks, when,
@@ -294,7 +294,8 @@
           {@const Y = y(b.hi) + 1}
           {@const w = Math.max(1.5, x(b.end) - x(b.start) - 2)}
           {@const h = y(b.lo) - y(b.hi) - 2}
-          {@const c = jobColor(job.id)}
+          {@const c = jobColor(job)}
+          {@const muted = mutedJobColor(job)}
           {@const label = w > 60 ? `#${job.id} ${job.name}` : `#${job.id}`}
           {@const clipId = `tl-clip-${uid}-${job.id}-${b.kind}-${i}`}
           <g
@@ -313,8 +314,8 @@
               width={w}
               height={h}
               rx={Math.min(9, w / 3)}
-              fill={b.kind === "run" ? `${c}2e` : b.kind === "past" ? "#f2edf0" : "#ffffff"}
-              stroke={b.kind === "past" ? "#e4d9df" : c}
+              fill={b.kind === "run" ? `${c}2e` : b.kind === "past" ? muted.fill : "#ffffff"}
+              stroke={b.kind === "past" ? muted.border : c}
               stroke-width="1.8"
               stroke-dasharray={b.kind === "proj" ? "5 3" : undefined}
             />
@@ -342,7 +343,7 @@
   <div class="tlkey">
     <span><svg width="22" height="12"><rect x="1" y="1" width="20" height="10" rx="4" fill="#8a63d233" stroke="#8a63d2" stroke-width="1.5" /></svg>running</span>
     <span><svg width="22" height="12"><rect x="1" y="1" width="20" height="10" rx="4" fill="#fff" stroke="#8a63d2" stroke-width="1.5" stroke-dasharray="3 2" /></svg>projected</span>
-    <span><svg width="22" height="12"><rect x="1" y="1" width="20" height="10" rx="4" fill="#f2edf0" /></svg>finished</span>
+    <span><svg width="22" height="12"><rect x="1" y="1" width="20" height="10" rx="4" fill="#8a63d217" stroke="#8a63d266" stroke-width="1.5" /></svg>finished</span>
     <span><svg width="10" height="14"><rect x="4" y="0" width="2" height="14" fill="#ff8fab" /></svg>now</span>
     <span class="hint">drag or A/D to move · W/S or ctrl + scroll to zoom</span>
   </div>
@@ -368,7 +369,7 @@
   .blk { cursor: pointer; }
   .blk:focus-visible rect:first-child { outline: 2px solid var(--accent); outline-offset: 1px; }
   .blklabel { font-size: 12px; font-weight: 800; fill: var(--ink); }
-  .blklabel.past { fill: var(--ink-3); }
+  .blklabel.past { fill: var(--ink-2); }
   .blksub { font-size: 11px; font-weight: 700; fill: var(--ink-2); }
   .nowline { stroke: var(--accent); stroke-width: 2; }
   .nowdot { fill: var(--accent); }
