@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+import math
 import time
 from pathlib import Path
 
@@ -227,9 +228,21 @@ def create_app(daemon: Daemon, *, prom: Prometheus | None = None, wake=lambda: N
         return view(job)
 
     @app.get("/api/jobs")
-    async def list_jobs(all: bool = False, state: str | None = None):
+    async def list_jobs(all: bool = False, state: str | None = None,
+                        since: float | None = None, until: float | None = None):
         now = daemon.clock()
         proj = schedule_projection(daemon, now)
+        if since is not None or until is not None:
+            # Jobs that ran at some point in [since, until): the schedule chart's history.
+            lo = since if since is not None else 0.0
+            hi = until if until is not None else math.inf
+            if math.isnan(lo) or math.isnan(hi) or hi <= lo:
+                raise HTTPException(422, "need since < until")
+            ids = daemon.store.job_ids_active_between(lo, hi)
+            jobs = [j for j in (daemon.store.get_job(i) for i in ids) if j is not None]
+            if state:
+                jobs = [j for j in jobs if j.state == State(state)]
+            return [job_view(daemon, j, now, proj) for j in jobs]
         return [job_view(daemon, j, now, proj) for j in listed(now, all, state)]
 
     @app.get("/api/jobs/{job_id}")

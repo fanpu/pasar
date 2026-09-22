@@ -124,3 +124,27 @@ def test_mascot_routes(daemon, tmp_path, monkeypatch):
     assert c.get("/mascot/builtin/idle.svg").status_code == 200
     assert c.get("/mascot/secret.png").status_code == 404
     assert c.get("/mascot/builtin/nope.svg").status_code == 404
+
+
+def test_jobs_in_time_range(daemon, executor, make_spec):
+    c = client_for(daemon)
+    t0 = daemon.clock()
+    daemon.submit(make_spec(mem_request=4 * GiB))
+    daemon.tick()
+    daemon.clock.advance(100)
+    executor.exit("pasar-job-1-1", code=0)
+    daemon.tick()  # job 1 ran [t0, t0 + 100]
+    daemon.clock.advance(200)
+    daemon.submit(make_spec(mem_request=4 * GiB))
+    daemon.tick()  # job 2 running since t0 + 300
+    daemon.submit(make_spec(mem_request=None, bid=1))  # whole GPU: stays queued
+
+    def ids(**q):
+        return [j["id"] for j in c.get("/api/jobs", params=q).json()]
+
+    assert ids(since=t0 - 50, until=t0 + 50) == [1]
+    assert ids(since=t0 + 150, until=t0 + 250) == []
+    assert ids(since=t0 + 50, until=t0 + 10_000) == [1, 2]
+    assert ids(since=t0 + 250) == [2]  # no until: open-ended; the running job has no end yet
+    assert ids(since=t0 + 50, until=t0 + 10_000, state="completed") == [1]
+    assert c.get("/api/jobs", params={"since": 10, "until": 5}).status_code == 422

@@ -42,6 +42,7 @@ CREATE TABLE IF NOT EXISTS attempts (
     restart_cost REAL,
     PRIMARY KEY (job_id, n)
 );
+CREATE INDEX IF NOT EXISTS attempts_start ON attempts(start_time);
 CREATE TABLE IF NOT EXISTS events (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     job_id INTEGER NOT NULL,
@@ -156,6 +157,12 @@ class Store:
     def attempts(self, job_id: int) -> list[Attempt]:
         rows = self._q("SELECT * FROM attempts WHERE job_id = ? ORDER BY n", (job_id,))
         return [self._attempt(r) for r in rows]
+
+    def job_ids_active_between(self, since: float, until: float) -> list[int]:
+        """Jobs with an attempt overlapping `[since, until)` (a running attempt has no end yet)."""
+        rows = self._q("SELECT DISTINCT job_id FROM attempts WHERE start_time < ? "
+                       "AND (end_time IS NULL OR end_time > ?) ORDER BY job_id", (until, since))
+        return [r["job_id"] for r in rows]
 
     def current_attempt(self, job_id: int) -> Attempt | None:
         rows = self._q("SELECT * FROM attempts WHERE job_id = ? ORDER BY n DESC LIMIT 1", (job_id,))

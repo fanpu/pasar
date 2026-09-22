@@ -208,7 +208,7 @@ whatever `PASAR_URL` would be (default `http://127.0.0.1:8750`).
 | Method & path | Does |
 |---|---|
 | `POST /api/jobs` | Submit a job. |
-| `GET /api/jobs` | List jobs (`?all=true`, `?state=queued`). |
+| `GET /api/jobs` | List jobs (`?all=true`, `?state=queued`, or `?since=<unix ts>&until=<unix ts>` for jobs that ran in that window). |
 | `GET /api/jobs/{id}` | One job, plus its attempt history. |
 | `PATCH /api/jobs/{id}` | Change `bid`. |
 | `POST /api/jobs/{id}/cancel` | Cancel a job. |

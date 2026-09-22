@@ -259,7 +259,7 @@ Every command accepts `--json`. `pasar wait` exit codes: `0` completed, `1` fail
 
 REST under `/api`, JSON in and out:
 
-- `POST /api/jobs`, `GET /api/jobs`, `GET /api/jobs/{id}`
+- `POST /api/jobs`, `GET /api/jobs` (`?since=&until=` lists jobs with an attempt in that window, for browsing history), `GET /api/jobs/{id}`
 - `POST /api/jobs/{id}/cancel`, `PATCH /api/jobs/{id}` (bid; patching other queued-job settings is **planned, not yet implemented**), `POST /api/jobs/{id}/restart`
 - `GET /api/jobs/{id}/logs` (range, or SSE with `?follow=1`)
 - `GET /api/jobs/{id}/events`, `GET /api/jobs/{id}/metrics`
