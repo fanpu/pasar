@@ -110,6 +110,57 @@ def test_stream_sends_keepalive_when_quiet(daemon, monkeypatch):
     assert any(c.startswith(":") for c in chunks)
 
 
+def test_follow_logs_ends_promptly_on_shutdown(daemon, executor, make_spec):
+    # Even for a job that's still running (not in TERMINAL), a set `shutdown` event must end
+    # the stream immediately, the same way pasard's SIGTERM handling needs it to for a clean
+    # exit: an open logs-follow connection must not keep the process alive.
+    daemon.submit(make_spec())
+    daemon.tick()
+    path = daemon.job_dir(1) / "output.log"
+    shutdown = asyncio.Event()
+    shutdown.set()
+    chunks = _drain(api._follow_logs(daemon, 1, path, 0, shutdown=shutdown), 1)
+    assert chunks == ["event: end\ndata: {}\n\n"]
+
+
+def test_follow_logs_stops_once_shutdown_is_set_mid_stream(daemon, executor, make_spec):
+    daemon.submit(make_spec())
+    daemon.tick()
+    path = daemon.job_dir(1) / "output.log"
+    shutdown = asyncio.Event()
+
+    async def run():
+        gen = api._follow_logs(daemon, 1, path, 0, shutdown=shutdown)
+        try:
+            await gen.__anext__()  # the "attempt 1" separator daemon.tick() already wrote
+            # Nothing new has been written since and the job isn't finished, so the generator
+            # is parked in its poll wait; setting `shutdown` there must still wake it promptly.
+            task = asyncio.ensure_future(gen.__anext__())
+            await asyncio.sleep(0.05)
+            shutdown.set()
+            chunk = await asyncio.wait_for(task, timeout=1)
+            assert chunk == "event: end\ndata: {}\n\n"
+            with pytest.raises(StopAsyncIteration):
+                await gen.__anext__()
+        finally:
+            await gen.aclose()
+
+    asyncio.run(run())
+
+
+def test_stream_updates_stops_on_shutdown(daemon):
+    shutdown = asyncio.Event()
+    shutdown.set()
+
+    async def run():
+        gen = api._stream_updates(daemon, lambda: {"status": {}, "jobs": []}, None,
+                                   shutdown=shutdown)
+        with pytest.raises(StopAsyncIteration):
+            await gen.__anext__()
+
+    asyncio.run(run())
+
+
 def test_follow_logs_ends_when_job_finishes(client, daemon, executor, tmp_path):
     submit(client, tmp_path)
     daemon.tick()

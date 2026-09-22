@@ -84,14 +84,31 @@ def _read_chunk(path: Path, offset: int, limit: int = 1 << 20) -> tuple[str, int
     return data.decode("utf-8", errors="replace"), offset + len(data)
 
 
-async def _follow_logs(daemon: Daemon, job_id: int, path: Path, offset: int):
+async def _wait_or_sleep(shutdown: asyncio.Event | None, seconds: float) -> None:
+    """The generators below poll every `seconds`; when a `shutdown` event is given, wake up
+    immediately once it's set instead of finishing out the poll interval."""
+    if shutdown is None:
+        await asyncio.sleep(seconds)
+        return
+    try:
+        await asyncio.wait_for(shutdown.wait(), timeout=seconds)
+    except TimeoutError:
+        pass
+
+
+async def _follow_logs(daemon: Daemon, job_id: int, path: Path, offset: int,
+                        shutdown: asyncio.Event | None = None):
     """SSE body for `GET .../logs?follow=1`: log text as it's written, a `: keep-alive` comment
     every `KEEPALIVE_INTERVAL` of quiet (so a client's read timeout doesn't trip), and an `end`
-    event once the job is done. A module-level function (rather than a route-local closure) so
-    it can be driven directly in tests without a live HTTP stream."""
+    event once the job is done or `shutdown` is set (daemon shutting down). A module-level
+    function (rather than a route-local closure) so it can be driven directly in tests without
+    a live HTTP stream."""
     off = offset
     last_sent = time.monotonic()
     while True:
+        if shutdown is not None and shutdown.is_set():
+            yield _sse({}, event="end")
+            return
         text, new_off = _read_chunk(path, off)
         if text:
             off = new_off
@@ -104,15 +121,19 @@ async def _follow_logs(daemon: Daemon, job_id: int, path: Path, offset: int):
             if time.monotonic() - last_sent >= KEEPALIVE_INTERVAL:
                 yield ": keep-alive\n\n"
                 last_sent = time.monotonic()
-            await asyncio.sleep(0.5)
+            await _wait_or_sleep(shutdown, 0.5)
 
 
-async def _stream_updates(daemon: Daemon, snapshot, limit: int | None):
+async def _stream_updates(daemon: Daemon, snapshot, limit: int | None,
+                           shutdown: asyncio.Event | None = None):
     """SSE body for `GET /api/stream`: one snapshot per state change, plus the same keep-alive
-    comment as `_follow_logs` if the daemon goes quiet for a while."""
+    comment as `_follow_logs` if the daemon goes quiet for a while. Ends as soon as `shutdown`
+    is set (daemon shutting down)."""
     seen, sent = None, 0
     last_sent = time.monotonic()
     while limit is None or sent < limit:
+        if shutdown is not None and shutdown.is_set():
+            return
         if daemon.version != seen:
             seen = daemon.version
             yield _sse(snapshot())
@@ -121,7 +142,7 @@ async def _stream_updates(daemon: Daemon, snapshot, limit: int | None):
         elif time.monotonic() - last_sent >= KEEPALIVE_INTERVAL:
             yield ": keep-alive\n\n"
             last_sent = time.monotonic()
-        await asyncio.sleep(0.5)
+        await _wait_or_sleep(shutdown, 0.5)
 
 
 def _default_allowed_hosts(cfg: Config) -> list[str]:
@@ -137,7 +158,8 @@ def _default_allowed_hosts(cfg: Config) -> list[str]:
 
 
 def create_app(daemon: Daemon, *, prom: Prometheus | None = None, wake=lambda: None,
-               allowed_hosts: list[str] | None = None, webui_dir: Path | None = None) -> FastAPI:
+               allowed_hosts: list[str] | None = None, webui_dir: Path | None = None,
+               shutdown: asyncio.Event | None = None) -> FastAPI:
     app = FastAPI(title="pasar", version=__version__)
     cfg = daemon.cfg
     # `allowed_hosts` here is *extra* names on top of the production defaults below (e.g.
@@ -258,7 +280,7 @@ def create_app(daemon: Daemon, *, prom: Prometheus | None = None, wake=lambda: N
         if not follow:
             text, new_offset = _read_chunk(path, offset)
             return {"text": text, "offset": new_offset}
-        return StreamingResponse(_follow_logs(daemon, job_id, path, offset),
+        return StreamingResponse(_follow_logs(daemon, job_id, path, offset, shutdown=shutdown),
                                  media_type="text/event-stream")
 
     @app.get("/api/status")
@@ -274,7 +296,7 @@ def create_app(daemon: Daemon, *, prom: Prometheus | None = None, wake=lambda: N
 
     @app.get("/api/stream")
     async def stream(limit: int | None = None):
-        return StreamingResponse(_stream_updates(daemon, snapshot, limit),
+        return StreamingResponse(_stream_updates(daemon, snapshot, limit, shutdown=shutdown),
                                  media_type="text/event-stream")
 
     @app.get("/api/mascot")
