@@ -10,6 +10,20 @@ vi.mock("../lib/api", async (importOriginal) => ({
   getJobsBetween: vi.fn(),
 }));
 
+// jsdom has no PointerEvent; a MouseEvent carrying the pointer fields is enough here.
+if (!("PointerEvent" in globalThis)) {
+  class PointerEvent extends MouseEvent {
+    pointerId: number;
+    pointerType: string;
+    constructor(type: string, init: PointerEventInit = {}) {
+      super(type, init);
+      this.pointerId = init.pointerId ?? 0;
+      this.pointerType = init.pointerType ?? "mouse";
+    }
+  }
+  vi.stubGlobal("PointerEvent", PointerEvent);
+}
+
 beforeEach(() => {
   vi.mocked(api.getJobsBetween).mockReset().mockResolvedValue([]);
 });
@@ -98,6 +112,23 @@ describe("Timeline", () => {
     await fireEvent.keyDown(window, { key: "W" });
     await fireEvent.keyUp(window, { key: "W" });
     expect(screen.queryByText(/12:47 – 18:17/)).toBeNull();
+  });
+
+  it("zooms with a two-finger pinch", async () => {
+    const { container } = render(Timeline, { jobs: [], pool: 105 * GIB, now: NOW, onopen: () => {} });
+    const svg = container.querySelector("svg.tl")!;
+    const touch = (id: number, clientX: number) => ({ pointerId: id, pointerType: "touch", clientX, button: 0 });
+    await fireEvent.pointerDown(svg, touch(1, 244));
+    await fireEvent.pointerDown(svg, touch(2, 544));
+    await fireEvent.pointerMove(svg, touch(1, 94));
+    await fireEvent.pointerMove(svg, touch(2, 694));
+    await fireEvent.pointerUp(svg, touch(1, 94));
+    await fireEvent.pointerUp(svg, touch(2, 694));
+    // spreading the fingers to twice as far apart halves the 5.5h window around their midpoint
+    const [a, b] = screen.getByText(/\d\d:\d\d – \d\d:\d\d/).textContent!.match(/\d\d:\d\d/g)!
+      .map((m) => Number(m.slice(0, 2)) * 60 + Number(m.slice(3)));
+    expect(b - a).toBeGreaterThanOrEqual(164);
+    expect(b - a).toBeLessThanOrEqual(166);
   });
 
   it("gives a finished block a muted version of the job's colour instead of the old gray", () => {

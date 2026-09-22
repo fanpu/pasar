@@ -23,7 +23,8 @@
   // jsdom has no layout, so a measured width of 0 falls back to a sensible default.
   let wrapperWidth = $state(0);
   const width = $derived(wrapperWidth || 800);
-  const height = $derived(width < 760 ? 150 : 220);
+  const narrow = $derived(width < 760);
+  const height = $derived(narrow ? 240 : 220);
 
   const L = 44, R = 10, T = 10, B = 24;
 
@@ -36,7 +37,10 @@
     { label: "1w", span: 7 * 86400 },
     { label: "30d", span: 30 * 86400 },
   ];
-  let span = $state(DEFAULT_SPAN);
+  // Phones get a shorter default window so blocks stay wide enough to read.
+  const defaultSpan = $derived(narrow ? 3 * 3600 : DEFAULT_SPAN);
+  let chosenSpan = $state<number | null>(null);
+  const span = $derived(chosenSpan ?? defaultSpan);
   let pinnedT0 = $state<number | null>(null);
   const following = $derived(pinnedT0 === null);
   const win = $derived(pinnedT0 === null ? liveWindow(now, span) : clampWindow(pinnedT0, pinnedT0 + span, now));
@@ -46,18 +50,18 @@
 
   function setWindow(w: Window) {
     const c = clampWindow(w.t0, w.t1, now);
-    span = c.t1 - c.t0;
+    chosenSpan = c.t1 - c.t0;
     pinnedT0 = c.t0;
   }
   function panBy(seconds: number) {
     setWindow({ t0: t0 + seconds, t1: t1 + seconds });
   }
   function showPreset(s: number) {
-    span = s;
+    chosenSpan = s;
     pinnedT0 = null;
   }
   function reset() {
-    span = DEFAULT_SPAN;
+    chosenSpan = null;
     pinnedT0 = null;
   }
   function timeAt(px: number): number {
@@ -97,17 +101,46 @@
   });
 
   // Drag to pan; ctrl/⌘ + wheel (or a trackpad pinch) to zoom; horizontal wheel to pan.
+  // On touch screens, one finger pans and two fingers pinch to zoom.
   let svgEl = $state<SVGSVGElement | null>(null);
   let drag: { x0: number; t0: number; moved: boolean } | null = null;
   let justDragged = false;
   let dragging = $state(false);
+  const touches = new Map<number, number>(); // pointerId -> clientX
+  let pinch: { d0: number; anchor: number; span0: number } | null = null;
 
+  function localX(clientX: number): number {
+    return svgEl ? clientX - svgEl.getBoundingClientRect().left : clientX;
+  }
+  function startPinch() {
+    const [a, b] = [...touches.values()];
+    pinch = { d0: Math.max(20, Math.abs(a - b)), anchor: timeAt(localX((a + b) / 2)), span0: t1 - t0 };
+    drag = null;
+    dragging = true;
+    hideTip();
+  }
   function onpointerdown(e: PointerEvent) {
     if (e.button !== 0) return;
+    if (e.pointerType === "touch") {
+      touches.set(e.pointerId, e.clientX);
+      if (touches.size === 2) {
+        startPinch();
+        return;
+      }
+      if (touches.size > 2) return;
+    }
     drag = { x0: e.clientX, t0, moved: false };
   }
   function onpointermove(e: PointerEvent) {
-    if (svgEl) hoverX = e.clientX - svgEl.getBoundingClientRect().left;
+    if (e.pointerType !== "touch") hoverX = localX(e.clientX);
+    if (touches.has(e.pointerId)) touches.set(e.pointerId, e.clientX);
+    if (pinch && touches.size === 2) {
+      const [a, b] = [...touches.values()];
+      const s = pinch.span0 * (pinch.d0 / Math.max(20, Math.abs(a - b)));
+      const start = pinch.anchor - ((localX((a + b) / 2) - L) / plotWidth) * s;
+      setWindow({ t0: start, t1: start + s });
+      return;
+    }
     if (!drag) return;
     const dx = e.clientX - drag.x0;
     if (!drag.moved) {
@@ -120,7 +153,16 @@
     const t = drag.t0 - dx * ((t1 - t0) / plotWidth);
     setWindow({ t0: t, t1: t + (t1 - t0) });
   }
-  function onpointerup() {
+  function onpointerup(e: PointerEvent) {
+    touches.delete(e.pointerId);
+    if (pinch) {
+      if (touches.size < 2) pinch = null;
+      justDragged = true;
+      setTimeout(() => (justDragged = false));
+      drag = null;
+      dragging = false;
+      return;
+    }
     if (drag?.moved) {
       justDragged = true;
       setTimeout(() => (justDragged = false));
@@ -255,7 +297,7 @@
       {#each PRESETS as p (p.label)}
         <button class="chip" class:on={following && span === p.span} aria-pressed={following && span === p.span} onclick={() => showPreset(p.span)}>{p.label}</button>
       {/each}
-      {#if !following || span !== DEFAULT_SPAN}
+      {#if !following || chosenSpan !== null}
         <button class="chip now" onclick={reset}>now</button>
       {/if}
     </span>
@@ -296,7 +338,7 @@
           {@const h = y(b.lo) - y(b.hi) - 2}
           {@const c = jobColor(job)}
           {@const muted = mutedJobColor(job)}
-          {@const label = w > 60 ? `#${job.id} ${job.name}` : `#${job.id}`}
+          {@const label = w > 60 ? `#${job.id} ${job.name}` : w > 34 ? `#${job.id}` : ""}
           {@const clipId = `tl-clip-${uid}-${job.id}-${b.kind}-${i}`}
           <g
             role="button"
@@ -322,10 +364,12 @@
             {#if b.kind !== "past"}
               <rect x={X} y={Y} width="4" height={h} rx="2" fill={c} />
             {/if}
-            <clipPath id={clipId}>
-              <rect x={X} y={Y} width={Math.max(0, w - 6)} height={h} />
-            </clipPath>
-            <text clip-path="url(#{clipId})" x={X + 11} y={Y + 17} class="blklabel" class:past={b.kind === "past"}>{label}</text>
+            {#if label && h >= 20}
+              <clipPath id={clipId}>
+                <rect x={X} y={Y} width={w - 6} height={h} />
+              </clipPath>
+              <text clip-path="url(#{clipId})" x={X + 11} y={Y + Math.min(17, h / 2 + 4)} class="blklabel" class:past={b.kind === "past"}>{label}</text>
+            {/if}
             {#if h > 34 && w > 80}
               <text clip-path="url(#{clipId})" x={X + 11} y={Y + 32} class="blksub">
                 {b.kind === "proj" ? `~${when(b.start, now)}–${when(b.end, now)}` : b.kind === "past" ? `${when(b.start, now)}–${when(b.end, now)}` : `until ~${when(b.end, now)}`} · ★{job.bid}
@@ -345,7 +389,8 @@
     <span><svg width="22" height="12"><rect x="1" y="1" width="20" height="10" rx="4" fill="#fff" stroke="#8a63d2" stroke-width="1.5" stroke-dasharray="3 2" /></svg>projected</span>
     <span><svg width="22" height="12"><rect x="1" y="1" width="20" height="10" rx="4" fill="#8a63d217" stroke="#8a63d266" stroke-width="1.5" /></svg>finished</span>
     <span><svg width="10" height="14"><rect x="4" y="0" width="2" height="14" fill="#ff8fab" /></svg>now</span>
-    <span class="hint">drag or A/D to move · W/S or ctrl + scroll to zoom</span>
+    <span class="hint mouse">drag or A/D to move · W/S or ctrl + scroll to zoom</span>
+    <span class="hint touch">drag to move · pinch to zoom</span>
   </div>
 </div>
 
@@ -381,6 +426,11 @@
   .tlkey { display: flex; gap: 14px; font-size: 12px; font-weight: 700; color: var(--ink-2); margin-top: 6px; flex-wrap: wrap; }
   .tlkey span { display: inline-flex; align-items: center; gap: 5px; }
   .tlkey .hint { margin-left: auto; color: var(--ink-3); }
+  .tlkey .hint.touch { display: none; }
+  @media (pointer: coarse) {
+    .tlkey .hint.mouse { display: none; }
+    .tlkey .hint.touch { display: inline-flex; }
+  }
 
   h3 { flex-wrap: wrap; }
   .tlnav { margin-left: auto; display: inline-flex; align-items: center; gap: 4px; flex-wrap: wrap; }
