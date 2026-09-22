@@ -22,7 +22,7 @@ needed once, to build the web UI).
 
     git clone https://github.com/fanpu/pasar
     cd pasar/web && npm ci && npm run build && cd ..
-    uv tool install --force .
+    uv tool install --force --reinstall .
     mkdir -p ~/.config/systemd/user
     curl -o ~/.config/systemd/user/pasard.service \
         https://raw.githubusercontent.com/fanpu/pasar/main/contrib/pasard.service
@@ -59,7 +59,7 @@ etiquette on a shared GPU, matching the version installed on this machine.
 ## Web UI
 
 The web UI is built from a clone as part of [Install](#install) above (`cd web && npm ci && npm
-run build`, then `uv tool install --force .` — hatch bundles the built assets into the installed
+run build`, then `uv tool install --force --reinstall .` — hatch bundles the built assets into the installed
 tool). If you skipped it, or change the frontend later, rebuild and reinstall the same way; a
 plain `uv run pasard` from the clone always serves whatever is currently built in `web/`, no
 reinstall needed.

@@ -105,7 +105,7 @@ def test_unbuilt_ui_says_how_to_build(daemon, tmp_path):
     r = c.get("/")
     assert r.status_code == 503
     assert "npm run build" in r.text
-    assert "uv tool install --force ." in r.text
+    assert "uv tool install --force --reinstall ." in r.text
 
 
 def test_mascot_routes(daemon, tmp_path, monkeypatch):
