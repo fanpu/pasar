@@ -1,13 +1,13 @@
 # pasar design
 
-pasar is a GPU job scheduler for a single machine. Jobs carry a **bid** that sets their priority, higher bids can **preempt** lower ones, jobs can take the **whole GPU or a slice of its memory**, and a web UI shows what is running, what is waiting, and why.
+pasar is a GPU job scheduler for a single machine. Jobs carry a **bid** that sets their place in the queue, jobs that ask to can **preempt** lower-bid ones, jobs can take the **whole GPU or a slice of its memory**, and a web UI shows what is running, what is waiting, and why.
 
 It is built for a small, cooperative group (people and the agents they steer) sharing one GPU box. People are expected to follow pasar's conventions: estimate memory and runtime, checkpoint regularly, report checkpoint events.
 
 ## Goals
 
 - Make "what's running, what's next, and why" obvious at a glance, on desktop and phone.
-- Let important work jump the queue by bidding higher, and make preemption cheap by standardising checkpoint and resume.
+- Let important work jump the queue by bidding higher, allow preemption only when asked for, and make it cheap by standardising checkpoint and resume.
 - Share one GPU between several memory-bounded jobs safely.
 - Be easy for agents to drive: every command has JSON output and stable exit codes.
 - Record enough about each job (command, env, git state, logs, metrics, lost time) to understand it later.
@@ -25,10 +25,11 @@ It is built for a small, cooperative group (people and the agents they steer) sh
 |---|---|
 | **Job** | A command with scheduling metadata. Identified by an integer ID (`42`) for its whole life. |
 | **Attempt** | One launch of a job. Preemptions, retries and restarts create new attempts of the same job. |
-| **Bid** | An integer priority, default **1000**. Bids are free. Bid more than 1000 only when the work is worth preempting others for. |
+| **Bid** | An integer priority, default **1000**. Bids are free and only order the queue: higher bids go first. |
+| **Preempt** | A job submitted with `--preempt` may stop running jobs with a lower bid to start now. Never carried over: it is asked for on each submit, bid change or restart. |
 | **Whole-GPU job** | The default. Takes the entire memory pool and runs alone. |
 | **Shared job** | Requests an estimated amount of memory (`--mem 24G`) and can run alongside other shared jobs. |
-| **Preemptible** | Default yes. A preemptible job can be stopped (SIGTERM, grace period, SIGKILL) to make room for a higher bid, then requeued. |
+| **Preemptible** | Default yes. A preemptible job can be stopped (SIGTERM, grace period, SIGKILL) to make room for a higher-bid job that asked to preempt, then requeued. |
 | **Estimated runtime** | Required on submit. Used for ordering decisions and projected start/finish times. Jobs that overrun are not killed. |
 
 ## Architecture
@@ -117,14 +118,15 @@ The scheduler runs every 2 s and immediately after any submit, cancel, bid chang
 1. **Order** queued jobs by bid (highest first), then by queue time (earliest first). Preempted and auto-retried jobs keep their original queue time. A manual restart gets a new queue time.
 2. For each queued job in order:
    - **Fits in free memory** → launch it.
-   - **Doesn't fit** → collect running jobs that are preemptible **and** have a strictly lower bid. Choose victims from the lowest bid up (among equal bids, most recently started first, since it has the least work to lose) until enough memory would be freed. If that is enough, send SIGTERM to the victims. Their memory still counts as used until they exit. The job launches on a later pass once the memory is actually free.
-   - **Still doesn't fit** → the job is **blocked**. Continue down the queue so lower-bid jobs can use leftover space.
-3. **Anti-starvation rule**: a non-preemptible job may not start while any higher-bid job is blocked.
+   - **Doesn't fit, and the job asked to `--preempt`** → collect running jobs that are preemptible **and** have a strictly lower bid. Choose victims from the lowest bid up (among equal bids, most recently started first, since it has the least work to lose) until enough memory would be freed. If that is enough, send SIGTERM to the victims. Their memory still counts as used until they exit. The job launches on a later pass once the memory is actually free.
+   - **Still doesn't fit** → the job is **blocked**. The first blocked job gets a **reservation**: the time enough running jobs are projected to have ended for it to fit (from their progress, else their `--time`), and how much memory will be spare then.
+3. **Backfill**: jobs further down the queue still start in free memory, but only if that can't delay the reservation: they fit in the spare memory beside the reserved job, or they are projected to finish before its reserved start. A job with no usable estimate only takes the first route. This keeps a large high-bid job from being starved by a stream of small ones without preempting anything.
 
 Consequences:
 
-- Equal bids never preempt each other. Default-bid jobs never disturb each other.
-- Raising a job's bid takes effect on the next pass and can trigger preemption. Lowering a running job's bid can make it a preemption victim.
+- Nothing is preempted unless a queued job asked to. Equal bids never preempt each other.
+- Raising a job's bid takes effect on the next pass and moves it up the queue; with `--preempt` it can also stop lower-bid jobs. Lowering a running job's bid can make it a victim of a job that asked to preempt.
+- A job that overruns its estimate can delay a reservation it was projected to finish before; the reserved job still starts as soon as the memory is free.
 - Time run before a preemption counts toward the job's estimated runtime. Remaining time = estimate − total run time so far.
 
 ### Projected schedule
@@ -162,7 +164,7 @@ Each attempt stores a **reason code**, a one-line **summary**, and the **last 50
 ### Retries and restarts
 
 - `--retries N` (default **0**) retries automatically after failures: non-zero exit, signal, `oom`, `gpu_oom`, `gpu_xid`. Cancellations are never retried. Preemptions do not use up retries.
-- **Restart** (`pasar restart <id>`, UI button) requeues a finished job as a new attempt with the same ID, command and working directory, so checkpoint resume works. `pasar restart <id> --mem 48G --bid 1500 --time 3h` changes settings first.
+- **Restart** (`pasar restart <id>`, UI button) requeues a finished job as a new attempt with the same ID, command and working directory, so checkpoint resume works. `pasar restart <id> --mem 48G --bid 1500 --time 3h` changes settings first; `--preempt` must be given again if wanted.
 
 ## Job protocol
 
@@ -227,7 +229,7 @@ For each interrupted attempt (preempted or failed), and the attempt that follows
 ```
 pasar submit [opts] -- <command…>    pasar logs <id> [-f] [--attempt N]
 pasar ls [--all] [--state S]         pasar cancel <id>
-pasar show <id>                      pasar bid <id> <n>
+pasar show <id>                      pasar bid <id> <n> [--preempt]
 pasar wait <id> [--timeout T]        pasar restart <id> [--mem/--bid/--time …]
 pasar status
 ```
@@ -242,7 +244,8 @@ Submit options:
 | `--time 2h30m` (estimated runtime) | required |
 | `--mem 24G` (makes it a shared job) | whole GPU |
 | `--bid N` | 1000 |
-| `--no-preempt` | preemptible |
+| `--preempt` (may stop lower-bid jobs to start now) | only queue |
+| `--non-preemptible` | preemptible |
 | `--grace 120s` | 120 s |
 | `--retries N` | 0 |
 | `--name`, `--note`, `--tag` (repeatable), `--by` | name derived from the command, `--by` defaults to `$USER` |
@@ -260,7 +263,7 @@ Every command accepts `--json`. `pasar wait` exit codes: `0` completed, `1` fail
 REST under `/api`, JSON in and out:
 
 - `POST /api/jobs`, `GET /api/jobs` (`?since=&until=` lists jobs with an attempt in that window, for browsing history), `GET /api/jobs/{id}`
-- `POST /api/jobs/{id}/cancel`, `PATCH /api/jobs/{id}` (bid; patching other queued-job settings is **planned, not yet implemented**), `POST /api/jobs/{id}/restart`
+- `POST /api/jobs/{id}/cancel`, `PATCH /api/jobs/{id}` (`bid` and/or `preempt`; patching other queued-job settings is **planned, not yet implemented**), `POST /api/jobs/{id}/restart`
 - `GET /api/jobs/{id}/logs` (range, or SSE with `?follow=1`)
 - `GET /api/jobs/{id}/events`, `GET /api/jobs/{id}/metrics`
 - `GET /api/jobs/{id}/usage`: memory history (cgroup + NVML) of the job's current attempt, in memory only (not persisted, empty after a pasard restart)
@@ -286,7 +289,7 @@ pasard binds to `127.0.0.1:8750` by default. `bind` in the config can add more a
 
 Tables:
 
-- `jobs`: spec (command, cwd, name, note, tags, submitter, bid, mode, mem request, reservation, estimated runtime, preemptible, grace, retries), state, reason, queue time, git commit.
+- `jobs`: spec (command, cwd, name, note, tags, submitter, bid, mode, mem request, reservation, estimated runtime, preempt, preemptible, grace, retries), state, reason, queue time, git commit.
 - `attempts`: job, number, unit name, start and end time, end kind, exit code or signal, reason and summary, log tail, peak memory, wasted work, restart cost.
 - `events`: job, attempt, time, kind, step, payload.
 - `metric_summaries`: job, attempt, metric, avg, max, total (e.g. energy).
@@ -367,7 +370,7 @@ server it talks to.
 
 ## Testing
 
-- **Scheduler and watchdog**: pure logic, tested against a fake executor, fake clock, and fake memory readings. Table-driven cases for ordering, preemption victim choice, blocking, the non-preemptible rule, pressure kills, retries, and lost-time accounting.
+- **Scheduler and watchdog**: pure logic, tested against a fake executor, fake clock, and fake memory readings. Table-driven cases for ordering, preemption victim choice, blocking, reservations and backfill, pressure kills, retries, and lost-time accounting.
 - **Protocol**: `pasar_job` helpers and event parsing, including malformed input.
 - **systemd backend**: integration tests using real transient units running `sleep` and small scripts (launch, SIGTERM grace, SIGKILL, exit codes, recovery after a pasard restart). Marked so they only run on a systemd host.
 - **GPU**: an opt-in test that allocates GPU memory to check NVML accounting and the watchdog.

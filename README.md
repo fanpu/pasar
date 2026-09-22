@@ -8,9 +8,11 @@ pasar malams, here jobs bid for time on the GPU to determine what to run next.
 
 ![The pasar dashboard: memory pool and GPU tiles, the schedule of running and projected jobs, and the job table](docs/screenshot.webp)
 
-- **Bids set priority.** Default 1000. Bid higher only when the work is worth preempting others.
-- **Preemption with checkpoints.** Higher bids stop lower ones (SIGTERM, grace period, SIGKILL)
-  and requeue them; jobs resume from their checkpoints.
+- **Bids set the queue order.** Default 1000; bid higher to go sooner. A big job waiting for room
+  holds a reservation, so smaller jobs fill the gaps without delaying it.
+- **Preemption only when asked for, with checkpoints.** A job submitted with `--preempt` stops
+  lower-bid jobs (SIGTERM, grace period, SIGKILL) and requeues them; they resume from their
+  checkpoints.
 - **Whole GPU by default, or a memory slice.** Jobs get the whole GPU unless they suit sharing
   (CPU-heavy steps, small batches, I/O waits); then `--mem 24G` lets them share, and pasar adds a
   safety margin and watches real usage (including unified-memory GPUs, via NVML).
@@ -40,7 +42,8 @@ needed once, to build the web UI).
     pasar submit --time 2h --note "lr sweep point 3" -- .venv/bin/python train.py
     pasar ls
     pasar logs -f 42
-    pasar bid 42 1500
+    pasar bid 42 1500                # go sooner
+    pasar bid 42 2000 --preempt      # and stop lower-bid jobs to start now
     pasar cancel 42
     pasar wait 42 && echo done
 

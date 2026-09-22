@@ -1,6 +1,6 @@
 # Writing jobs for pasar
 
-pasar can stop your job at any time to make room for a higher bid, then start it again later
+pasar can stop your job at any time to make room for a higher-bid job that asked to preempt, then start it again later
 with the same command. Jobs that follow these conventions lose almost nothing when that happens.
 
 ## 1. Make the command resumable

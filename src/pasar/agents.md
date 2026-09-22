@@ -1,8 +1,9 @@
 # pasar: agent guide
 
 pasar is a job scheduler for one GPU machine (an NVIDIA GB10 with unified CPU/GPU memory). Jobs
-carry a **bid** (an integer priority, default **1000**); bids are free, and a higher bid can
-**preempt** a lower one to run now. A job takes the **whole GPU** by default (recommended), or a
+carry a **bid** (an integer priority, default **1000**); bids are free and set the queue order:
+higher bids go first. A job may also **preempt** (stop) lower-bid running jobs to run now, but
+only if it asks to with `--preempt`. A job takes the **whole GPU** by default (recommended), or a
 **memory slice** (`--mem`) to share the box with other jobs when it suits sharing. Every job is a real systemd unit, so it
 survives a pasard restart and can be inspected with normal Linux tools. This guide matches the
 pasar version installed on this machine; run `pasar guide` any time to reprint it, or fetch it
@@ -43,8 +44,9 @@ Options:
 |---|---|---|
 | `--time DURATION` | **Required.** Estimated runtime, e.g. `2h30m`, `90m`, `45s`. Used to order the queue and project start times. Overrunning it is fine — the job is not killed for taking longer. | — |
 | `--mem SIZE` | Reserve a memory slice (e.g. `24G`) so this job can share the GPU with others — only for jobs that suit sharing (see below). pasar adds a safety margin on top (`max(2 GiB, 10%)`) to cover CUDA context and allocator slack — this is a **unified-memory** box, so ordinary CUDA allocations count against the same pool as everything else. | whole GPU (recommended) |
-| `--bid N` | Priority. A higher bid can preempt lower-bid running jobs; equal bids never preempt each other. | `1000` |
-| `--no-preempt` | This job can never be stopped to make room for another. | preemptible |
+| `--bid N` | Priority: higher bids start first. On its own a bid never stops a running job. | `1000` |
+| `--preempt` | Also stop running jobs with a lower bid (that are preemptible) if that's what it takes to start now. Never carried over: pass it again on `pasar bid` or `pasar restart` if still wanted. | off |
+| `--non-preemptible` | Other jobs can never stop this one. (`--no-preempt` is an old spelling.) | preemptible |
 | `--grace DURATION` | Time between SIGTERM and SIGKILL when stopped, e.g. `180s`. Raise it if checkpointing takes longer than the default. | `120s` |
 | `--retries N` | Auto-retry after a failure (non-zero exit, signal, `oom`, `gpu_oom`, `gpu_xid`). Cancellations are never retried; preemptions don't consume a retry. | `0` |
 | `--name NAME` | Short display name. | derived from the command |
@@ -71,9 +73,10 @@ Your job is a **poor candidate for sharing** if it has any of the following.
 
 To share, pass `--mem` with an honest estimate of what the job needs.
 
-**Only bid above 1000 when the work is genuinely worth preempting someone else's running job.**
-Default (1000) is the right choice almost always; bidding high "just in case" pushes other people's
-and other agents' work off the GPU for no reason.
+**Keep the default bid (1000) unless the work should go ahead of what's queued**, and add
+`--preempt` only when it is worth stopping someone else's running job (they lose work since their
+last checkpoint). Without `--preempt`, a higher bid just waits for room; while it waits it holds a
+reservation, so smaller jobs only start if they fit beside it or finish first.
 
 **Submit work as granular jobs.** One job should be one run: a hyperparameter sweep is one job
 per configuration, not one command that loops over them all. Small jobs let the scheduler pack
@@ -150,8 +153,8 @@ shown here.
     pasar logs <id> [-f]                 # print (or -f: stream) a job's combined stdout/stderr
     pasar wait <id> [--timeout SECONDS]  # block until the job finishes; see exit codes below
     pasar cancel <id>                    # stop it and don't requeue it
-    pasar bid <id> <new-bid>             # change priority; may trigger preemption
-    pasar restart <id> [--mem/--bid/--time/--retries/--whole-gpu]  # requeue a finished job
+    pasar bid <id> <new-bid> [--preempt] # change priority; --preempt may stop lower-bid jobs
+    pasar restart <id> [--mem/--bid/--time/--retries/--whole-gpu/--preempt]  # requeue a finished job
 
 `pasar ls` and `pasar show <id>` without `--json` print human-readable text:
 
@@ -215,7 +218,7 @@ These apply to every `pasar` command, not just `wait`:
 | `lost` | The job's systemd unit vanished (e.g. the machine rebooted) while pasar wasn't watching. | Eligible for auto-retry if `--retries` was set; otherwise `pasar restart <id>`. |
 | `launch_error` | pasar couldn't even start the attempt (bad `--cwd`, systemd error). | Fix the command/cwd, then restart. |
 | `cancelled` | Someone ran `pasar cancel <id>`, or the daemon shut it down as part of a cancel. | Nothing to do; resubmit if you still need it. |
-| `preempted` | Stopped to make room for a higher-bid job. It is requeued automatically — this is not a failure. | Nothing to do, unless you want to bid higher next time. |
+| `preempted` | Stopped to make room for a higher-bid job that asked to preempt. It is requeued automatically — this is not a failure. | Nothing to do. |
 
 ## HTTP API quick reference
 
@@ -227,9 +230,9 @@ whatever `PASAR_URL` would be (default `http://127.0.0.1:8750`).
 | `POST /api/jobs` | Submit a job. |
 | `GET /api/jobs` | List jobs (`?all=true`, `?state=queued`, or `?since=<unix ts>&until=<unix ts>` for jobs that ran in that window). |
 | `GET /api/jobs/{id}` | One job, plus its attempt history. |
-| `PATCH /api/jobs/{id}` | Change `bid`. |
+| `PATCH /api/jobs/{id}` | Change `bid` and/or `preempt` (bool); a field left out keeps its value. |
 | `POST /api/jobs/{id}/cancel` | Cancel a job. |
-| `POST /api/jobs/{id}/restart` | Requeue a finished job, optionally changing `mem`/`whole_gpu`/`time`/`bid`/`retries`. |
+| `POST /api/jobs/{id}/restart` | Requeue a finished job, optionally changing `mem`/`whole_gpu`/`time`/`bid`/`retries`; `preempt` (default `false`) is not carried over. |
 | `GET /api/jobs/{id}/logs` | A chunk of output (`?offset=N`), or an SSE stream with `?follow=true`. |
 | `GET /api/jobs/{id}/events` | The job's raw protocol events (checkpoint/resumed/progress/note). |
 | `GET /api/jobs/{id}/metrics` | Stored per-attempt metric summaries (avg/max/total). |
@@ -253,7 +256,7 @@ Submit example:
 
 Body fields (all but `command`, `time`, `cwd` are optional): `command` (string), `time` (duration
 string or seconds), `cwd` (absolute path), `mem` (size string or bytes; omit for the whole GPU),
-`bid` (int, default 1000), `preemptible` (bool, default `true`), `grace` (duration, default
+`bid` (int, default 1000), `preempt` (bool, default `false`), `preemptible` (bool, default `true`), `grace` (duration, default
 `120s`), `retries` (int, default 0), `name`, `note`, `tags` (list of strings), `submitter`, `env`
 (a `{string: string}` map to give the job, or omit/`null` to give it none).
 
@@ -277,7 +280,8 @@ Reading state is just a `GET`:
   time depend on them.
 - Split work into small, independent jobs (one per sweep point, seed or eval) rather than one
   long command that does it all.
-- Leave the bid at **1000** unless the work truly is more urgent than what's already running.
+- Leave the bid at **1000** unless the work truly should go ahead of what's queued, and use
+  `--preempt` only when it's worth stopping someone else's running job.
 - Take the whole GPU (the default) unless your job is a good candidate for sharing (see
   "Submitting a job"); sharing a GPU that a job already keeps busy slows every job on it.
 - `pasar cancel` anything you no longer need; a queued or running job you've abandoned blocks
