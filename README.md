@@ -63,9 +63,40 @@ real money, so it's built to be hard to trigger by accident:
 - **Agents must only submit with `--on` when the user has explicitly asked for cloud compute for
   that work.**
 
-No provider ships yet, so as installed a cloud target accepts no submits until one is wired in;
-the machinery is exercised in tests against a fake provider. See [docs/cloud.md](docs/cloud.md)
-for the design and [`src/pasar/agents.md`](src/pasar/agents.md#cloud-jobs) for the full rules.
+To run jobs on [Modal](https://modal.com):
+
+1. Install pasar with the Modal SDK: `uv tool install --force --reinstall '.[modal]'` from the
+   clone (or `uv pip install 'pasar[modal]'` into the environment pasard runs from).
+2. `modal token new`. pasar uses whatever credentials the Modal SDK finds. To keep several
+   accounts apart, create a named profile instead (`modal token new --profile your-profile`) and
+   name it on the target (`profile = "your-profile"`); a profile missing from `~/.modal.toml`
+   leaves that target unusable rather than falling back to another account.
+3. **Set a workspace spending limit in the Modal dashboard.** It is the one limit nothing on this
+   machine can raise, and the only real boundary if something goes wrong. The SDK doesn't expose
+   it, so pasar cannot check that you set one.
+4. Add a target to `~/.config/pasar/config.toml`:
+
+       [clouds.modal]
+       provider = "modal"
+       budget = { daily = 20.0 }   # USD; a target without budget.daily or budget.monthly
+                                   # is a config error, and pasard won't start with it
+       # profile = "your-profile"
+
+5. Restart pasard, then `pasar submit --on modal --gpu T4 --time 30m -- .venv/bin/python train.py`.
+6. The job waits in `awaiting` until a person approves it. Until the approval UI exists, that is
+   `curl -X POST http://127.0.0.1:8750/api/jobs/<id>/approve`. **Agents must never call the
+   approve endpoint.**
+
+When a cloud job finishes, whatever it wrote under `pasar_job.persist_dir()` is pulled to local
+disk (`pull_dir`, by default `~/.local/share/pasar/pulls/<id>/`) and deleted at Modal. A pull
+skipped for want of disk space (`pull_min_free`) leaves it at Modal for
+`pasar pull <id> --to <dir>`, but only until `cloud_retention_days` (default 3) after the job
+finished: then whatever is still there is deleted, and for a job nobody pulled that is the only
+copy. **Storage is billed even when no compute is running**, and pasar's budgets
+count compute only.
+
+See [docs/cloud.md](docs/cloud.md) for the design and every setting, and
+[`src/pasar/agents.md`](src/pasar/agents.md#cloud-jobs) for the full rules.
 
 ## For AI agents and API users
 

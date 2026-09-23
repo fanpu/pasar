@@ -5,14 +5,19 @@ local GPU when someone explicitly asks for burst compute. Everything provider-sp
 behind a small interface so that other GPU clouds (Modal, RunPod, Lambda, a SkyPilot bridge, …)
 can be added later without touching the daemon, scheduler, protocol or UI.
 
-**Status.** The guardrails, the provider-neutral core (bundle, environment spec, output pump,
-cost ledger, budget gate, run-time limits, approval and extension), and the CLI and API described
-below are implemented and tested against a fake, in-process provider (see
-[Testing](#testing)). What is still a proposal, not implemented: any real provider (Modal or
-otherwise — `server.build()` wires up none, so a configured cloud target refuses every submit
-until one is added), `--data` upload, `pasar pull`, `--resume-from`, cross-attempt persist
-storage, pace calibration, billing reconciliation with a provider's own numbers, and the web UI.
-Each of those is called out again where it comes up below.
+**Status.** Implemented and tested: the guardrails, the provider-neutral core (bundle, environment
+spec, output pump, cost ledger, budget gate, run-time limits, approval and extension, a lifetime
+cost cap per job), the CLI and API described below, a Modal provider (`ModalProvider`, installed
+with the optional `pasar[modal]` extra, one Modal account per target), a persist dir per job that
+outlives its attempts, and getting results back: `pasar pull`, an automatic pull when a job
+finishes, and a retention sweep of whatever nobody pulled (see
+[Getting results back](#getting-results-back-and-when-they-are-deleted)). The tests run against a
+fake, in-process provider and a fake Modal SDK (see [Testing](#testing)), never the network. Still
+a proposal, not implemented: the web UI (so there is no approval UI — a person approves with
+`POST /api/jobs/{id}/approve` — and no cloud timeline), `--data` upload, `--resume-from`, pace
+calibration, billing reconciliation with a provider's own numbers, and a periodic sweep for stray
+sandboxes (strays are only looked for when pasard starts). Each of those is called out again where
+it comes up below.
 
 ## Goals
 
@@ -50,8 +55,9 @@ can. So the true ceiling lives at the provider (item 1), and pasar makes spendin
 1. **A spending limit at the provider.** Setup requires a workspace spending limit at the provider
    (on Modal, in the dashboard's billing settings), set to the most you're willing to lose. It's the
    one limit nothing on this machine can raise. Modal's SDK doesn't expose it, so pasar can't check
-   it: the setup docs make it a step, and `pasar cloud` shows month-to-date spend from the
-   provider's own billing summary so the real number is always in view.
+   it: the setup docs make it a step. Showing month-to-date spend from the provider's own billing
+   summary in `pasar cloud` is part of billing reconciliation, which is not built: today it shows
+   pasar's own ledger of estimates.
 2. **Off by default.** A cloud target exists only if `config.toml` defines it, and it can't be
    enabled without a `budget`.
 3. **Human approval of every attempt.** A cloud job is submitted into **awaiting approval** and does
@@ -86,8 +92,8 @@ can. So the true ceiling lives at the provider (item 1), and pasar makes spendin
 | **Provider** | The code that talks to one cloud API (`modal`, later `runpod`, …). Several targets can use one provider, e.g. two Modal workspaces. |
 | **GPU spec** | `--gpu H100`, `--gpu A100-80GB:4`. pasar parses `<type>[:<count>]`, and each provider maps types to its own names. Required for cloud jobs; there is no memory pool to size, so `--mem` is not allowed. |
 | **Bundle** | A snapshot of the job's code, taken at submit: every file `git ls-files --cached --others --exclude-standard` lists, plus the uv environment spec. Only a requeue after the provider reclaims the GPU reuses it (see [No restarts](#no-restarts)). |
-| **Environment spec** | `pyproject.toml`, `uv.lock`, `.python-version`. Its hash is the image cache key. |
-| **Persist dir** | Proposed, not built yet: per-job storage that would survive attempts (`$PASAR_PERSIST_DIR`), for checkpoints and outputs — see [Data, checkpoints and outputs](#data-checkpoints-and-outputs). |
+| **Environment spec** | `pyproject.toml`, `uv.lock`, `.python-version`, plus every uv workspace member's `pyproject.toml` and the files a `pyproject.toml` references that uv reads while resolving (its readme and licence files). Its hash is the image cache key. |
+| **Persist dir** | Per-job storage on a provider volume that survives every attempt of the job (`$PASAR_PERSIST_DIR`, `pasar_job.persist_dir()`), for checkpoints and outputs. Once the job finishes it is pulled to local disk and deleted at the provider — see [Getting results back](#getting-results-back-and-when-they-are-deleted). |
 | **Wrapper** | `python -m pasar_job.run`, the entry point inside the container. It runs the command and talks to pasard through stdout. |
 
 ## Architecture
@@ -156,16 +162,18 @@ class Provider(Protocol):
     def terminate(self, handle: str) -> None
     def list(self) -> list[tuple[str, dict[str, str]]]
         """Live handles and their tags, for reconciling after a pasard restart."""
-    def persist_volume(self, job_id: int) -> VolumeRef
-    def download(self, volume: VolumeRef, path: str, dest: Path) -> None
+    def persist_usage(self, job_id: int) -> tuple[int, int]
+        """(files, bytes) in the job's persist dir, without downloading anything."""
+    def download_persist(self, job_id: int, dest: Path) -> tuple[int, int]
+    def delete_persist(self, job_id: int) -> None
     def billed_cost(self, handles: list[str], since: float) -> dict[str, float] | None
         """Optional (caps.billing): actual cost per handle, possibly hours late."""
 ```
 
 `Capabilities` lets the shared layer degrade cleanly. With no billing API, the estimate stays the
-only cost. With no way to re-read output after a restart, the pump falls back to the copy the
-wrapper tees to the persist volume. With no graceful stop, a stop is a terminate after the grace
-period, and preemption loses more work.
+only cost. With no way to re-read output after a restart, the pump would fall back to a copy the
+wrapper tees to the persist volume (proposed, not built). With no graceful stop, a stop is a
+terminate after the grace period, and preemption loses more work.
 
 ### How other clouds would fit
 
@@ -205,12 +213,12 @@ provider.
   content, so the first job for a lockfile pays the build (minutes, mostly torch) and later jobs
   start fast. pasar records the image ref per environment hash and shows "building image" as its
   own start-up phase.
-- **In the container**, the bundle is unpacked at `/pasar/work/<repo name>`, the working directory is
-  the same path relative to the repository root as locally, and the project's `.venv` is a symlink to
-  the image's environment. So `.venv/bin/python train.py` and `uv run train.py` both just work. The
-  project itself is not installed into the environment (`--no-install-project`, so a code change
-  doesn't invalidate the image), so the wrapper puts the project root on `PYTHONPATH`, as an editable
-  install would.
+- **In the container**, the bundle is unpacked at `/pasar/work`, which is the repository root, the
+  working directory is the same path relative to the repository root as locally, and the project's
+  `.venv` is a symlink to the image's environment. So `.venv/bin/python train.py` and
+  `uv run train.py` both just work. The project itself is not installed into the environment
+  (`--no-install-project`, so a code change doesn't invalidate the image), so `/pasar/work` goes
+  on `PYTHONPATH`, as an editable install would put it there.
 - **Frozen at submit.** A cloud job runs the code as it was when it was submitted, even if it waits
   in the queue while you edit. Local jobs, by contrast, run whatever the working tree holds when
   each attempt starts.
@@ -221,30 +229,75 @@ set. Cases that need more than uv (system packages) get an optional `[tool.pasar
 
 ## Data, checkpoints and outputs
 
-Of this section, only the config side of **large datasets** is wired up today (a target's
-`volumes` table is parsed and passed to `Provider.launch`); everything else below needs a real
-provider and is proposed, not implemented:
+- **`$PASAR_PERSIST_DIR`** is a per-job directory on a provider volume (Modal: a Volume
+  `pasar-<target>` mounted at `/pasar/persist`, so `/pasar/persist/<job id>`), one per job rather
+  than per attempt, so checkpoint-and-resume works exactly as it does locally: the attempt after a
+  pause or a reclaim runs with `PASAR_RESUMING=1` and finds what the last one wrote.
+  `pasar_job.persist_dir()` returns it in the cloud, and the job's own directory when running
+  locally, so one script serves both. (`pasar_job.job_dir()` is still local-only: a cloud attempt
+  is not given `PASAR_JOB_DIR`.)
+- **Small local data** (proposed, not implemented): `--data <path>` (repeatable) is accepted by
+  `pasar submit` and would upload a file or directory from the local machine, since data is
+  usually gitignored and so not in the bundle. It is refused server-side for now (every submit
+  with `--data` fails outright); the intended design lands it on a shared volume at
+  `$PASAR_DATA_DIR/<name>`, keyed by content hash so a sweep of 20 jobs over the same dataset
+  uploads it once, with a cap (`data_max`, default 4 GiB).
+- **Large datasets**: targets can mount named volumes read-mostly
+  (`volumes = {"/data" = "datasets"}`). The Modal provider never creates one of these: a volume
+  the target names that the workspace does not have fails the launch rather than mounting an
+  empty directory. Filling them is out of pasar's scope; use the provider's CLI.
 
-- **`$PASAR_PERSIST_DIR`** would be a per-job directory on a provider volume (Modal: a Volume
-  `pasar-<target>` mounted at `/pasar/persist`, with a subdirectory per job), surviving attempts
-  so checkpoint-and-resume works exactly as it does locally. `pasar_job.persist_dir()` would
-  return it, or a job-local directory when running locally, so one script could serve both.
-  Neither the environment variable nor the function exists yet; today `pasar_job.job_dir()` gives
-  a cloud attempt nothing (it reads an environment variable the wrapper is never given), so a
-  cloud job's checkpoint currently has nowhere durable to be written to.
-- **Small local data**: `--data <path>` (repeatable) is accepted by `pasar submit` and would
-  upload a file or directory from the local machine, since data is usually gitignored and so not
-  in the bundle. It is refused server-side for now (every submit with `--data` fails outright); the
-  intended design lands it on a shared volume at `$PASAR_DATA_DIR/<name>`, keyed by content hash
-  so a sweep of 20 jobs over the same dataset uploads it once, with a cap (`data_max`, default
-  4 GiB).
-- **Large datasets**: targets can mount named volumes read-mostly (`volumes = {"/data" = "datasets"}`);
-  this much is parsed and passed through the executor interface. Filling those is out of pasar's
-  scope; use the provider's CLI.
-- **Getting results back**: `pasar pull <id> [path] [--to DIR]` would download from the persist
-  dir; the job detail view would list its files. There is no `pull` subcommand yet, and nothing to
-  pull from until persist dirs exist. Persist dirs would be deleted with the job's files by the
-  normal retention policy (`cloud_retention_days`, default 14), since stored data costs money too.
+### Getting results back, and when they are deleted
+
+A provider bills for what sits on its volumes, whether or not anything is running, and pasar's
+budgets count compute only. So what a finished job leaves on the volume is brought home and
+deleted there, and nothing stays at the provider for good:
+
+| Job state | What its persist dir holds | Pulled or swept? |
+|---|---|---|
+| queued, running | the live checkpoint | **Never** |
+| awaiting (paused, reclaimed, price rose) | the checkpoint its next attempt resumes from | **Never** |
+| completed, failed, cancelled | its results | Pulled automatically; whatever is left is swept `cloud_retention_days` after it finished |
+
+- **Automatic pull.** When a cloud job finishes, however it ends, pasard pulls *all* of its
+  persist dir, whatever its size, into `<pull_dir>/<job id>/` (`pull_dir` defaults to
+  `<data_dir>/pulls`, i.e. `~/.local/share/pasar/pulls`). Pulls run one at a time on a worker
+  thread, never on the scheduling loop. A pull downloads into a staging directory
+  (`.pasar-pull-<id>-*`) next to the destination, checks that the file count and total bytes on
+  disk match what the provider reported, renames it into place, and only then deletes the remote
+  copy. A download that fails or does not match deletes nothing.
+- **Guards.** Filling the disk pasard runs on would take the local scheduler down with it, so an
+  automatic pull that would leave less than `pull_min_free` (default 20 GiB) free on the
+  destination filesystem pulls nothing, and so does one of a job that left more than `pull_max`
+  (default 0, no limit). Either records a `pull_skipped` machine event saying when the sweep will
+  delete the remote copy, and leaves it for a manual pull somewhere bigger.
+- **Retries.** A pull that failed, or found nothing (a volume listed straight after a sandbox
+  exits can lag behind it), is tried again by housekeeping (hourly), at most three automatic
+  tries per job and only within `cloud_retention_days` of the job finishing. Three failures leave
+  a `pull_gave_up` machine event, which again names the sweep deadline; three looks that found
+  nothing raise no alarm.
+- **Manual pull.** `pasar pull <id> [--to DIR] [--keep]` (or `POST /api/jobs/{id}/pull`) does the
+  same verified pull on a person's say-so. `pull_min_free` and `pull_max` do not apply, since the
+  person chose it and `--to` can point somewhere bigger; its only room check refuses files that
+  plainly cannot fit. `--keep` leaves the remote copy in place, for the sweep to delete later.
+- **The retention sweep deletes the only copy.** `cloud_retention_days` (default 3) after a job
+  finished — counted from when it became `completed`, `failed` or `cancelled`, not from its last
+  attempt — whatever is left of its persist dir at the provider is deleted, pulled or not, and a
+  `swept` machine event records what went. For a job pulled with `--keep` that is a spare copy;
+  for one whose automatic pull was skipped or gave up, and that nobody pulled by hand, it is the
+  only copy, and the job's results are gone. Pull it before then.
+- **Pulled data is yours.** Nothing under `pull_dir` is ever deleted or counted by pasar:
+  housekeeping's `log_retention_days` and `log_retention_size` apply to its own `jobs/<id>/`
+  records only, so a 50 GiB checkpoint does not push other jobs' logs out. The same goes for a
+  `.pasar-pull-*` staging directory a failed pull left behind: a pull that failed after
+  downloading keeps what it downloaded, which after the sweep may be the only copy, so pasar never
+  cleans those up. Delete them yourself once the job has been pulled.
+- **Seeing it.** A finished cloud job's view carries `cloud.persist`: what the last pull that
+  landed anything fetched and where it went, what the provider still holds as a pull last
+  measured it, when the sweep deletes that (`sweeps_at`), and what the sweep already deleted.
+  `pasar show <id>` prints the same. `pasar cloud` shows, per target, how much finished jobs are
+  known to still hold there; it is a floor from pasard's records, not the volume's live size, since
+  running and paused jobs' checkpoints are not counted. None of this asks the provider.
 
 ### Writing jobs for the cloud
 
@@ -266,7 +319,7 @@ T4), since the design leans on these:
 | Question | Answer |
 |---|---|
 | Longest job | Sandbox `timeout` must be between 10 s and 24 h. `max_runtime` therefore can't exceed 24 h, and a job that needs longer must pause and resume (which it does anyway). |
-| Can output be re-read after pasard restarts? | Yes. A fresh `Sandbox.from_id` replays stdout from the start, so the pump can resume by counting bytes. The persist-dir tee stays as a backstop for providers that can't. |
+| Can output be re-read after pasard restarts? | Yes. A fresh reader replays stdout from the start, so the pump can resume by counting bytes. `ModalProvider` uses exactly that: each attempt has a buffer fed by a watcher thread that follows the sandbox's streams, and after a restart a new watcher finds the sandbox again by its tags and replays into a fresh buffer, from which the pump's saved byte cursor skips what it already has. The persist-dir tee stays a proposed backstop for providers that can't. |
 | Graceful stop | `Sandbox.exec("bash", "-c", "kill -TERM 1")` reaches the wrapper: a trap ran, the grace sleep completed, and the sandbox exited 143. |
 | Finding jobs after a restart | `Sandbox.list(tags={"pasar_job": …})` returns live sandboxes with their tags. |
 | Telling a provider kill from our own | Not from the exit code: a terminated sandbox reports 137 either way, and `terminate(wait=True)` returns it. pasar relies on its own record of whether it asked, so an unexplained 137 is a reclaim (`cloud_preempted`). |
@@ -333,10 +386,10 @@ resource to take back, and stopping someone's paid-for run to start another one 
 Clouds preempt too (spot reclaims, host failures). When a provider reports that it ended an attempt,
 the attempt ends `paused` (reason `cloud_preempted`) and the job goes back to **awaiting
 approval**, showing how far it got and the estimated cost to finish. If approved, it launches a new
-attempt from the same bundle snapshot — resuming *from its last checkpoint* is the intent, but
-needs the persist dir (see [Data, checkpoints and outputs](#data-checkpoints-and-outputs)), which
-doesn't exist yet. This is the only way a cloud job gets a second attempt, and it needs a person's
-approval and the budget gate like the first.
+attempt from the same bundle snapshot, with `PASAR_RESUMING=1` and the same persist dir, so it
+resumes *from its last checkpoint* if it wrote one there (see
+[Data, checkpoints and outputs](#data-checkpoints-and-outputs)). This is the only way a cloud job
+gets a second attempt, and it needs a person's approval and the budget gate like the first.
 
 ### Run-time limits
 
@@ -367,11 +420,10 @@ finishes, so the limit pauses instead, and pasar warns early, using the job's re
    wrapper's own `--limit` (see [the wrapper protocol](#the-wrapper-protocol)) is a backstop for
    the same stop, only for a daemon that isn't there to ask. Either way the attempt ends `paused`
    (reason `time_limit`), and the job goes back to **awaiting approval**, showing its progress and
-   the estimated cost to finish. Approving starts a new attempt from the same bundle snapshot;
-   resuming it *from the checkpoint*, like a reclaimed job, so that the only work lost is the
-   restart time, is the intent — but it needs the persist dir (see
-   [Data, checkpoints and outputs](#data-checkpoints-and-outputs)), which doesn't exist yet, so
-   today the attempt starts over. Five such pauses without finishing and the job fails
+   the estimated cost to finish. Approving starts a new attempt from the same bundle snapshot,
+   which resumes *from the checkpoint* in its persist dir, like a reclaimed job, so that the only
+   work lost is the restart time (a job that never checkpointed starts over). Five such pauses
+   without finishing and the job fails
    instead (`pause_limit`) rather than pausing forever on hardware billed by the second; a
    provider reclaim doesn't count toward that five, since it isn't the job's fault.
 3. **Calibration.** Proposed, not implemented: pasar would record each finished cloud job's
@@ -395,7 +447,7 @@ tree is snapshotted fresh, the estimated cost is shown again, and the budget is 
 - The UI hides **restart** and **restart…** on cloud jobs and shows **copy submit command** instead
   (proposed; the web UI isn't built).
 - Continuing an earlier job's checkpoint into a new submit, with `--resume-from <id>`, is proposed
-  but not implemented: it needs a persist dir to copy from, which needs a real provider.
+  but not implemented.
 
 ## Job lifecycle and records
 
@@ -425,6 +477,10 @@ Additions:
 - New table `cloud_spend(target, day, estimated, billed)` for the budget gate and the dashboard.
 - New table `approvals(job, attempt, time, estimated_cost, max_cost)`: who approved which attempt at
   what price, for the record.
+- New tables for results: `pulls` (every pull's outcome: what landed where, what the provider held
+  when it was measured, whether the remote copy was deleted, any error), `cloud_finished` (when
+  each cloud job finished, which the retention sweep counts from) and `cloud_swept` (what the
+  sweep deleted, and when).
 
 New end/job reasons: `time_limit` (paused at the approved run time or the wrapper's own backstop;
 the attempt's end kind is `paused`, which counts toward lost time like a preemption), `pause_limit`
@@ -448,23 +504,27 @@ approved run time, named separately from `time_limit` while it's known, since bo
 way), `extended` (a person raised a running attempt's ceiling, and at what rate), `target_gone`
 (a target was removed from config, for both its running and waiting jobs), and `orphan_unit` (a
 live handle this pasard can no longer follow after a restart — the executor never adopted it back
-— which is terminated on the spot rather than left to bill unwatched).
+— which is terminated on the spot rather than left to bill unwatched). For results: `pulled`,
+`pull_skipped` (an automatic pull the free-space guard or `pull_max` stopped), `pull_failed`,
+`pull_gave_up` (three automatic tries failed) and `swept` (the retention sweep deleted what
+nobody pulled); the skipped and gave-up events say when the sweep will delete the remote copy.
 
 Reconciling after a pasard restart: `list_units()` returns every live handle tagged with a pasar
 job. Handles no job owns are reported as `stray_unit`, and stray cloud units are **terminated**
-after a warning, since unlike local ones they cost money.
+after a warning, since unlike local ones they cost money. This only runs when pasard starts; a
+periodic stray sweep is not built.
 
 ## CLI and API
 
 ```
 pasar submit --on modal --gpu H100[:N] --time 2h [--env KEY]… [--max-cost 20] -- <command>
-pasar cloud                         # targets, budget, spend today/this month, awaiting approval, rates
+pasar pull <id> [--to DIR] [--keep]  # fetch a finished job's results, then delete them remotely
+pasar cloud                          # targets, budgets, spend, known storage, awaiting, rates
 ```
 
 `--data PATH` is accepted by `pasar submit` too, but refused server-side for now (see
-[Data, checkpoints and outputs](#data-checkpoints-and-outputs)). `pasar pull` and
-`--resume-from <id>` are proposed, not implemented — there is no persist dir yet for either to act
-on.
+[Data, checkpoints and outputs](#data-checkpoints-and-outputs)). `--resume-from <id>` is
+proposed, not implemented.
 
 `pasar submit --on …` returns right away with the job awaiting approval and prints the estimated
 and maximum cost. `pasar wait` keeps waiting through `awaiting`.
@@ -473,9 +533,11 @@ and maximum cost. `pasar wait` keeps waiting through `awaiting`.
 `max_cost`. `POST /api/jobs/{id}/approve` (plain, or `?extend=1` to raise a *running* attempt's
 ceiling instead of admitting a new one to the queue) and `POST /api/jobs/{id}/reject` exist for
 the web UI only; they are left out of the CLI and the agent guide says never to call them.
-`GET /api/cloud` returns the targets, spend and rates. Job views include a `cloud` object for
-cloud jobs, with `needs_more_time` (seconds a running attempt's own pace projects past its
-approval, or `null`) among its fields.
+`POST /api/jobs/{id}/pull` takes `to` (an absolute path) and `keep`. `GET /api/cloud` returns the
+targets, spend, rates and `known_stored_bytes`/`known_stored_jobs` per target. Job views include a
+`cloud` object for cloud jobs, with `needs_more_time` (seconds a running attempt's own pace
+projects past its approval, or `null`) and `persist` (what a finished job left behind; `null`
+until it finishes) among its fields.
 
 ## Web UI
 
@@ -506,9 +568,17 @@ approval, or `null`) among its fields.
 ## Configuration
 
 ```toml
+# Top level: where finished cloud jobs' results go, and how long a provider keeps them.
+# pull_dir = "/big/disk/pasar-pulls"   # absolute; default <data_dir>/pulls, one directory per job
+pull_min_free = "20GiB"      # an automatic pull that would leave less free than this pulls nothing
+pull_max = 0                 # largest automatic pull; 0 (the default) means no limit
+cloud_retention_days = 3     # then whatever a finished job left at the provider is deleted there
+
 [clouds.modal]
-provider = "modal"                 # the SDK reads credentials from ~/.modal.toml or env
-budget = { daily = 50.0, monthly = 300.0 }   # USD; required to enable the target
+provider = "modal"
+# profile = "your-profile"   # a profile in ~/.modal.toml; unset, the SDK's own credentials
+budget = { daily = 50.0, monthly = 300.0 }   # USD; budget.daily or budget.monthly is required
+max_job_cost = 10.0          # the most one job may spend over every attempt it ever gets
 approval_ttl = "24h"
 max_running = 4
 timeout_factor = 1.5
@@ -521,9 +591,22 @@ data_max = "4GiB"
 # rates = { H100 = 3.95 }          # override $/GPU-hour if the provider can't report rates
 ```
 
-Proposed: provider SDKs as optional extras (`uv tool install 'pasar[modal]'`), imported only when
-a target uses them, so a local-only install stays as it is. No provider package exists yet to
-extra-ify.
+A cloud target with no `budget.daily` or `budget.monthly` is a config error, and pasard does not
+start with it. `profile` names one Modal account per target, so several people's accounts can run
+from one pasard, each job on its own target's credit: every call for that target carries that
+profile's tokens, and never whichever profile is active. A `profile` that `~/.modal.toml` does not
+have is never quietly swapped for another: the target gets no provider (pasard logs why, and
+`pasar cloud` shows it as `(no provider)`), so it takes no jobs. `max_job_cost` (default $10) caps
+what one job spends over its whole life — every attempt, re-approval and extension — and is raised
+here, by whoever owns this file, not per job.
+
+`pull_dir` is where automatic pulls land, and where a manual `pasar pull` without `--to` does.
+A pull that fails after downloading leaves its `.pasar-pull-<id>-*` staging directory next to its
+destination (in `pull_dir`, or beside a `--to`): that is your data, possibly the only copy once the
+sweep has run, and pasar never cleans it up. Delete it yourself once the job has been pulled.
+
+The Modal SDK is an optional extra (`pasar[modal]`), imported only when a target uses it, so a
+local-only install stays as it is.
 
 ## Testing
 
@@ -541,9 +624,8 @@ extra-ify.
 ## Implementation order
 
 The original plan, kept for the record; see [Status](#cloud-jobs) at the top for what has
-actually shipped — in short: all of 1; the guardrails and docs half of 2, but no `ModalProvider`;
-3 minus `pull`; the `--max-cost` half of 5, with no billing reconciliation since nothing bills
-yet; none of 4, the UI.
+actually shipped — in short: all of 1, 2 and 3 (`ModalProvider` included); the `--max-cost` half
+of 5, with no billing reconciliation; none of 4, the UI.
 
 1. Provider-neutral pieces with the fake provider: `JobSpec.target`, executor per target, the cloud
    lane and budget, the bundle builder, the wrapper and output pump.
@@ -561,7 +643,5 @@ yet; none of 4, the UI.
 - Could approval get a real barrier (for example, the UI session holds a secret the CLI and
   agents never see)? It would only help if agents can't read the secret's file, which is hard when
   they run as the same user. The provider spending limit is the actual boundary.
-- Modal: does a new stdout reader replay a sandbox's output from the start? If it does, the pump can
-  resume after a pasard restart without the persist-dir tee. The design works either way.
 - Is keeping VMs warm across jobs (for VM clouds) worth the complexity? Deferred until such a
   provider exists.

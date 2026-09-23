@@ -353,7 +353,8 @@ pasar ships a built-in set of PNG sprites (`src/pasar/mascot/`). Users can point
 | `pressure_some_avg10` / `pressure_mem_available_frac` / `pressure_sustain` | `0.10` / `0.05` / `30s` |
 | `prometheus_url`, `grafana_url` | unset |
 | `hot_temp_c` | `85` |
-| `log_retention_days` / `log_retention_size` | `30` / `20GiB` |
+| `log_retention_days` / `log_retention_size` | `30` / `20GiB` (pasar's own `jobs/<id>/` files only; pulled cloud results are never counted or deleted) |
+| `pull_dir` / `pull_min_free` / `pull_max` / `cloud_retention_days` | `<data_dir>/pulls` / `20GiB` / `0` (no limit) / `3` — where finished cloud jobs' results land and how long a provider keeps them; see [cloud.md](cloud.md#getting-results-back-and-when-they-are-deleted) |
 | `mascot_dir` | `~/.config/pasar/mascot/` |
 
 The `PASAR_ADDRESS` environment variable, when set, replaces the default `127.0.0.1:8750` as the
