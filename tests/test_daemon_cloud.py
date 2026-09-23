@@ -816,6 +816,31 @@ def test_a_waiting_job_whose_target_is_gone_is_not_left_stranded(make_cloud, rep
         assert job.state == State.CANCELLED and job.reason == "target_gone"
 
 
+def test_a_target_with_no_provider_says_so_rather_than_calling_itself_unconfigured(
+        make_cloud, repo, tmp_path, clock, executor, probe):
+    # Two different problems with two different fixes: a target taken out of the config wants
+    # putting back, a target with no provider on this pasard wants one installed. Submit and
+    # approve take care to tell them apart; so should the message somebody reads afterwards.
+    daemon, _ = make_cloud()
+    job_id = start(daemon, repo)
+    waiting = daemon.submit(cloud_spec(repo))
+    data = tmp_path / "data"
+    cfg = Config(clouds={"fake": CloudTarget(name="fake", provider="fake", daily_budget=50.0,
+                                             monthly_budget=300.0)})
+    after = Daemon(cfg, Store(data / "pasar.db"), executor, probe, data, clock=clock)
+    after.tick()
+
+    running = after.job(job_id)
+    assert running.state == State.FAILED and "no provider on this pasard" in running.summary
+    cancelled = after.job(waiting.id)
+    assert cancelled.state == State.CANCELLED
+    assert "no provider on this pasard" in cancelled.summary
+    assert "install fake's provider" in cancelled.summary
+    events = [e["text"] for e in after.store.machine_events() if e["kind"] == "target_gone"]
+    assert len(events) == 2 and all("no provider on this pasard" in t for t in events)
+    assert not any("no longer configured" in t for t in events)
+
+
 def test_a_sandbox_whose_attempt_cannot_be_recorded_is_ended(cloud, repo, monkeypatch):
     daemon, provider = cloud
     job = daemon.submit(cloud_spec(repo))

@@ -717,16 +717,16 @@ class Daemon:
             if job.spec.target in self.executors:
                 continue
             att = self.store.current_attempt(job.id)
-            summary = (f"{job.spec.target} is no longer configured on this pasard, so this "
-                       "attempt cannot be followed")
+            why, fix = self._unreachable(job.spec.target)
+            summary = f"{why}, so this attempt cannot be followed"
             if att is not None and att.end_time is None:
                 self.store.update_attempt(job.id, att.n, end_time=now, end_kind=EndKind.FAILED,
                                           reason="target_gone", summary=summary)
             self.store.add_machine_event(
                 now, "target_gone",
-                f"job {job.id} runs on {job.spec.target}, which is not configured here: "
+                f"job {job.id} runs on {job.spec.target} and {why}: "
                 f"{att.unit if att else 'its attempt'} may still be running and billing — "
-                "end it at the provider, or put the target back and restart pasard")
+                f"end it at the provider, or {fix}")
             self.store.update_job(job.id, state=State.FAILED, reason="target_gone",
                                   summary=summary, stop_requested=None)
             self.cloud_units.pop(job.id, None)
@@ -734,13 +734,25 @@ class Daemon:
         for job in self.store.list_jobs([State.AWAITING, State.QUEUED]):
             if job.spec.target in self.executors:
                 continue
+            why, fix = self._unreachable(job.spec.target)
             self.store.add_machine_event(
-                now, "target_gone", f"job {job.id} is waiting for {job.spec.target}, which is "
-                "not configured here; it was cancelled rather than left waiting forever")
+                now, "target_gone", f"job {job.id} is waiting for {job.spec.target} and {why}; "
+                "it was cancelled rather than left waiting forever")
             self.store.update_job(
                 job.id, state=State.CANCELLED, reason="target_gone",
-                summary=f"{job.spec.target} is no longer configured on this pasard; nothing was "
-                        "spent — submit it again to a target that is")
+                summary=f"{why}; nothing was spent — submit it again to a target that works, "
+                        f"or {fix}")
+
+    def _unreachable(self, target: str) -> tuple[str, str]:
+        """Why a target cannot be reached, and what would fix it. The two cases want different
+        things done about them — one is a config file to put back, the other a provider to
+        install — and `_submit_cloud` and `approve` already take care to tell them apart, so the
+        message somebody reads after their job was settled should too."""
+        if target in self.cfg.clouds:
+            return (f"{target} is configured but has no provider on this pasard",
+                    f"install {target}'s provider and restart pasard")
+        return (f"{target} is no longer configured on this pasard",
+                f"put {target} back in the config and restart pasard")
 
     def _expire_awaiting(self, now: float) -> None:
         """An approval nobody gave is a job nobody wants; queue_time is when it started waiting."""
