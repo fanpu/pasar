@@ -143,6 +143,12 @@ def cloud_view(daemon, job: Job) -> dict | None:
         "approved_seconds": approved_seconds,
         "full_seconds": full_seconds,
         "console_url": unit.console_url if unit is not None else None,
+        # Extra seconds this attempt's own pace (see `pasar.cloud.pace.needs_more_time`) projects
+        # past what was approved; `None` while running on pace or before enough of it has been
+        # observed. Recomputed fresh on every view rather than stored, so it clears itself the
+        # moment either the pace recovers or a person extends the ceiling far enough to cover it
+        # — there is nothing to reset by hand.
+        "needs_more_time": daemon.needs_more_time(job),
     }
 
 
@@ -229,8 +235,11 @@ def status_view(daemon, now: float, projection: dict) -> dict:
 def cloud_status_view(daemon, now: float, projection: dict) -> dict:
     """Everything `GET /api/cloud` and `pasar cloud` show: each configured target's budget and
     spend (`spent_today`/`spent_month` already include what's `committed` from jobs still
-    running, the same total the budget gate in `cloud.lane` checks against), its live rates, and
-    every job currently waiting on a person to approve it, across all targets."""
+    running, the same total the budget gate in `cloud.lane` checks against), its live rates,
+    every job currently waiting on a person to approve it, and every *running* job whose own pace
+    projects it past its approved run time (`needs_time`) — a different tray from `awaiting`,
+    because these jobs are not paused and do not need to be: they keep running on the time they
+    already have unless a person extends them (`POST /api/jobs/{id}/approve?extend=1`)."""
     targets = []
     for name, target in sorted(daemon.cfg.clouds.items()):
         committed = daemon.ledger.committed(name)
@@ -250,4 +259,7 @@ def cloud_status_view(daemon, now: float, projection: dict) -> dict:
         })
     awaiting = [job_view(daemon, j, now, projection)
                 for j in daemon.store.list_jobs([State.AWAITING])]
-    return {"targets": targets, "awaiting": awaiting}
+    needs_time = [job_view(daemon, j, now, projection)
+                  for j in daemon.store.list_jobs([State.RUNNING])
+                  if daemon.needs_more_time(j) is not None]
+    return {"targets": targets, "awaiting": awaiting, "needs_time": needs_time}

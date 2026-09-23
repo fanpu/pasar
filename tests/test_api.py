@@ -408,6 +408,60 @@ def test_lower_max_cost_becomes_the_enforced_ceiling(client, cloud_daemon, cloud
     assert row["max_cost"] == pytest.approx(6.00)
 
 
+def _lag(cloud_daemon, clock, job_id):
+    """Report pace slow enough, and observed long enough, to project a large overrun: 1000 of
+    5000 steps in 400s, read 320s past the 300s observation threshold."""
+    clock.advance(400)
+    with (cloud_daemon.job_dir(job_id) / "events.jsonl").open("a") as f:
+        f.write(json.dumps({"event": "progress", "step": 1000, "total_steps": 5000}) + "\n")
+    cloud_daemon.tick()
+    clock.advance(320)
+    cloud_daemon.tick()
+
+
+def test_approve_extend_raises_the_running_limit(client, cloud_daemon, cloud_cwd, clock):
+    job_id = submit_cloud(client, cloud_cwd, time="10m").json()["id"]
+    client.post(f"/api/jobs/{job_id}/approve")
+    cloud_daemon.tick()  # the attempt starts now
+    _lag(cloud_daemon, clock, job_id)
+    before = client.get(f"/api/jobs/{job_id}").json()
+    assert before["cloud"]["needs_more_time"] is not None
+
+    r = client.post(f"/api/jobs/{job_id}/approve", params={"extend": 1})
+    assert r.status_code == 200
+    after = r.json()
+    assert after["state"] == "running"  # extending never stops the job
+    assert after["cloud"]["needs_more_time"] is None  # the new ceiling covers the projection
+    assert after["cloud"]["max_cost"] > before["cloud"]["max_cost"]
+    assert len(cloud_daemon.store.approvals(job_id)) == 1  # the same attempt's row
+
+
+def test_approve_extend_refused_past_max_cost(client, cloud_daemon, cloud_cwd, clock):
+    # $2 is above what the 10m estimate's own window would cost (~$1.32, so the cap does not
+    # bind the first approval) but far below what covering the projected overrun would need.
+    job_id = submit_cloud(client, cloud_cwd, time="10m", max_cost=2.0).json()["id"]
+    client.post(f"/api/jobs/{job_id}/approve")
+    cloud_daemon.tick()
+    before = client.get(f"/api/jobs/{job_id}").json()["cloud"]["max_cost"]
+    _lag(cloud_daemon, clock, job_id)
+
+    r = client.post(f"/api/jobs/{job_id}/approve", params={"extend": 1})
+    assert r.status_code == 409
+    assert "max-cost" in r.json()["detail"]
+    # nothing changed: still running, on its original ceiling
+    job = client.get(f"/api/jobs/{job_id}").json()
+    assert job["state"] == "running"
+    assert job["cloud"]["max_cost"] == pytest.approx(before)
+
+
+def test_approve_extend_on_a_job_with_nothing_overdue_is_refused(client, cloud_daemon, cloud_cwd):
+    job_id = submit_cloud(client, cloud_cwd).json()["id"]
+    client.post(f"/api/jobs/{job_id}/approve")
+    cloud_daemon.tick()
+    r = client.post(f"/api/jobs/{job_id}/approve", params={"extend": 1})
+    assert r.status_code == 409
+
+
 def test_a_capped_job_shows_the_shorter_run_its_cap_buys(client, cloud_daemon, cloud_cwd):
     # Capping dollars costs time — the daemon pauses the attempt when the cap is spent — so the
     # view has to say how much time, not just repeat the dollar figure back.

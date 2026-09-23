@@ -17,6 +17,7 @@ from pasar.cloud.bundle import Bundle, BundleError, EnvSpec, build_bundle
 from pasar.cloud.cost import Ledger, estimate, hourly_rate
 from pasar.cloud.executor import CloudExecutor
 from pasar.cloud.lane import CloudDecision, CloudQueued, decide_cloud
+from pasar.cloud.pace import needs_more_time as _needs_more_time
 from pasar.config import CloudTarget, Config
 from pasar.db import Store
 from pasar.diagnose import diagnose
@@ -39,6 +40,8 @@ LOCAL = "local"
 _BASE_ENV_KEYS = ("PATH", "HOME", "USER", "LANG", "SHELL")
 PAUSE_LIMIT = 5  # times a cloud job may run out of its approved time before it must be resubmitted
 PRICE_TOLERANCE = 1e-6  # dollars of float noise, which is not a price rise
+EXTENSION_MARGIN = 1.1  # buffer added to a projected overrun so one extension does not get
+                        # immediately re-flagged by ordinary noise in the next progress report
 USAGE_HISTORY = 1800  # samples per job (an hour at the default 2s tick), current attempt only
 RECENT = 86400  # matches api.RECENT: usage_history for jobs finished longer ago than this is dropped
 
@@ -252,6 +255,99 @@ class Daemon:
             return window
         return max(1, min(window, int(spec.max_cost / rate * 3600)))
 
+    def _attempt_seconds(self, job: Job, att: Attempt, target: CloudTarget) -> float:
+        """The seconds this *running* attempt's own approval buys: its approvals row's `max_cost`
+        and `hourly_rate`, converted back to time — not `_approved_seconds` recomputed against
+        today's rate. Once a person has approved (or extended) a ceiling for this attempt, it is
+        the ceiling they agreed to, not one that drifts as the market moves under them; `extend`
+        raises it by writing a new figure into the same row (`_extend`), which is exactly what
+        this reads back.
+
+        Falls back to `_approved_seconds(job.spec, target)` for a row missing a price — `approve`
+        still lets a job wait even when it could not be priced at that moment, though
+        `_launch_cloud` never launches one that still can't be, so a running attempt reaching this
+        fallback would be unusual."""
+        row = next((r for r in self.store.approvals(job.id) if r["attempt"] == att.n), None)
+        if row is not None and row["max_cost"] is not None and row["hourly_rate"]:
+            return row["max_cost"] / row["hourly_rate"] * 3600
+        return self._approved_seconds(job.spec, target)
+
+    def needs_more_time(self, job: Job) -> float | None:
+        """Extra seconds `job`'s own pace (see `pasar.cloud.pace.needs_more_time`) projects past
+        its running attempt's approved ceiling, or `None` when there's nothing to flag — not a
+        running cloud job, not enough of this attempt observed yet, or a projection that still
+        fits. Public: `views.py` reads it for the job view and `pasar ls`/`show`, and `_extend`
+        reads the same figure to size an extension, so the two can never disagree about whether
+        (or by how much) a job is overrunning."""
+        if not self._is_cloud(job) or job.state != State.RUNNING:
+            return None
+        target = self.cfg.clouds.get(job.spec.target)
+        if target is None:
+            return None
+        att = self.store.current_attempt(job.id)
+        if att is None:
+            return None
+        approved = self._attempt_seconds(job, att, target)
+        return _needs_more_time(self.store, job, self.store.attempts(job.id), self.clock(),
+                                approved)
+
+    def _extend(self, job_id: int) -> Job:
+        """Raise a running attempt's approved ceiling to cover the overrun its own pace projects,
+        through the very same approvals row a first approval writes (`add_approval` replaces the
+        row for `(job_id, attempt)`) — so `_over_the_approval`'s price-rise guard (keyed on
+        `hourly_rate`) and `_pause_overdue`'s enforcement (keyed on `max_cost`, via
+        `_attempt_seconds`) both keep reading one number per attempt, never two that could
+        disagree.
+
+        Repeatable: each call re-reads the attempt's *current* ceiling and today's pace, so a job
+        extended once and still falling further behind can be extended again — nothing here caps
+        how many times, only how far past `--max-cost` any single call may reach.
+
+        Refused past the submitter's own `--max-cost`: that figure is the hard financial limit
+        they set at submit time, and an extension is a person granting more *time* on the strength
+        of the job's own pace, not silently spending past a dollar figure nobody has revisited. A
+        job whose cap is already what is binding its ceiling has nothing left to extend into — the
+        message says so plainly and points at resubmitting with a higher cap instead of leaving
+        the person to discover it when the extension appears to do nothing.
+
+        The ledger is told the same new ceiling (`ledger.record`, the same call `_launch_cloud`
+        makes): a longer approved run is a bigger commitment, and the budget gate that reads
+        `committed()` has to see it grow, or a job could be extended past what its target's daily
+        or monthly budget would otherwise allow."""
+        job = self.job(job_id)
+        if not self._is_cloud(job) or job.state != State.RUNNING:
+            raise Conflict(f"job {job_id} is {job.state}, not a running cloud job, so there is "
+                           "no running attempt to extend")
+        target = self.cfg.clouds.get(job.spec.target)
+        if target is None:
+            raise Conflict(f"job {job_id} runs on {job.spec.target}, which is not configured")
+        att = self.store.current_attempt(job_id)
+        if att is None:
+            raise Conflict(f"job {job_id} has no running attempt to extend")
+        now = self.clock()
+        approved = self._attempt_seconds(job, att, target)
+        overrun = _needs_more_time(self.store, job, self.store.attempts(job_id), now, approved)
+        if overrun is None:
+            raise Conflict(f"job {job_id} is not projected to run past its approved time; "
+                           "nothing to extend")
+        try:
+            rate = self._hourly(target, job.spec.gpu)
+        except (KeyError, ValueError) as e:
+            raise Conflict(f"job {job_id} cannot be priced right now, so it cannot be "
+                           f"extended: {e}") from None
+        new_seconds = approved + overrun * EXTENSION_MARGIN
+        new_cost = estimate(rate, new_seconds)
+        if job.spec.max_cost is not None and new_cost > job.spec.max_cost + PRICE_TOLERANCE:
+            raise Conflict(
+                f"job {job_id} would need ${new_cost:.2f} to cover its current pace, above the "
+                f"${job.spec.max_cost:.2f} --max-cost it was submitted with; that cap is what is "
+                "binding, so it cannot be extended past it — submit it again with a higher "
+                "--max-cost if it should be allowed to run longer")
+        self.store.add_approval(job_id, att.n, now, new_cost, new_cost, rate)
+        self.ledger.record(target.name, job_id, att.n, new_cost)
+        self.changed()
+        return self.job(job_id)
+
     def _write_bundle(self, d: Path, bundle: Bundle) -> None:
         (d / "bundle.json").write_text(json.dumps({
             "root": bundle.root, "rel_cwd": bundle.rel_cwd, "size": bundle.size,
@@ -353,11 +449,16 @@ class Daemon:
         self.changed()
         return self.job(job_id)
 
-    def approve(self, job_id: int) -> Job:
+    def approve(self, job_id: int, extend: bool = False) -> Job:
         """Let one attempt run, at today's price. Approval is per attempt: a paused or reclaimed
         job comes back here rather than straight to the queue. The row records the price only —
         the estimate and the ceiling the launch is held to — because pasard has no
-        authentication and there is nobody to name as the approver."""
+        authentication and there is nobody to name as the approver.
+
+        `extend=True` is a different action on the same verb: it raises the *running* attempt's
+        ceiling instead of approving a new one. See `_extend`."""
+        if extend:
+            return self._extend(job_id)
         job = self.job(job_id)
         if job.state != State.AWAITING:
             raise Conflict(f"job {job_id} is {job.state}, not awaiting approval")
@@ -529,8 +630,9 @@ class Daemon:
         keeps the decision (and the deadline it is measured against) with the daemon.
 
         This is the only thing that stops a running attempt, so it is also where `--max-cost` is
-        enforced: `_approved_seconds` shortens the deadline to the moment the cap's dollars run
-        out. A job stopped for either reason pauses and returns for approval.
+        enforced: `_attempt_seconds` reads the attempt's own approvals row, whose `max_cost`
+        already accounts for the cap — and for any extension `_extend` has granted since. A job
+        stopped for either reason pauses and returns for approval.
 
         Driven from the store, not from this tick's statuses: a status read that threw is not a
         reason to let an attempt bill past the time somebody approved."""
@@ -539,8 +641,10 @@ class Daemon:
             if not self._is_cloud(job) or job.stop_requested or target is None:
                 continue
             att = self.store.current_attempt(job.id)
-            approved = self._approved_seconds(job.spec, target)
-            if att is None or now - att.start_time < approved:
+            if att is None:
+                continue
+            approved = self._attempt_seconds(job, att, target)
+            if now - att.start_time < approved:
                 continue
             try:
                 self._executor(job).stop(att.unit)

@@ -336,6 +336,7 @@ def test_cloud_command_text_and_json(client, capsys, cloud_daemon, cloud_cwd, mo
     monkeypatch.chdir(cloud_cwd)
     code, out = run(client, capsys, "cloud")
     assert code == 0 and "fake" in out.out and "nothing awaiting approval" in out.out
+    assert "nothing running past its approved pace" in out.out
     run(client, capsys, "submit", "--time", "1h", "--on", "fake", "--gpu", "H100", "--",
         "python", "-c", "pass")
     code, out = run(client, capsys, "cloud", "--json")
@@ -343,3 +344,28 @@ def test_cloud_command_text_and_json(client, capsys, cloud_daemon, cloud_cwd, mo
     body = json.loads(out.out)
     assert body["targets"][0]["name"] == "fake"
     assert len(body["awaiting"]) == 1
+    assert body["needs_time"] == []
+
+
+def test_show_and_cloud_surface_a_job_that_needs_more_time(client, capsys, cloud_daemon,
+                                                            cloud_cwd, monkeypatch):
+    monkeypatch.chdir(cloud_cwd)
+    code, out = run(client, capsys, "submit", "--time", "10m", "--on", "fake", "--gpu", "H100",
+                    "--", "python", "-c", "pass")
+    assert code == 0
+    job_id = cloud_daemon.job(1).id
+    cloud_daemon.approve(job_id)
+    cloud_daemon.tick()  # the attempt starts now
+    cloud_daemon.clock.advance(400)
+    with (cloud_daemon.job_dir(job_id) / "events.jsonl").open("a") as f:
+        f.write(json.dumps({"event": "progress", "step": 1000, "total_steps": 5000}) + "\n")
+    cloud_daemon.tick()  # the report lands 400s in: far behind the 10m estimate's pace
+    cloud_daemon.clock.advance(320)  # past the 300s observation window
+    cloud_daemon.tick()
+
+    code, out = run(client, capsys, "show", str(job_id))
+    assert code == 0 and "running (needs more time)" in out.out
+    assert "projected to run" in out.out and "extend it" in out.out
+
+    code, out = run(client, capsys, "cloud")
+    assert code == 0 and "running past the pace" in out.out

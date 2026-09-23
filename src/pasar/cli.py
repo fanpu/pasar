@@ -132,6 +132,9 @@ def _state(job: dict) -> str:
         return f"{job['state']} ({job['reason']})"
     if job["state"] == "queued" and job["preemptions"]:
         return f"queued (preempted x{job['preemptions']})"
+    cloud = job.get("cloud")
+    if cloud and cloud.get("needs_more_time"):
+        return f"{job['state']} (needs more time)"
     return job["state"]
 
 
@@ -173,6 +176,11 @@ def print_job(job: dict) -> None:
         fields.append(("cloud", f"{cloud['target']} · {cloud['gpu']} · {cloud['phase']}"))
         fields.append(("cost", cost))
         fields.append(("approved", _approved_run(cloud)))
+        if cloud.get("needs_more_time"):
+            pace = (f"projected to run {fmt_duration(cloud['needs_more_time'])} past its "
+                    "approved time; extend it in the web UI to keep it running "
+                    "(POST .../approve?extend=1)")
+            fields.append(("pace", pace))
         if cloud["console_url"]:
             fields.append(("console", cloud["console_url"]))
     for k, v in fields:
@@ -203,6 +211,13 @@ def print_cloud(body: dict) -> None:
         print_table(awaiting)
     else:
         print("nothing awaiting approval")
+    needs_time = body.get("needs_time", [])
+    print()
+    if needs_time:
+        print(f"{len(needs_time)} job(s) running past the pace their approval allows for:")
+        print_table(needs_time)
+    else:
+        print("nothing running past its approved pace")
 
 
 def build_parser() -> Parser:
