@@ -133,15 +133,6 @@ class Store:
         self._db.row_factory = sqlite3.Row
         self._db.execute("PRAGMA journal_mode=WAL")
         self._db.executescript(SCHEMA)
-        self._add_columns("pulls", {"remote_files": "INTEGER", "remote_bytes": "INTEGER"})
-
-    def _add_columns(self, table: str, columns: dict[str, str]) -> None:
-        """Add columns a newer schema gave an existing table: `CREATE TABLE IF NOT EXISTS`
-        leaves a table made by an older pasard exactly as it was."""
-        have = {r["name"] for r in self._db.execute(f"PRAGMA table_info({table})")}
-        for name, kind in columns.items():
-            if name not in have:
-                self._db.execute(f"ALTER TABLE {table} ADD COLUMN {name} {kind}")
 
     def _q(self, sql: str, args: tuple = ()) -> list[sqlite3.Row]:
         with self._lock:

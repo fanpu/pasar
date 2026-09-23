@@ -175,23 +175,6 @@ def test_held_remote_is_the_latest_measurement_of_each_job_not_yet_gone(store):
     assert store.held_remote() == {1: 5000, 3: 9}
 
 
-def test_an_older_pulls_table_gains_the_measurement_columns(tmp_path):
-    import sqlite3
-    path = tmp_path / "pasar.db"
-    db = sqlite3.connect(path)
-    db.execute("CREATE TABLE pulls (id INTEGER PRIMARY KEY AUTOINCREMENT, job_id INTEGER NOT "
-               "NULL, ts REAL NOT NULL, dest TEXT, files INTEGER, bytes INTEGER, remote_deleted "
-               "INTEGER NOT NULL DEFAULT 0, error TEXT, auto INTEGER NOT NULL DEFAULT 0)")
-    db.execute("INSERT INTO pulls (job_id, ts, dest, files, bytes) VALUES (1, 5.0, '/p', 1, 2)")
-    db.commit()
-    db.close()
-    store = Store(path)
-    assert store.last_pull(1)["remote_bytes"] is None
-    store.add_pull(1, 10.0, "/p", None, None, False, "no room", remote_files=1, remote_bytes=2)
-    assert store.last_pull(1)["remote_bytes"] == 2
-    Store(path)  # and opening it again is harmless
-
-
 def test_when_a_cloud_job_finished_is_stamped_once(store):
     assert store.cloud_finished_at(1) is None and store.cloud_finished() == {}
     store.mark_cloud_finished(1, 10.0)
@@ -199,3 +182,16 @@ def test_when_a_cloud_job_finished_is_stamped_once(store):
     store.mark_cloud_finished(2, 15.0)
     assert store.cloud_finished_at(1) == 10.0
     assert store.cloud_finished() == {1: 10.0, 2: 15.0}
+
+
+def test_the_schema_is_created_whole_and_never_altered(tmp_path):
+    # New state gets new tables, created whole: a released table is never ALTERed, so a pasard
+    # rolled back to an older release still reads every table it knows.
+    import inspect
+
+    import pasar.db
+
+    assert "ALTER" not in inspect.getsource(pasar.db).upper()
+    store = Store(tmp_path / "pasar.db")
+    columns = {r["name"] for r in store._q("PRAGMA table_info(pulls)")}
+    assert {"auto", "remote_files", "remote_bytes"} <= columns
