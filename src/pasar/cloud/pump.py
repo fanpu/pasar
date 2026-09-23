@@ -23,19 +23,35 @@ class Pump:
         self.cursor = 0
         self.exit_info: dict | None = None
         self.phase_times: dict[str, float] = {}
-        self._partial = ""
 
     def poll(self) -> None:
-        """Idempotent and resumable: `cursor` is the only state a caller needs to persist
-        to pick a poll loop back up after a restart without re-reading or dropping output."""
-        data, self.cursor = self.provider.read_output(self.handle, self.cursor)
+        """Idempotent and resumable: `cursor` means everything up to it has been fully
+        processed, so it is the only state a caller needs to persist to pick a poll loop back
+        up after a restart without re-reading or dropping output.
+
+        Bytes after the last complete line are never decoded or buffered here: `cursor` is
+        simply left pointing before them, so the provider re-serves them (plus whatever has
+        since arrived) on the next poll. Every provider we support accepts reading from an
+        earlier cursor, so this also means a multi-byte UTF-8 character split across two reads
+        is always decoded whole, never as two separately-decoded (and separately mangled)
+        fragments.
+        """
+        # `data` runs from the old cursor to whatever the provider has right now; we only
+        # advance `self.cursor` up to the last complete line below, so any bytes past that
+        # point are simply re-fetched (prefixed to whatever's new) on the next poll.
+        data, _ = self.provider.read_output(self.handle, self.cursor)
         if not data:
             return
         # Never str.splitlines() this: the control prefix is \x1e, which splitlines() treats
-        # as its own line boundary and would silently split a control line in two.
-        text = self._partial + data.decode("utf-8", errors="replace")
-        lines = text.split("\n")
-        self._partial = lines.pop()
+        # as its own line boundary and would silently split a control line in two. Split on
+        # raw bytes, not decoded text: "\n" (0x0A) can never appear inside a multi-byte UTF-8
+        # sequence, so this is always a safe place to cut, even mid-character.
+        end = data.rfind(b"\n")
+        if end == -1:
+            return  # no complete line yet; leave cursor where it is
+        complete, self.cursor = data[:end + 1], self.cursor + end + 1
+        text = complete.decode("utf-8", errors="replace")
+        lines = text.split("\n")[:-1]  # `complete` always ends with "\n"
         log_lines, events = [], []
         for line in lines:
             obj = split(line, self.token)
