@@ -303,6 +303,16 @@ class Daemon:
         extended once and still falling further behind can be extended again — nothing here caps
         how many times, only how far past `--max-cost` any single call may reach.
 
+        Bounded by two ceilings, and refused rather than quietly trimmed when either binds, so
+        nobody is told a job was extended when it was not:
+
+        - the target's own `max_runtime`, which is the limit the sandbox itself is launched with
+          (`_launch_cloud`): time past it cannot be run at any price, and a projection that asks
+          for it is a job reporting nonsense, not a job that needs a bigger ceiling. Writing that
+          figure into the approvals row would also hand `Ledger.committed()` an imaginary
+          commitment and shut every other job on the target out of its budget.
+        - the submitter's own `--max-cost` (below).
+
         Refused past the submitter's own `--max-cost`: that figure is the hard financial limit
         they set at submit time, and an extension is a person granting more *time* on the strength
         of the job's own pace, not silently spending past a dollar figure nobody has revisited. A
@@ -336,6 +346,14 @@ class Daemon:
             raise Conflict(f"job {job_id} cannot be priced right now, so it cannot be "
                            f"extended: {e}") from None
         new_seconds = approved + overrun * EXTENSION_MARGIN
+        if new_seconds > target.max_runtime:
+            raise Conflict(
+                f"job {job_id}'s own pace needs {fmt_duration(new_seconds)} of run time, past the "
+                f"{fmt_duration(target.max_runtime)} {target.name} allows any one attempt, so it "
+                "cannot be extended that far — a projection that large usually means the job is "
+                "barely moving or is misreporting its progress; submit it again with a longer "
+                "--time estimate (and a checkpoint to resume from) rather than extending this "
+                "attempt")
         new_cost = estimate(rate, new_seconds)
         if job.spec.max_cost is not None and new_cost > job.spec.max_cost + PRICE_TOLERANCE:
             raise Conflict(

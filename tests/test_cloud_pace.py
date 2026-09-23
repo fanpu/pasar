@@ -226,6 +226,34 @@ def test_extending_refuses_to_exceed_max_cost(cloud_daemon, cloud_provider, clou
     assert cloud_provider.stopped == []
 
 
+def test_extending_refuses_to_reach_past_the_targets_own_limit(cloud_daemon, cloud_provider,
+                                                                 cloud_cwd, clock):
+    # A job reporting almost no progress projects an overrun of years. No attempt on the target
+    # can run that long — the sandbox itself is launched with `max_runtime` as its limit — so the
+    # extension is refused rather than written into the approvals row, where `Ledger.committed()`
+    # would read the imaginary figure and shut every other job on the target out of the budget.
+    daemon = cloud_daemon
+    job_id = start(daemon, cloud_cwd)  # no --max-cost: nothing else bounds the ceiling
+    target = daemon.cfg.clouds["fake"]
+    att = daemon.store.current_attempt(job_id)
+    before = dict(daemon.store.approvals(job_id)[0])
+    steady_reports(daemon, clock, job_id, att.start_time, step=3, total=1_000_000, over=400)
+    clock.advance(320)
+    daemon.tick()
+    assert daemon.needs_more_time(daemon.job(job_id)) > target.max_runtime
+    committed = daemon.ledger.committed("fake")  # read at this instant: it rises with elapsed time
+
+    with pytest.raises(Conflict) as excinfo:
+        daemon.approve(job_id, extend=True)
+    assert "24h00m" in str(excinfo.value)  # what the target allows one attempt
+    assert "--time" in str(excinfo.value)  # and what to do about it
+    # nothing was committed on the strength of that projection
+    assert dict(daemon.store.approvals(job_id)[0]) == before
+    assert daemon.ledger.committed("fake") == pytest.approx(committed)
+    assert daemon.job(job_id).state == State.RUNNING
+    assert cloud_provider.stopped == []
+
+
 def test_extending_when_nothing_is_overdue_is_refused(cloud_daemon, cloud_cwd):
     daemon = cloud_daemon
     job_id = start(daemon, cloud_cwd)
