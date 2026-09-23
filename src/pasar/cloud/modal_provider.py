@@ -580,9 +580,10 @@ class ModalProvider:
             # refusing to price a job at all, which is what an empty table does.
             log.exception("could not refresh %s's rates", self.target.name)
 
-    def gpus(self) -> list[GpuRow]:
-        """This target's GPUs as clean rows, from the live rates. See `gpu_rows`."""
-        return gpu_rows(self.rates(), GPU_NAMES, GPU_MEMORY_GB)
+    def gpus(self, rates: dict[str, float]) -> list[GpuRow]:
+        """This target's GPUs as clean rows, built from `rates` (a caller's own price list, not
+        fetched again here — see `Provider.gpus`). See `gpu_rows`."""
+        return gpu_rows(rates, GPU_NAMES, GPU_MEMORY_GB)
 
     # ---- not built yet
     def upload(self, paths: list[str], key: str) -> str:

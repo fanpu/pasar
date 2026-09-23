@@ -430,7 +430,7 @@ def test_a10_and_rtx_pro_6000_are_aliased_to_modals_own_billing_spelling(provide
 def test_gpus_collapses_aliases_to_one_row_named_as_gpu_accepts_it(provider, tmp_path):
     p, sdk = provider
     sdk.rates_value = {"gpu_hour_cost_a100_80gb": 2.5, "gpu_hour_cost_a100-80gb": 2.5}
-    rows = {r.name: r for r in p.gpus()}
+    rows = {r.name: r for r in p.gpus(p.rates())}
     assert list(rows) == ["A100-80GB"]
     assert rows["A100-80GB"].hourly_rate == 2.5
     assert rows["A100-80GB"].memory_gb == 80
@@ -439,7 +439,7 @@ def test_gpus_collapses_aliases_to_one_row_named_as_gpu_accepts_it(provider, tmp
 def test_gpus_uses_modals_own_name_for_a10_and_rtx_pro_6000(provider, tmp_path):
     p, sdk = provider
     sdk.rates_value = {"gpu_hour_cost_a10g": 1.1, "gpu_hour_cost_rtx6000": 6.0}
-    rows = {r.name: r for r in p.gpus()}
+    rows = {r.name: r for r in p.gpus(p.rates())}
     assert set(rows) == {"A10", "RTX-PRO-6000"}
     assert rows["A10"].memory_gb == 24
     assert rows["RTX-PRO-6000"].memory_gb == 96
@@ -452,7 +452,7 @@ def test_gpus_excludes_endpoint_and_cpu_memory_rates(provider, tmp_path):
         "mem_gib_hour_cost_sandbox": 0.024, "volume_storage_gib_month_cost": 0.05,
         "endpoints_llama_3_1_8b_instruct": 0.1,
     }
-    names = {r.name for r in p.gpus()}
+    names = {r.name for r in p.gpus(p.rates())}
     assert names == {"H100"}
 
 
@@ -461,7 +461,7 @@ def test_gpus_lists_an_unknown_gpu_with_its_memory_blank(provider, tmp_path):
     vanishing from `pasar cloud`."""
     p, sdk = provider
     sdk.rates_value = {"gpu_hour_cost_b400": 9.0}
-    rows = {r.name: r for r in p.gpus()}
+    rows = {r.name: r for r in p.gpus(p.rates())}
     assert rows["B400"].hourly_rate == 9.0
     assert rows["B400"].memory_gb is None
 
@@ -470,7 +470,7 @@ def test_gpus_sort_by_price(provider, tmp_path):
     p, sdk = provider
     sdk.rates_value = {"gpu_hour_cost_h100": 3.95, "gpu_hour_cost_t4": 0.59,
                        "gpu_hour_cost_h200": 4.5}
-    rows = p.gpus()
+    rows = p.gpus(p.rates())
     assert [r.name for r in rows] == ["T4", "H100", "H200"]
     assert [r.hourly_rate for r in rows] == sorted(r.hourly_rate for r in rows)
 

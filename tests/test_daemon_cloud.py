@@ -16,6 +16,7 @@ import pytest
 
 from pasar.cloud.cost import estimate, hourly_rate
 from pasar.cloud.executor import parse_unit
+from pasar.cloud.modal_provider import ModalProvider
 from pasar.config import CloudTarget, Config
 from pasar.daemon import CLOUD_RATE_TTL, PAUSE_LIMIT, Conflict, Daemon
 from pasar.db import Store
@@ -24,6 +25,7 @@ from pasar.models import EndKind, JobSpec, State
 from pasar.units import GiB
 from pasar.views import cloud_status_view, cloud_view
 from tests.fakes_cloud import FakeProvider, launch_request, run_now
+from tests.fakes_modal import FakeSDK
 
 
 class StubMetrics:
@@ -221,6 +223,33 @@ def test_the_provider_is_not_asked_for_its_rates_once_per_price(make_cloud, repo
     clock.advance(CLOUD_RATE_TTL + 1)
     daemon.cloud_estimate(daemon.job(job_id))
     assert len(calls) == 2  # and asked again once it is stale
+
+
+def test_cloud_gpus_reuses_the_same_cached_rates_cloud_rates_already_fetched(make_cloud,
+                                                                             monkeypatch):
+    # `cloud_status_view` calls `cloud_rates` and `cloud_gpus` for the same target on every
+    # `pasar cloud` / `GET /api/cloud` request; `cloud_gpus` must not be a second provider
+    # round-trip on top of the one `cloud_rates` already made.
+    daemon, provider = make_cloud()
+    target = daemon.cfg.clouds["fake"]
+    calls = []
+    real = FakeProvider.rates
+    monkeypatch.setattr(provider, "rates", lambda: (calls.append(None), real(provider))[1])
+
+    daemon.cloud_rates(target)
+    assert len(calls) == 1
+    daemon.cloud_gpus(target)
+    assert len(calls) == 1  # cloud_gpus read the cache cloud_rates just filled, not a new call
+
+
+def test_cloud_gpus_is_empty_not_an_error_when_rates_fail(make_cloud, monkeypatch):
+    daemon, provider = make_cloud()
+    target = daemon.cfg.clouds["fake"]
+
+    def boom():
+        raise RuntimeError("the provider is unreachable")
+    monkeypatch.setattr(provider, "rates", boom)
+    assert daemon.cloud_gpus(target) == []
 
 
 def test_a_local_submit_never_shells_out_to_uv(cloud, tmp_path, platform_check):
@@ -2246,6 +2275,32 @@ def test_the_job_cap_refusal_suggests_each_gpu_once_even_under_two_spellings(mak
     msg = str(excinfo.value)
     assert msg.count("A100") == 1  # not "A100_80GB (...), A100-80GB (...)" -- the actual old bug
     assert "A100-80GB ($6.38)" in msg
+
+
+def test_the_job_cap_refusal_names_each_gpu_the_way_pasar_cloud_does(make_cloud, repo, tmp_path):
+    # A live Modal rate table carries A10 under `a10g` and RTX-PRO-6000 under `rtx6000` (plus the
+    # aliases `_aliased` adds for each — see modal_provider.GPU_NAMES); walking the raw rate keys
+    # with no naming table suggests each of these twice, once per spelling. The refusal must name
+    # each GPU the one way `pasar cloud`/`--gpu` know it by, exactly once.
+    sdk = FakeSDK()
+    sdk.rates_value = {"gpu_hour_cost_h100": 7.90, "gpu_hour_cost_a10g": 0.20,
+                       "gpu_hour_cost_rtx6000": 0.40, "cpu_hour_cost_sandbox": 0.1419,
+                       "mem_gib_hour_cost_sandbox": 0.024}
+    modal_target = CloudTarget(name="fake", provider="modal", daily_budget=50.0,
+                               monthly_budget=300.0)
+    provider = ModalProvider(modal_target, tmp_path / "modal-state", sdk=sdk)
+    try:
+        daemon, _ = make_cloud(provider=provider)
+        with pytest.raises(ValueError) as excinfo:
+            daemon.submit(cloud_spec(repo, est_runtime=3 * 3600))
+        msg = str(excinfo.value)
+        # "A10G" and "RTX6000" (the raw billing spellings) both contain these substrings too, so
+        # a count of 1 only holds once each GPU is named exactly one way.
+        assert msg.count("A10") == 1
+        assert msg.count("6000") == 1
+        assert "A10 ($" in msg and "RTX-PRO-6000 ($" in msg
+    finally:
+        provider.close()
 
 
 def test_the_padded_ceiling_is_not_what_submit_refuses(cloud, repo):

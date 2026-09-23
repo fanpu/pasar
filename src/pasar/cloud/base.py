@@ -147,9 +147,13 @@ class Provider(Protocol):
     def rates(self) -> dict[str, float]:
         """Return this provider's current price list, keyed by billing dimension."""
 
-    def gpus(self) -> list[GpuRow]:
-        """This target's GPUs as clean rows, from `rates()`: name as `--gpu` accepts it, live
-        $/hour, and memory in GB (`None` if unknown). See `gpu_rows`."""
+    def gpus(self, rates: dict[str, float]) -> list[GpuRow]:
+        """This target's GPUs as clean rows, built from `rates` — typically a caller's own
+        already-fetched price list, not a fresh call to `rates()`: `Daemon.cloud_gpus` passes its
+        cached `cloud_rates()` result so that listing a target's GPUs never costs a second
+        provider round-trip on top of the one pricing already made. Pure: makes no calls of its
+        own. Name as `--gpu` accepts it, live $/hour, and memory in GB (`None` if unknown). See
+        `gpu_rows`."""
 
     def upload(self, paths: list[str], key: str) -> str:
         """Store data under key for later use as a launch volume; return a location to reference it."""

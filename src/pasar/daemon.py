@@ -14,7 +14,7 @@ from dataclasses import replace
 from pathlib import Path
 
 from pasar import gitinfo
-from pasar.cloud.base import GpuRow, gpu_rows, parse_gpu
+from pasar.cloud.base import GpuRow, parse_gpu
 from pasar.cloud.bundle import Bundle, BundleError, EnvSpec, build_bundle, check_platform
 from pasar.cloud.cost import Ledger, estimate, hourly_rate
 from pasar.cloud.executor import CloudExecutor
@@ -268,17 +268,19 @@ class Daemon:
     def cloud_gpus(self, target: CloudTarget) -> list[GpuRow]:
         """This target's GPUs as clean rows — name as `--gpu` accepts it, live $/hour, memory in
         GB — one per real GPU, cheapest first. Public for the same reason `cloud_rates` is: the
-        API and CLI read it too (`GET /api/cloud`, `pasar cloud`).
+        API and CLI read it too (`GET /api/cloud`, `pasar cloud`), and so does `_over_job_cap`.
 
-        Unlike `cloud_rates`, this is the provider's own rows (`Provider.gpus()`), not `rates()`
-        merged with a target's config-pinned overrides: the provider is what names and prices a
-        GPU correctly enough for `--gpu` to both price it and hand it to the provider's own
-        launch call, and a pinned override is not guaranteed to round-trip through that."""
+        Built from `cloud_rates(target)`, the same cached, already-merged (config overrides
+        included) price list a caller of `cloud_gpus` has usually just priced something against
+        — never a fresh `provider.rates()` call of this method's own. `Provider.gpus()` is pure
+        for exactly this reason: a `pasar cloud`/`GET /api/cloud` request that calls both
+        `cloud_rates` and `cloud_gpus` for the same target must cost at most the one provider
+        round-trip `cloud_rates` already makes, not two."""
         ex = self.executors.get(target.name)
         if ex is None:
             return []
         try:
-            return ex.provider.gpus()
+            return ex.provider.gpus(self.cloud_rates(target))
         except Exception:
             log.exception("%s could not list its GPUs", target.name)
             return []
@@ -341,15 +343,17 @@ class Daemon:
         raise the limit. A shorter `--time` is deliberately not offered: the estimate is meant to
         be honest, and the cap covers every later attempt anyway.
 
-        Walks `gpu_rows`, not the raw rate keys: the rate map aliases one GPU under several
+        Walks `cloud_gpus`, not the raw rate keys: the rate map aliases one GPU under several
         spellings (dashes and underscores, and a couple that don't match at all — see
         `modal_provider.GPU_NAMES`), and suggesting the same physical GPU twice under two names
-        would waste the one line a person or agent actually reads."""
+        would waste the one line a person or agent actually reads. `cloud_gpus` is what names
+        each GPU the way the provider's own launch call and `pasar cloud` do, so the name
+        suggested here is one that both prices and actually runs."""
         cap = target.max_job_cost
         kind, count = parse_gpu(spec.gpu)
         rates = self.cloud_rates(target)
         fits = []
-        for row in gpu_rows(rates, {}, {}):
+        for row in self.cloud_gpus(target):
             if row.name.lower() == kind.lower():
                 continue
             try:

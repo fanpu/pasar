@@ -102,10 +102,10 @@ class FakeProvider:
         return {"gpu_hour_cost_h100": 3.95, "cpu_hour_cost_sandbox": 0.14,
                 "mem_gib_hour_cost_sandbox": 0.024}
 
-    def gpus(self) -> list[GpuRow]:
+    def gpus(self, rates: dict[str, float]) -> list[GpuRow]:
         # No memory table of its own: this fake stands in for a provider pasar has never taught
         # about a given GPU, which is exactly the "unknown GPU still lists, memory blank" case.
-        return gpu_rows(self.rates(), {}, {})
+        return gpu_rows(rates, {}, {})
 
     def upload(self, paths: list[str], key: str) -> str:
         self.uploads[key] = list(paths)
