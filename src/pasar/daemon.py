@@ -764,8 +764,15 @@ class Daemon:
             # Only the current attempt's unit: without this the executor knows nothing about it
             # and the next poll would report every cloud attempt as vanished.
             if isinstance(ex, CloudExecutor) and not ex.adopt(job.id, att.unit):
+                # Nothing can follow this attempt any more: the next poll reads it as vanished
+                # and settles the job as lost. The sandbox would go on billing until its own
+                # timeout, and this is the last moment its unit is in hand, so end it here.
                 log.warning("job %s's cloud attempt %s could not be picked back up",
                             job.id, att.unit)
+                ended = ex.terminate_stray(att.unit)
+                self.store.add_machine_event(
+                    now, "orphan_unit", f"job {job.id}'s attempt {att.unit} could not be picked "
+                    "back up; " + ("ended it" if ended else "it could not be ended"))
         for name, ex in self.executors.items():
             owned = live.get(name, set())
             for unit in ex.list_units():

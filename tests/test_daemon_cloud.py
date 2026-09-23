@@ -424,6 +424,23 @@ def test_reconcile_terminates_a_stray_cloud_handle(make_cloud, tmp_path):
     assert len(events) == 1 and handle in events[0]["text"]
 
 
+def test_an_attempt_that_cannot_be_adopted_is_ended_rather_than_left_billing(make_cloud, repo):
+    # The saved state is what a restarted daemon follows the attempt by; without it nothing can
+    # poll, stop or bill the sandbox, and the next tick settles the job as lost. Losing the job
+    # and leaving the sandbox running until its own 24h timeout is the expensive half of that.
+    daemon, provider = make_cloud()
+    job_id = start(daemon, repo)
+    handle = handle_of(daemon, job_id)
+    (daemon.job_dir(job_id) / "cloud-1.json").unlink()
+    restarted, _ = make_cloud(provider=provider)
+    restarted.reconcile()
+    assert provider.terminated == [handle]
+    events = [e for e in restarted.store.machine_events() if e["kind"] == "orphan_unit"]
+    assert len(events) == 1 and handle in events[0]["text"]
+    restarted.tick()
+    assert restarted.job(job_id).state == State.FAILED
+
+
 def test_a_sandbox_whose_attempt_cannot_be_recorded_is_ended(cloud, repo, monkeypatch):
     daemon, provider = cloud
     job = daemon.submit(cloud_spec(repo))
