@@ -11,6 +11,7 @@ checkpoint, then SIGKILLs. The same thing happens if the job simply runs past --
 import argparse
 import json
 import os
+import select
 import signal
 import subprocess
 import sys
@@ -19,26 +20,66 @@ import time
 
 SAMPLE_INTERVAL = 5.0
 NVIDIA_QUERY = "index,utilization.gpu,memory.used,memory.total,power.draw,temperature.gpu"
+NVIDIA_SMI_TIMEOUT = 10.0
+
+# How the relay winds down once asked to stop: it keeps draining whatever is already readable,
+# but a hard cutoff shortly after the request stops it even if a stray process keeps writing.
+_RELAY_POLL = 0.1
+_RELAY_STOP_GRACE = 0.5
+_RELAY_JOIN_TIMEOUT = 2.0
 
 _write_lock = threading.Lock()
 
 
 def emit(token: str, obj: dict) -> None:
-    _write_line("\x1epasar:" + token + " " + json.dumps(obj, separators=(",", ":")))
+    _write_line(("\x1epasar:" + token + " " + json.dumps(obj, separators=(",", ":"))).encode())
 
 
-def _write_line(line: str) -> None:
+def _write_line(data: bytes) -> None:
     """The one place that touches our stdout, so a relayed job line and a control line can
     never interleave into something the daemon can't parse."""
     with _write_lock:
-        sys.stdout.write(line + "\n")
-        sys.stdout.flush()
+        sys.stdout.buffer.write(data + b"\n")
+        sys.stdout.buffer.flush()
 
 
-def _relay(stream) -> None:
-    """Pass the job's stdout/stderr through to ours, one whole line at a time."""
-    for raw in iter(stream.readline, b""):
-        _write_line(raw.decode(errors="replace").rstrip("\n"))
+def _relay(stream, stop: threading.Event) -> None:
+    """Pass the job's stdout/stderr through to ours, one whole line at a time, byte for byte
+    (no decoding, so binary or non-UTF-8 output survives intact).
+
+    Polls instead of blocking in readline(): a job can leave a background process holding the
+    pipe's write end open (`nohup foo &`, a logging sidecar, `(sleep 60 &)`) after the process
+    the wrapper waits on has already exited, and by then the wrapper's own --limit/--grace
+    enforcement has stopped running, so a blocking read here would wedge the wrapper forever.
+    stop() tells this loop to wind down: it keeps draining whatever is already readable for a
+    short extra grace, then gives up so the caller's bounded join() is honoured for real.
+    """
+    fd = stream.fileno()
+    os.set_blocking(fd, False)
+    buf = b""
+    cutoff = None
+    while True:
+        ready, _, _ = select.select([fd], [], [], _RELAY_POLL)
+        if ready:
+            try:
+                chunk = os.read(fd, 65536)
+            except BlockingIOError:
+                chunk = b""
+            except OSError:
+                break
+            if not chunk:
+                break
+            buf += chunk
+            while b"\n" in buf:
+                line, buf = buf.split(b"\n", 1)
+                _write_line(line)
+        if stop.is_set():
+            if cutoff is None:
+                cutoff = time.time() + _RELAY_STOP_GRACE
+            if time.time() >= cutoff:
+                break
+    if buf:
+        _write_line(buf)
 
 
 class _EventTailer:
@@ -78,7 +119,7 @@ def _sample_gpus(token: str, stop: threading.Event) -> None:
         try:
             out = subprocess.run(
                 ["nvidia-smi", f"--query-gpu={NVIDIA_QUERY}", "--format=csv,noheader,nounits"],
-                capture_output=True, text=True, timeout=10, check=False,
+                capture_output=True, text=True, timeout=NVIDIA_SMI_TIMEOUT, check=False,
             ).stdout
         except FileNotFoundError:
             return
@@ -142,7 +183,8 @@ def main(argv: list[str] | None = None) -> int:
     if reason is not None:
         _signal_group(proc.pid, signal.SIGTERM)
 
-    relay = threading.Thread(target=_relay, args=(proc.stdout,), daemon=True)
+    relay_stop = threading.Event()
+    relay = threading.Thread(target=_relay, args=(proc.stdout, relay_stop), daemon=True)
     relay.start()
 
     deadline = time.time() + args.limit
@@ -162,7 +204,14 @@ def main(argv: list[str] | None = None) -> int:
             code = proc.wait()
             break
 
-    relay.join()
+    # The job's own process may have exited while a process it backgrounded is still holding
+    # the pipe's write end open; kill whatever is left of its process group so the relay sees
+    # EOF straight away, then bound the wait so a process that somehow escaped the group (a
+    # double fork, setsid) can never wedge the wrapper past its own deadline.
+    _signal_group(proc.pid, signal.SIGKILL)
+    relay_stop.set()
+    relay.join(max(0.0, min(_RELAY_JOIN_TIMEOUT, deadline - time.time())))
+
     tailer.drain()
     stop.set()
     sig = signal.Signals(-code).name if code < 0 else None

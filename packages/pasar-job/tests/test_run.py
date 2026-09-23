@@ -147,6 +147,50 @@ def test_relays_large_output_lines_intact_and_interleaved_with_events(tmp_path):
     assert {"event": "progress", "step": 1} in [e["e"] for e in events]
 
 
+def test_background_process_does_not_delay_the_wrapper(tmp_path):
+    """A job that backgrounds a long-running process and exits ((sleep 8 &), nohup foo &, a
+    logging sidecar) must not leave the wrapper blocked waiting for that process's stdout to
+    close: the wrapper's own deadline always wins, not the stray process's lifetime."""
+    start = time.time()
+    p = run_wrapper(tmp_path, "(sleep 8 &); echo done; exit 0", limit=60, grace=5)
+    elapsed = time.time() - start
+    assert "done" in plain(p.stdout)
+    assert p.returncode == 0
+    assert elapsed < 3, f"wrapper took {elapsed:.1f}s, should not wait anywhere near the 8s sleep"
+
+
+def test_sampler_keeps_going_after_nvidia_smi_hangs(tmp_path, monkeypatch):
+    """A hung nvidia-smi (TimeoutExpired, not an OSError) must not kill the sampling thread
+    either; the next poll should still get through."""
+    counter = tmp_path / "count"
+    counter.write_text("0\n")
+    fake = tmp_path / "nvidia-smi"
+    # No external commands (PATH is restricted to this directory): read/echo/printf are
+    # shell builtins, so the script works without needing to find "cat" on PATH.
+    fake.write_text(
+        "#!/bin/sh\n"
+        f'read -r N < "{counter}"\n'
+        "N=$((N+1))\n"
+        f'echo "$N" > "{counter}"\n'
+        'if [ "$N" -eq 1 ]; then sleep 5; else printf "0, 50, 1000, 8000, 100.0, 60\\n"; fi\n'
+    )
+    fake.chmod(0o755)
+    monkeypatch.setenv("PATH", str(tmp_path))
+    monkeypatch.setattr(wrapper, "SAMPLE_INTERVAL", 0.05)
+    monkeypatch.setattr(wrapper, "NVIDIA_SMI_TIMEOUT", 0.2)
+    samples = []
+    monkeypatch.setattr(wrapper, "emit", lambda token, obj: samples.append(obj))
+    stop = threading.Event()
+    t = threading.Thread(target=wrapper._sample_gpus, args=("tok", stop), daemon=True)
+    t.start()
+    t.join(timeout=2)
+    assert t.is_alive()  # the hang on the first attempt didn't kill the thread
+    stop.set()
+    t.join(timeout=2)
+    assert not t.is_alive()
+    assert samples  # and a later poll got through
+
+
 def test_job_killed_from_outside_reports_the_signal(tmp_path):
     """An OOM kill (or anything else that SIGKILLs the job directly) is not something the
     wrapper initiated, so it must be reported with no reason, just the raw signal."""
