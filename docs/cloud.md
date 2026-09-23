@@ -193,7 +193,7 @@ provider.
      That runs offline against the lock in about a second, honours the project's own package
      indexes (a plain `uv export` does not, which makes a custom torch index look unsatisfiable),
      and fails before anything is paid for;
-  3. writes `jobs/<id>/bundle.tar.zst`: the files git lists (tracked, plus untracked-but-not-ignored),
+  3. writes `jobs/<id>/bundle.tar`: the files git lists (tracked, plus untracked-but-not-ignored),
      with a size limit (`bundle_max`, default 256 MiB) and a clear error naming the largest files if
      it's exceeded. The git commit and diff are recorded as for local jobs.
 
@@ -367,8 +367,11 @@ finishes, so the limit pauses instead, and pasar warns early, using the job's re
    wrapper's own `--limit` (see [the wrapper protocol](#the-wrapper-protocol)) is a backstop for
    the same stop, only for a daemon that isn't there to ask. Either way the attempt ends `paused`
    (reason `time_limit`), and the job goes back to **awaiting approval**, showing its progress and
-   the estimated cost to finish. Approving resumes it from the checkpoint, like a reclaimed job.
-   The only work lost is the restart time. Five such pauses without finishing and the job fails
+   the estimated cost to finish. Approving starts a new attempt from the same bundle snapshot;
+   resuming it *from the checkpoint*, like a reclaimed job, so that the only work lost is the
+   restart time, is the intent — but it needs the persist dir (see
+   [Data, checkpoints and outputs](#data-checkpoints-and-outputs)), which doesn't exist yet, so
+   today the attempt starts over. Five such pauses without finishing and the job fails
    instead (`pause_limit`) rather than pausing forever on hardware billed by the second; a
    provider reclaim doesn't count toward that five, since it isn't the job's fault.
 3. **Calibration.** Proposed, not implemented: pasar would record each finished cloud job's

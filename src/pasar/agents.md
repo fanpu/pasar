@@ -221,7 +221,7 @@ These apply to every `pasar` command, not just `wait`:
 | `preempted` | Stopped to make room for a higher-bid job that asked to preempt. It is requeued automatically — this is not a failure. | Nothing to do. |
 | `target_gone` | Cloud only. The job's target is no longer configured here: `failed` if it was running (its sandbox may still be billing — end it at the provider), `cancelled` if it was only waiting (nothing was spent). | Put the target back and resubmit, or clean up at the provider yourself. |
 | `price_rose` | Cloud only. The job is back to `awaiting`: its price rose past what was approved between approval and launch. `summary` has the old ceiling and the new price. | Approve it again in the web UI if the new price is still fine. |
-| `cloud_preempted` | Cloud only. The provider reclaimed the machine (a spot interruption, a host failure). The job is back to `awaiting`, showing how far it got. | Approve it again in the web UI to resume it; not a failure. |
+| `cloud_preempted` | Cloud only. The provider reclaimed the machine (a spot interruption, a host failure). The job is back to `awaiting`, showing how far it got. | Approve it again in the web UI to run it again; not a failure. It starts over rather than resuming from a checkpoint, since there is no per-job cloud storage yet. |
 | `pause_limit` | Cloud only. The job ran out of its approved time 5 times running without finishing — each pause on its own is not a failure, but 5 with nothing to show for them means something is wrong. | Resubmit with a longer `--time`, or check that the job actually checkpoints and resumes. |
 
 ## Cloud jobs
@@ -274,7 +274,10 @@ before the job finishes (`reason` `time_limit`; after 5 such pauses without fini
 instead, `reason` `pause_limit`), if the provider reclaims the machine (reason
 `cloud_preempted`), or if its price rose past what was approved between approval and launch
 (reason `price_rose`, with the old ceiling and new price in `summary`) — in every case, it needs
-approving again in the web UI, the same as a fresh submission. `pasar wait` keeps waiting through
+approving again in the web UI, the same as a fresh submission. An approved job starts a fresh
+attempt from the same code snapshot: resuming it from its last checkpoint is the intent, but that
+needs per-job cloud storage which isn't built yet, so for now a paused or reclaimed cloud job
+starts its work over. `pasar wait` keeps waiting through
 all of these (they aren't a terminal state); use `--timeout` if you don't want to wait on a human.
 If the target stops being configured on this pasard, a running cloud job ends `failed` (reason
 `target_gone` — its sandbox may still be running and billing at the provider, since nothing here

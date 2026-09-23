@@ -75,7 +75,21 @@ class Provider(Protocol):
         """Report the attempt's current phase; Phase.GONE once the provider has forgotten it."""
 
     def read_output(self, handle: str, cursor: int) -> tuple[bytes, int]:
-        """Return output since cursor and the new cursor; cursor 0 must replay from the start."""
+        """Return the attempt's combined stdout and stderr from byte offset `cursor` onward, and
+        the offset the returned bytes end at.
+
+        The bytes must begin at *exactly* `cursor`, counted from the first byte the attempt ever
+        wrote, so `cursor` 0 replays the whole stream. `Pump.poll` leans on that and on nothing
+        else: it counts the bytes it consumes itself and discards the cursor returned here, so a
+        provider that serves a window starting anywhere else — clipped to a retention limit,
+        rounded to a chunk boundary, skipped ahead after a gap — would have that output spliced
+        into the job's log at the wrong offset, silently and with nothing to notice it by.
+
+        Returning fewer bytes than are available is fine: the next poll asks again from where
+        this one ended, and the pump only ever advances past whole lines, so it routinely
+        re-requests the tail it has not consumed. A cursor at or past the end returns no bytes,
+        not an error.
+        """
 
     def request_stop(self, handle: str) -> None:
         """Ask the attempt to exit on its own; a no-op backend still needs terminate() to end it."""
