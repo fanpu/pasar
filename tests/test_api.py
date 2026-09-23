@@ -384,3 +384,48 @@ def test_price_rise_leaves_the_old_ceiling_visible_while_awaiting(client, cloud_
     assert f"{ceiling:.2f}" in job["summary"]
     # re-approving now prices at the new, higher rate
     assert job["cloud"]["max_cost"] > ceiling
+
+
+def test_submit_refused_when_estimate_exceeds_max_cost(client, cloud_daemon, cloud_cwd):
+    # The estimate at the default 1h --time and the fake target's rates is $5.28; a --max-cost
+    # below that is a mistake worth catching before anything is even priced for approval.
+    r = submit_cloud(client, cloud_cwd, max_cost=2.00)
+    assert r.status_code == 422
+    detail = r.json()["detail"]
+    assert "$5.28" in detail and "$2.00" in detail
+    assert cloud_daemon.store.list_jobs() == []  # nothing was created
+
+
+def test_lower_max_cost_becomes_the_enforced_ceiling(client, cloud_daemon, cloud_cwd):
+    # The target's own automatic ceiling here is ~$7.92; a --max-cost of $6, above the $5.28
+    # estimate but below that, must be what actually gets recorded and shown, not the bigger
+    # automatic figure.
+    job_id = submit_cloud(client, cloud_cwd, max_cost=6.00).json()["id"]
+    approved = client.post(f"/api/jobs/{job_id}/approve").json()
+    assert approved["cloud"]["max_cost"] == pytest.approx(6.00)
+    assert approved["cloud"]["user_capped"] is True
+    row = cloud_daemon.store.approvals(job_id)[0]
+    assert row["max_cost"] == pytest.approx(6.00)
+
+
+def test_price_rise_above_the_users_cap_bounces_to_awaiting(client, cloud_daemon, cloud_provider,
+                                                             cloud_cwd, monkeypatch, clock):
+    # --max-cost of $9 does not bind at approval (the automatic ceiling, ~$7.92, is lower), so
+    # the approved ceiling here is that automatic figure, same as without a --max-cost at all.
+    job_id = submit_cloud(client, cloud_cwd, max_cost=9.00).json()["id"]
+    client.post(f"/api/jobs/{job_id}/approve")
+    ceiling = cloud_daemon.store.approvals(job_id)[0]["max_cost"]
+    assert ceiling == pytest.approx(7.92, abs=0.01)
+    # Rates rise enough that the live, uncapped ceiling would be ~$10.99 — above the $9 cap,
+    # which is therefore what the relaunch is priced at. That capped $9 is still above what was
+    # actually approved (~$7.92), so the job must bounce back rather than launch at it unseen.
+    monkeypatch.setattr(cloud_provider, "rates", lambda: {
+        "gpu_hour_cost_h100": 6.00, "cpu_hour_cost_sandbox": 0.14,
+        "mem_gib_hour_cost_sandbox": 0.024,
+    })
+    clock.advance(60)
+    cloud_daemon.tick()
+    job = client.get(f"/api/jobs/{job_id}").json()
+    assert job["state"] == "awaiting" and job["reason"] == "price_rose"
+    assert job["cloud"]["max_cost"] == pytest.approx(9.00)  # live re-price, held to --max-cost
+    assert job["cloud"]["user_capped"] is True

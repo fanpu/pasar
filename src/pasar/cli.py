@@ -154,7 +154,8 @@ def print_job(job: dict) -> None:
         ("note", job["note"]), ("by", job["submitter"]), ("git", job["git_commit"] or ""),
     ]
     if cloud is not None:
-        cost = f"est {_money(cloud['estimated_cost'])}, capped at {_money(cloud['max_cost'])}"
+        cap_note = " (your --max-cost)" if cloud.get("user_capped") else ""
+        cost = f"est {_money(cloud['estimated_cost'])}, capped at {_money(cloud['max_cost'])}{cap_note}"
         fields.append(("cloud", f"{cloud['target']} · {cloud['gpu']} · {cloud['phase']}"))
         fields.append(("cost", cost))
         if cloud["console_url"]:
@@ -224,8 +225,9 @@ def build_parser() -> Parser:
                    help="cloud only: pass this environment variable through by name "
                         "(repeatable); local jobs already capture the whole environment")
     s.add_argument("--max-cost", type=float,
-                   help="cloud only: reserved for a future per-job spend cap (accepted, not "
-                        "yet enforced)")
+                   help="cloud only: refuse to submit if the estimate already exceeds this; "
+                        "also caps the per-attempt ceiling a price rise is held to, if lower "
+                        "than the target's own automatic ceiling")
     s.add_argument("command", nargs=argparse.REMAINDER, help="-- command to run")
 
     ls = add("ls", "list jobs")
@@ -288,9 +290,10 @@ def run(args, client: httpx.Client) -> int:
             out(job)
         elif job.get("cloud"):
             c = job["cloud"]
+            cap_note = " (your --max-cost)" if c.get("user_capped") else ""
             print(f"submitted #{job['id']} {job['name']} ({_state(job)}) on {c['target']}")
             print(f"  estimated {_money(c['estimated_cost'])}, "
-                  f"capped at {_money(c['max_cost'])} for this run")
+                  f"capped at {_money(c['max_cost'])}{cap_note} for this run")
             print("  approve it in the web UI to let it launch")
         else:
             print(f"submitted #{job['id']} {job['name']} ({_state(job)})")

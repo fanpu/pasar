@@ -298,6 +298,24 @@ def test_wait_keeps_waiting_through_awaiting(client, capsys, cloud_daemon, cloud
     assert "awaiting" in out.out
 
 
+def test_submit_on_cloud_refused_when_estimate_exceeds_max_cost(client, capsys, cloud_daemon,
+                                                                 cloud_cwd, monkeypatch):
+    monkeypatch.chdir(cloud_cwd)
+    code, out = run(client, capsys, "submit", "--time", "1h", "--on", "fake", "--gpu", "H100",
+                    "--max-cost", "2", "--", "python", "-c", "pass")
+    assert code == 70
+    assert "$5.28" in out.err and "$2.00" in out.err
+
+
+def test_submit_on_cloud_notes_the_users_cap_when_it_binds(client, capsys, cloud_daemon,
+                                                            cloud_cwd, monkeypatch):
+    monkeypatch.chdir(cloud_cwd)
+    code, out = run(client, capsys, "submit", "--time", "1h", "--on", "fake", "--gpu", "H100",
+                    "--max-cost", "6", "--", "python", "-c", "pass")
+    assert code == 0
+    assert "capped at $6.00 (your --max-cost)" in out.out
+
+
 def test_cloud_command_text_and_json(client, capsys, cloud_daemon, cloud_cwd, monkeypatch):
     monkeypatch.chdir(cloud_cwd)
     code, out = run(client, capsys, "cloud")

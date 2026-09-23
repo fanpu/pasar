@@ -189,10 +189,20 @@ class Daemon:
             return None
         try:
             est = self._cost(target, job.spec.gpu, job.spec.est_runtime)
-            top = self._cost(target, job.spec.gpu, self._approved_seconds(job.spec, target))
+            top = self._ceiling(target, job.spec)
         except (KeyError, ValueError):
             return None
         return est, top
+
+    def _ceiling(self, target: CloudTarget, spec: JobSpec) -> float:
+        """The worst-case dollar figure one attempt is held to: the target's own automatic
+        ceiling (the estimate with room to run long, `_approved_seconds`), or the submitter's own
+        `--max-cost`, whichever is lower. Used everywhere a ceiling is computed — `approve()`,
+        `cloud_estimate()`, and the live re-price at launch (`_launch_cloud`) — so a submitter's
+        cap is never just a number shown alongside the real ceiling, it *is* the ceiling once it's
+        the smaller one, in the approvals row and in what a rate rise is compared against."""
+        top = self._cost(target, spec.gpu, self._approved_seconds(spec, target))
+        return top if spec.max_cost is None else min(top, spec.max_cost)
 
     @staticmethod
     def _approved_seconds(spec: JobSpec, target: CloudTarget) -> int:
@@ -266,9 +276,13 @@ class Daemon:
                              "config), not through pasar submit; leave it out for now")
         self._validate_spec(spec)
         try:
-            self._cost(target, spec.gpu, spec.est_runtime)
+            est = self._cost(target, spec.gpu, spec.est_runtime)
         except KeyError as e:
             raise ValueError(f"{spec.target} has no price for --gpu {spec.gpu}: {e}") from None
+        if spec.max_cost is not None and est > spec.max_cost + PRICE_TOLERANCE:
+            raise ValueError(
+                f"estimated cost ${est:.2f} already exceeds --max-cost ${spec.max_cost:.2f}; "
+                "raise --max-cost or lower --time so the estimate fits under it")
         now = self.clock()
         commit, diff = gitinfo.capture(spec.cwd)
         tmp = Path(tempfile.mkdtemp(dir=self.data_dir, prefix="bundle-"))
@@ -317,7 +331,7 @@ class Daemon:
         est = top = None
         try:
             est = self._cost(target, job.spec.gpu, job.spec.est_runtime)
-            top = self._cost(target, job.spec.gpu, self._approved_seconds(job.spec, target))
+            top = self._ceiling(target, job.spec)
         except (KeyError, ValueError):
             log.exception("could not price job %s at approval", job_id)
         self.store.add_approval(job_id, len(self.store.attempts(job_id)) + 1, now, est, top)
@@ -815,7 +829,9 @@ class Daemon:
         try:
             bundle = self._read_bundle(d)
             env = self._cloud_env(d, job, target, n)
-            price = self._cost(target, job.spec.gpu, self._approved_seconds(job.spec, target))
+            # Held to the same figure the approvals row records (including any --max-cost), so a
+            # rate that hasn't moved never re-prices above what was already approved.
+            price = self._ceiling(target, job.spec)
         except (OSError, ValueError, KeyError) as e:
             self._fail_launch(job, n, pending, now, str(e))
             return

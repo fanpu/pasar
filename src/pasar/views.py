@@ -89,7 +89,21 @@ def cloud_view(daemon, job: Job) -> dict | None:
     approved figures once an approval covers the attempt that's queued or running, live-priced
     numbers otherwise — before the first approval, or once a price rise has sent the job back to
     `awaiting` (reason `price_rose`) and it needs approving again. In the `price_rose` case the
-    old ceiling that was breached is still in `job.summary`, alongside the new price.
+    old ceiling that was breached is still in `job.summary`, alongside the new price. `max_cost`
+    is the *effective* ceiling: when the submitter's own `--max-cost` is lower than the ceiling
+    the target's rates would otherwise buy, `max_cost` is that lower figure (and `user_capped` is
+    `True`) — never the bigger, uncapped number, which would misstate what a price rise is
+    actually compared against.
+
+    `phase` carries one of two different vocabularies depending on whether the daemon is
+    currently watching a live attempt for this job (i.e. `daemon.cloud_units` has an entry for
+    it): while it does, `phase` is the executor's own Phase/result string — one of `pending`,
+    `starting`, `running`, `success`, `exit-code`, `stopped`, `reclaimed`, `time_limit`, `signal`.
+    Once the attempt ends (or before one has ever started), `daemon.cloud_units` has nothing for
+    this job and `phase` falls back to the job's own `state` — `awaiting`, `queued`, `failed`,
+    `completed`, etc. A consumer switching on `phase` has to handle both vocabularies; there is no
+    separate field marking which one is in play, so treat any value not in the executor list above
+    as a job state instead.
 
     `console_url` is only ever populated while the daemon is actively polling the attempt (i.e.
     while it's the current entry in `daemon.cloud_units`); pasar doesn't persist it, so it reads
@@ -106,6 +120,8 @@ def cloud_view(daemon, job: Job) -> dict | None:
     else:
         live = daemon.cloud_estimate(job)
         estimated_cost, max_cost = live if live else (None, None)
+    user_capped = (job.spec.max_cost is not None and max_cost is not None
+                  and abs(max_cost - job.spec.max_cost) < 1e-6)
     unit = daemon.cloud_units.get(job.id)
     return {
         "target": job.spec.target,
@@ -113,6 +129,7 @@ def cloud_view(daemon, job: Job) -> dict | None:
         "phase": unit.result if unit is not None else job.state.value,
         "estimated_cost": estimated_cost,
         "max_cost": max_cost,
+        "user_capped": user_capped,
         "console_url": unit.console_url if unit is not None else None,
     }
 

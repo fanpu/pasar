@@ -48,7 +48,9 @@ class JobSpec:
     gpu: str | None = None          # cloud only: "H100" or "H100:4"
     env_keys: list[str] = field(default_factory=list)  # cloud only: env vars to pass through
     data: list[str] = field(default_factory=list)      # cloud only: local paths to upload
-    max_cost: float | None = None   # cloud only: stop the job above this many dollars
+    max_cost: float | None = None   # cloud only: the submitter's own ceiling; submit is refused
+                                     # if the estimate already exceeds it, and each attempt's
+                                     # approved ceiling is capped to it when it is the lower figure
 
     def to_json(self) -> str:
         d = asdict(self)
