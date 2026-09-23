@@ -2,6 +2,7 @@
 
 from dataclasses import dataclass, field
 from enum import StrEnum
+from pathlib import Path
 from typing import Protocol
 
 from pasar.cloud.bundle import Bundle, EnvSpec
@@ -106,8 +107,31 @@ class Provider(Protocol):
     def upload(self, paths: list[str], key: str) -> str:
         """Store data under key for later use as a launch volume; return a location to reference it."""
 
-    def download(self, job_id: int, path: str, dest: str) -> None:
-        """Fetch a path produced by job_id's attempt into dest on the local machine."""
+    def persist_usage(self, job_id: int) -> tuple[int, int]:
+        """(file count, total bytes) under this job's persist dir; (0, 0) if there is none.
+
+        Sized ahead of a pull, against the free-space guard, and shown on a job before anyone
+        has fetched what it left behind — so this must answer without downloading anything.
+        """
+
+    def download_persist(self, job_id: int, dest: Path) -> tuple[int, int]:
+        """Copy the job's persist dir into `dest`, returning what was written as (files, bytes).
+        Creates `dest`. Raises rather than half-succeeding silently.
+
+        A persist dir is the only copy of a job's data, so the caller verifies these counts
+        against what the provider reported before it ever deletes the remote copy. Raising here
+        rather than swallowing a partial failure is what makes that check meaningful: a `dest`
+        this returned from must be exactly what it claims, or the caller has no way to tell a
+        finished pull from one that stopped halfway and would delete the only copy regardless.
+        """
+
+    def delete_persist(self, job_id: int) -> None:
+        """Remove the job's persist dir at the provider. A no-op if it is already gone.
+
+        Reachable only for a job whose checkpoint nothing will ever resume from again — never
+        for `awaiting`, see `pasar.states.TERMINAL`. A no-op rather than an error because the
+        sweep that calls this can race a person's own manual pull or delete.
+        """
 
     def billed_cost(self, handles: list[str], since: float) -> dict[str, float] | None:
         """Return actual billed cost per handle since the given time, or None if unsupported."""

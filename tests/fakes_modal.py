@@ -159,10 +159,70 @@ class FakeApp:
     app_id = "ap-1"
 
 
+class FileEntryType:
+    """Stands in for `modal.types.FileEntryType`; only the two kinds a persist dir ever holds."""
+    FILE = "file"
+    DIRECTORY = "directory"
+
+
+class FakeFileEntry:
+    """Stands in for `modal.types.FileEntry`: only the fields the provider reads."""
+
+    def __init__(self, path, kind, size):
+        self.path = path
+        self.type = kind
+        self.size = size
+        self.mtime = 0
+
+
 class FakeVolume:
+    """A real in-memory file map, keyed by full path from the volume's root, so `listdir`,
+    `read_file` and `remove_file` traverse actual paths rather than answering from a stub."""
+
     def __init__(self, name, create_if_missing):
         self.name = name
         self.create_if_missing = create_if_missing
+        self.files: dict[str, bytes] = {}
+
+    def listdir(self, path, *, recursive=False):
+        prefix = path.rstrip("/") + "/"
+        under = sorted(p for p in self.files if p.startswith(prefix))
+        if not under:
+            # Mirrors the real SDK: listing a path nothing ever wrote to raises, it does not
+            # hand back an empty list.
+            raise NotFoundError(f"no such path in volume {self.name!r}: {path!r}")
+        dirs = set()
+        for p in under:
+            parts = p[len(prefix):].split("/")[:-1]
+            acc = path.rstrip("/")
+            for part in parts:
+                acc = f"{acc}/{part}"
+                dirs.add(acc)
+        entries = [FakeFileEntry(d, FileEntryType.DIRECTORY, 0) for d in sorted(dirs)]
+        entries += [FakeFileEntry(p, FileEntryType.FILE, len(self.files[p])) for p in under]
+        return entries
+
+    def read_file(self, path):
+        if path not in self.files:
+            raise FileNotFoundError(path)
+        data = self.files[path]
+        # Handed back in more than one piece, like the real SDK's block iterator, so a caller
+        # that read the whole thing into memory before writing it would still pass a test that
+        # only checked one small file.
+        mid = len(data) // 2
+        if 0 < mid < len(data):
+            yield data[:mid]
+            yield data[mid:]
+        else:
+            yield data
+
+    def remove_file(self, path, recursive=False):
+        prefix = path.rstrip("/") + "/"
+        doomed = [p for p in self.files if p == path or p.startswith(prefix)]
+        if not doomed:
+            raise FileNotFoundError(path)
+        for p in doomed:
+            del self.files[p]
 
 
 class FakeSDK:
@@ -214,12 +274,16 @@ class FakeSDK:
                     billing = type("B", (), {"rates": staticmethod(lambda: dict(sdk.rates_value))})
                 return _W()
 
+        class Types:
+            FileEntryType = FileEntryType
+
         self.Sandbox = Sandbox
         self.App = App
         self.Volume = Volume
         self.Workspace = Workspace
         self.Image = FakeImage()
         self.exception = _Exceptions()
+        self.types = Types()
 
     def wait_for_sandbox(self, timeout=5.0):
         assert self.created.wait(timeout), "no sandbox was created"

@@ -18,7 +18,7 @@ import secrets
 import threading
 import time
 from dataclasses import dataclass, field
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 from pasar.cloud.base import Capabilities, CloudLaunch, CloudStatus, Phase
 from pasar.cloud.bundle import EnvSpec
@@ -546,8 +546,48 @@ class ModalProvider:
             "pasar cannot upload data to Modal yet; put large data on a named volume with "
             "modal's own CLI and mount it from the target's `volumes`")
 
-    def download(self, job_id: int, path: str, dest: str) -> None:
-        raise NotImplementedError("pasar cannot download from Modal yet")
+    # ---- the Provider protocol: a job's persist dir
+    def persist_usage(self, job_id: int) -> tuple[int, int]:
+        files = [e for e in self._list_persist(job_id) if self._is_file(e)]
+        return len(files), sum(e.size for e in files)
+
+    def download_persist(self, job_id: int, dest: Path) -> tuple[int, int]:
+        """See `Provider.download_persist`. Each file is streamed straight to disk, one chunk at
+        a time, rather than built up in memory first: a checkpoint can be tens of GiB, and Modal
+        hands `read_file` back as an iterator precisely so this never has to hold a whole one."""
+        files = [e for e in self._list_persist(job_id) if self._is_file(e)]
+        if not files:
+            return 0, 0
+        volume = self._volume(f"pasar-{self.target.name}", create=False)
+        dest = Path(dest)
+        dest.mkdir(parents=True, exist_ok=True)
+        root = str(job_id)
+        for entry in files:
+            rel = PurePosixPath(entry.path).relative_to(root)
+            out = dest.joinpath(*rel.parts)
+            out.parent.mkdir(parents=True, exist_ok=True)
+            with out.open("wb") as f:
+                for chunk in volume.read_file(entry.path):
+                    f.write(chunk)
+        return len(files), sum(e.size for e in files)
+
+    def delete_persist(self, job_id: int) -> None:
+        volume = self._volume(f"pasar-{self.target.name}", create=False)
+        try:
+            volume.remove_file(str(job_id), recursive=True)
+        except (FileNotFoundError, self.sdk.exception.NotFoundError):
+            pass  # already gone; the caller can race a person's own manual pull or delete
+
+    def _list_persist(self, job_id: int) -> list:
+        """Every entry under a job's persist dir, recursively, or `[]` if it was never created."""
+        volume = self._volume(f"pasar-{self.target.name}", create=False)
+        try:
+            return volume.listdir(str(job_id), recursive=True)
+        except self.sdk.exception.NotFoundError:
+            return []
+
+    def _is_file(self, entry) -> bool:
+        return entry.type == self.sdk.types.FileEntryType.FILE
 
     def billed_cost(self, handles: list[str], since: float) -> dict[str, float] | None:
         """Modal's billing report arrives hours late and is not wired up; the live estimate from

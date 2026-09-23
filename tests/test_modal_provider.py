@@ -414,13 +414,72 @@ def test_rates_are_aliased_so_a_gpu_spelt_with_a_dash_is_priced(provider, tmp_pa
     assert rates["gpu_hour_cost_a100_80gb"] == 2.5
 
 
-def test_upload_and_download_say_they_are_not_built(provider):
+def test_upload_says_it_is_not_built(provider):
     p, _ = provider
     with pytest.raises(NotImplementedError):
         p.upload(["/tmp/x"], "k")
-    with pytest.raises(NotImplementedError):
-        p.download(1, "ckpt.pt", "/tmp/x")
     assert p.billed_cost(["h-1-1-aa"], 0.0) is None
+
+
+# ---- a job's persist dir
+def test_persist_usage_of_a_job_with_no_directory_is_zero(provider, tmp_path):
+    p, _sdk = provider
+    assert p.persist_usage(1) == (0, 0)
+
+
+def test_persist_usage_counts_files_and_bytes_under_the_job(provider, tmp_path):
+    p, _sdk = provider
+    volume = p._volume("pasar-modal", create=False)
+    volume.files["1/ckpt.txt"] = b"checkpoint bytes"
+    volume.files["1/sub/log.txt"] = b"a log line\n" * 50
+    assert p.persist_usage(1) == (2, len(b"checkpoint bytes") + len(b"a log line\n" * 50))
+    # a sibling job's files are never counted
+    volume.files["2/other.txt"] = b"not this job's"
+    assert p.persist_usage(1) == (2, len(b"checkpoint bytes") + len(b"a log line\n" * 50))
+
+
+def test_download_persist_writes_every_file_with_its_bytes_intact(provider, tmp_path):
+    p, _sdk = provider
+    volume = p._volume("pasar-modal", create=False)
+    ckpt, log = b"checkpoint bytes", b"a log line\n" * 50
+    volume.files["1/ckpt.txt"] = ckpt
+    volume.files["1/log.txt"] = log
+    dest = tmp_path / "out"
+    counts = p.download_persist(1, dest)
+    assert counts == (2, len(ckpt) + len(log))
+    assert (dest / "ckpt.txt").read_bytes() == ckpt
+    assert (dest / "log.txt").read_bytes() == log
+
+
+def test_download_persist_of_no_directory_writes_nothing(provider, tmp_path):
+    p, _sdk = provider
+    dest = tmp_path / "out"
+    assert p.download_persist(1, dest) == (0, 0)
+    assert not dest.exists()
+
+
+def test_download_persist_of_a_nested_path_recreates_the_nesting(provider, tmp_path):
+    p, _sdk = provider
+    volume = p._volume("pasar-modal", create=False)
+    volume.files["1/a/b/c.txt"] = b"deep"
+    dest = tmp_path / "out"
+    assert p.download_persist(1, dest) == (1, 4)
+    assert (dest / "a" / "b" / "c.txt").read_bytes() == b"deep"
+
+
+def test_delete_persist_removes_only_that_jobs_directory(provider, tmp_path):
+    p, _sdk = provider
+    volume = p._volume("pasar-modal", create=False)
+    volume.files["1/ckpt.txt"] = b"job one"
+    volume.files["2/ckpt.txt"] = b"job two"
+    p.delete_persist(1)
+    assert p.persist_usage(1) == (0, 0)
+    assert volume.files == {"2/ckpt.txt": b"job two"}
+
+
+def test_delete_persist_of_an_absent_directory_does_not_raise(provider, tmp_path):
+    p, _sdk = provider
+    p.delete_persist(1)  # nothing was ever written; no exception
 
 
 # ---- shutting down

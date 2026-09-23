@@ -1,6 +1,7 @@
 """An in-memory provider: everything the cloud machinery needs, nothing that costs money."""
 
 from dataclasses import dataclass
+from pathlib import Path
 
 from pasar.cloud.base import Capabilities, CloudLaunch, CloudStatus, Phase
 from pasar.cloud.bundle import Bundle, EnvSpec
@@ -34,7 +35,8 @@ class FakeProvider:
         self.terminated: list[str] = []
         self.images: dict[str, str] = {}
         self.uploads: dict[str, list[str]] = {}
-        self.downloads: list[tuple[int, str, str]] = []
+        self.persisted: dict[int, dict[str, bytes]] = {}  # job_id -> {relpath: bytes}
+        self.deleted_persist: list[int] = []
         self.fail_launch: str | None = None
         self.next_id = 1
 
@@ -84,8 +86,25 @@ class FakeProvider:
         self.uploads[key] = list(paths)
         return f"/data/{key}"
 
-    def download(self, job_id: int, path: str, dest: str) -> None:
-        self.downloads.append((job_id, path, dest))
+    def persist_usage(self, job_id: int) -> tuple[int, int]:
+        files = self.persisted.get(job_id, {})
+        return len(files), sum(len(data) for data in files.values())
+
+    def download_persist(self, job_id: int, dest) -> tuple[int, int]:
+        files = self.persisted.get(job_id)
+        if not files:
+            return 0, 0
+        dest = Path(dest)
+        dest.mkdir(parents=True, exist_ok=True)
+        for rel, data in files.items():
+            out = dest.joinpath(*rel.split("/"))
+            out.parent.mkdir(parents=True, exist_ok=True)
+            out.write_bytes(data)
+        return len(files), sum(len(data) for data in files.values())
+
+    def delete_persist(self, job_id: int) -> None:
+        self.deleted_persist.append(job_id)
+        self.persisted.pop(job_id, None)
 
     def billed_cost(self, handles, since):
         return None
@@ -103,6 +122,9 @@ class FakeProvider:
 
     def reclaim(self, handle: str) -> None:
         self.finish(handle, 137, by_provider=True)
+
+    def persist(self, job_id: int, rel_path: str, data: bytes) -> None:
+        self.persisted.setdefault(job_id, {})[rel_path] = data
 
     def forget(self, handle: str) -> None:
         self.boxes.pop(handle, None)
