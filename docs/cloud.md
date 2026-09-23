@@ -531,8 +531,12 @@ periodic stray sweep is not built.
 ```
 pasar submit --on modal --gpu H100[:N] --time 2h [--env KEY]… [--max-cost 20] -- <command>
 pasar pull <id> [--to DIR] [--keep]  # fetch a finished job's results, then delete them remotely
-pasar cloud                          # targets, budgets, spend, known storage, awaiting, rates
+pasar cloud                          # targets, budgets, spend, known storage, GPUs, awaiting
 ```
+
+`pasar cloud`'s RATES column lists only the rates that are not GPUs or model endpoints — the
+sandbox's CPU and memory, which every GPU's $/hour is added to, and storage; each target's GPUs
+get a table of their own. `pasar cloud --json` carries the whole price list.
 
 `--data PATH` is accepted by `pasar submit` too, but refused server-side for now (see
 [Data, checkpoints and outputs](#data-checkpoints-and-outputs)). `--resume-from <id>` is

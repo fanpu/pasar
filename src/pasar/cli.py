@@ -243,6 +243,16 @@ def _gpu_mem(memory_gb: float | None) -> str:
     return f"{memory_gb:g}GB" if memory_gb is not None else "?"
 
 
+def _extra_rates(rates: dict) -> str:
+    """The RATES column: what a GPU's $/hour is added to (the sandbox's CPU and memory) and
+    storage, not the whole price list. GPUs have a table of their own, and a provider's list
+    also prices model endpoints nothing here runs — Modal's runs to dozens of keys. `--json`
+    keeps every key. Sub-cent rates keep their digits: 32 GiB at $0.024 is not 32 at $0.02."""
+    kept = {k: v for k, v in rates.items()
+            if not k.startswith("gpu_hour_cost_") and "endpoint" not in k}
+    return ", ".join(f"{k}=${v:.4g}" for k, v in sorted(kept.items())) or "none"
+
+
 def print_cloud(body: dict) -> None:
     targets = body["targets"]
     if not targets:
@@ -254,7 +264,7 @@ def print_cloud(body: dict) -> None:
             today = f"{_money(t['spent_today'])} / {_money(t['daily_budget'])}"
             month = f"{_money(t['spent_month'])} / {_money(t['monthly_budget'])}"
             running = f"{t['running']}/{t['max_running']}"
-            rates = ", ".join(f"{k}={_money(v)}" for k, v in sorted(t["rates"].items())) or "none"
+            rates = _extra_rates(t["rates"])
             name = t["name"] + ("" if t["configured"] else " (no provider)")
             stored = f"{fmt_gib(t['known_stored_bytes'])} ({t['known_stored_jobs']} job(s))"
             rows.append((name, t["provider"], running, today, month,

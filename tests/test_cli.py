@@ -363,6 +363,26 @@ def test_cloud_command_lists_gpus_as_clean_rows(client, capsys, cloud_daemon, cl
     assert gpus == [{"name": "H100", "hourly_rate": 3.95, "memory_gb": None}]
 
 
+def test_cloud_command_rates_column_shows_only_what_adds_to_a_gpus_price(
+        client, capsys, cloud_daemon, cloud_provider, cloud_cwd, monkeypatch):
+    # Modal's price list is dozens of keys, most of them model endpoints nothing here uses; the
+    # GPUs have a table of their own. RATES keeps the rest: the sandbox's CPU and memory, which
+    # every GPU's $/hour gets added to, and storage. --json keeps the whole list.
+    monkeypatch.chdir(cloud_cwd)
+    live = {"gpu_hour_cost_h100": 3.95, "cpu_hour_cost_sandbox": 0.14,
+            "mem_gib_hour_cost_sandbox": 0.024, "volume_storage_gib_month_cost": 0.05,
+            "endpoints_llama_3_1_8b_instruct": 0.1}
+    monkeypatch.setattr(cloud_provider, "rates", lambda: dict(live))
+    code, out = run(client, capsys, "cloud")
+    assert code == 0
+    table = out.out.split("STORED is")[0]
+    assert "cpu_hour_cost_sandbox" in table and "mem_gib_hour_cost_sandbox" in table
+    assert "volume_storage_gib_month_cost" in table
+    assert "endpoints_" not in table and "gpu_hour_cost" not in table
+    code, out = run(client, capsys, "cloud", "--json")
+    assert json.loads(out.out)["targets"][0]["rates"] == live
+
+
 def test_show_and_cloud_surface_a_job_that_needs_more_time(client, capsys, cloud_daemon,
                                                             cloud_cwd, monkeypatch):
     monkeypatch.chdir(cloud_cwd)
