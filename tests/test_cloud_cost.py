@@ -201,3 +201,50 @@ def test_day_boundary_splits_spend_between_days(store, ledger, clock):
 
     clock.t = before
     assert ledger.spent_day("modal") == pytest.approx(5.0)
+
+
+# ---- settled_day / settled_month
+
+
+def test_settled_day_excludes_a_running_attempt_that_spent_day_includes(store, ledger, clock):
+    j = store.insert_job(spec(est_runtime=3600), 1000, clock(), None)
+    store.insert_attempt(Attempt(j, 1, "cloud:modal:sb-1", clock()))
+    ledger.record("modal", j, 1, 4.0)
+    assert ledger.spent_day("modal") == pytest.approx(4.0)
+    assert ledger.settled_day("modal") == 0.0
+
+
+def test_settled_month_excludes_a_running_attempt_that_spent_month_includes(store, ledger, clock):
+    j = store.insert_job(spec(est_runtime=3600), 1000, clock(), None)
+    store.insert_attempt(Attempt(j, 1, "cloud:modal:sb-1", clock()))
+    ledger.record("modal", j, 1, 4.0)
+    assert ledger.spent_month("modal") == pytest.approx(4.0)
+    assert ledger.settled_month("modal") == 0.0
+
+
+def test_settled_day_includes_billed_and_finished_rows(store, ledger, clock):
+    j1 = store.insert_job(spec(est_runtime=3600), 1000, clock(), None)
+    store.insert_attempt(Attempt(j1, 1, "cloud:modal:sb-1", clock(), end_time=clock() + 10))
+    ledger.record("modal", j1, 1, 4.0)  # never billed, but the attempt has ended: closed
+
+    j2 = store.insert_job(spec(), 1000, clock(), None)
+    ledger.record("modal", j2, 1, 5.0, billed=6.0)  # billed: closed
+
+    assert ledger.settled_day("modal") == pytest.approx(10.0)
+
+
+def test_settled_day_plus_committed_counts_a_running_attempt_exactly_once(store, ledger, clock):
+    """The contract `decide_cloud` relies on: settled_day() and committed() must never both
+    price the same open attempt, and together must not miss it either."""
+    j = store.insert_job(spec(est_runtime=3600), 1000, clock(), None)
+    store.insert_attempt(Attempt(j, 1, "cloud:modal:sb-1", clock()))
+    ledger.record("modal", j, 1, 4.0)
+    clock.advance(1800)  # half the estimated runtime: committed() still reports the flat 4.0
+
+    assert ledger.settled_day("modal") + ledger.committed("modal") == pytest.approx(4.0)
+
+    clock.advance(5400)  # now well past the estimated runtime: committed() paces up
+    assert ledger.settled_day("modal") == 0.0
+    assert ledger.settled_day("modal") + ledger.committed("modal") == pytest.approx(
+        ledger.committed("modal")
+    )

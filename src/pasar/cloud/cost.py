@@ -46,6 +46,19 @@ class Ledger:
         self.store = store
         self.clock = clock
 
+    def _open(self, row: dict) -> bool:
+        """True if `row` is still an actively running, unbilled attempt — still billing, so its
+        cost belongs in `committed()`, not in `settled_day`/`settled_month`. A row is closed
+        (not open) once it is billed, once its job or attempt no longer exists, or once the
+        attempt it names has been superseded by a retry or has ended."""
+        if row["billed"] is not None:
+            return False
+        job = self.store.get_job(row["job_id"])
+        if job is None:
+            return False
+        attempt = self.store.current_attempt(row["job_id"])
+        return attempt is not None and attempt.n == row["attempt"] and attempt.end_time is None
+
     def committed(self, target: str) -> float:
         """Dollars still to come from `target`'s running jobs. Each running attempt contributes
         at least its recorded estimate — it is still billing, so its estimate is never money
@@ -56,14 +69,10 @@ class Ledger:
         non-positive `est_runtime`) contributes its full estimate rather than nothing."""
         total = 0.0
         for row in self.store.cloud_spend(target):
-            if row["billed"] is not None:
+            if not self._open(row):
                 continue
             job = self.store.get_job(row["job_id"])
-            if job is None:
-                continue
             attempt = self.store.current_attempt(row["job_id"])
-            if attempt is None or attempt.n != row["attempt"] or attempt.end_time is not None:
-                continue
             est_runtime = job.spec.est_runtime
             if est_runtime <= 0:
                 total += row["estimated"]
@@ -73,12 +82,35 @@ class Ledger:
         return total
 
     def spent_day(self, target: str) -> float:
+        """Dollars recorded for today, billed or not: an open attempt still counts here at its
+        flat estimate. That overlaps `committed()`, which prices the same open attempts again
+        (at or above their estimate) — add the two together and an open attempt is counted
+        twice. Use `settled_day()` alongside `committed()` instead; use this alone only when
+        nothing else in the sum touches `committed()`."""
         rows = self.store.cloud_spend_on(target, self._day(self.clock()))
         return sum(self._effective(r) for r in rows)
 
     def spent_month(self, target: str) -> float:
+        """Dollars recorded for this month, billed or not — see `spent_day()`'s docstring: it
+        double-counts against `committed()` the same way, and `settled_month()` is the one to
+        pair with it."""
         rows = self.store.cloud_spend_in_month(target, self._day(self.clock())[:7])
         return sum(self._effective(r) for r in rows)
+
+    def settled_day(self, target: str) -> float:
+        """Dollars for today from attempts that are no longer open — billed rows at their billed
+        figure, and any other closed row at its estimate — excluding every attempt `committed()`
+        is still pricing. `settled_day(target) + committed(target)` counts each of today's
+        attempts, open or closed, exactly once; this is what a budget gate should sum against
+        `daily_budget`, not `spent_day()`."""
+        rows = self.store.cloud_spend_on(target, self._day(self.clock()))
+        return sum(self._effective(r) for r in rows if not self._open(r))
+
+    def settled_month(self, target: str) -> float:
+        """The month equivalent of `settled_day()`: pair with `committed()` against
+        `monthly_budget`, not `spent_month()`."""
+        rows = self.store.cloud_spend_in_month(target, self._day(self.clock())[:7])
+        return sum(self._effective(r) for r in rows if not self._open(r))
 
     def record(self, target: str, job_id: int, attempt: int, estimated: float,
                billed: float | None = None) -> None:

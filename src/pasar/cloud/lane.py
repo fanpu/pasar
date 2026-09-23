@@ -10,6 +10,8 @@ from dataclasses import dataclass, field
 
 from pasar.config import CloudTarget
 
+_TOLERANCE = 1e-9  # float accrual (e.g. two launches of 0.1 + 0.2) must not spuriously block
+
 
 @dataclass(frozen=True)
 class CloudQueued:
@@ -36,16 +38,15 @@ def decide_cloud(queued: list[CloudQueued], running_count: int, target: CloudTar
     job is blocked, every job behind it in this pass is blocked for the same reason, so the
     queue's bid order is also its start order across passes.
 
-    Budget contract the caller must satisfy: `spent_day` and `spent_month` are dollars already
-    realized for that period — from attempts that are no longer running (billed, or otherwise
-    closed) — and must exclude any attempt still running now. `committed` is the ledger's figure
-    for every currently running, unbilled attempt of this target (`Ledger.committed()`), and is
-    charged against both the daily and the monthly remaining budget, because the same open
-    dollars threaten both at once. Passing `Ledger.spent_day()`/`spent_month()` unmodified here
-    double-counts: today those already fold in every open attempt's flat estimate, and
-    `committed` folds the same attempts back in, at or above their estimate. The caller must
-    strip open attempts out of `spent_day`/`spent_month` first (sum only rows that are billed,
-    or whose attempt has ended) so each open attempt is counted exactly once — in `committed`.
+    Budget contract the caller must satisfy: pass `Ledger.settled_day(target)` /
+    `Ledger.settled_month(target)` as `spent_day` / `spent_month`, and `Ledger.committed(target)`
+    as `committed` — not `Ledger.spent_day()`/`spent_month()`, which still include every open
+    attempt's flat estimate and would double-count it against `committed`, which prices those
+    same open attempts again (at or above their estimate). `settled_day`/`settled_month`
+    exclude open attempts entirely, so `settled_day(target) + committed(target)` counts each of
+    today's attempts, open or closed, exactly once; `committed` is charged against both the
+    daily and the monthly remaining budget in the same pass, because the same open dollars
+    threaten both at once.
 
     A job whose own estimate exceeds the target's budget outright is never dropped from the
     queue; it lands in `blocked` every pass, same as any other unaffordable job, so it stays
@@ -63,7 +64,7 @@ def decide_cloud(queued: list[CloudQueued], running_count: int, target: CloudTar
         if slots <= 0:
             d.blocked[q.job_id] = "concurrency"
             continue
-        if q.estimate > day_budget or q.estimate > month_budget:
+        if q.estimate > day_budget + _TOLERANCE or q.estimate > month_budget + _TOLERANCE:
             d.blocked[q.job_id] = "budget"
             budget_exhausted = True
             continue

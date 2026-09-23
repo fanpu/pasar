@@ -1,3 +1,5 @@
+import pytest
+
 from pasar.cloud.lane import CloudQueued, decide_cloud
 
 
@@ -91,3 +93,57 @@ def test_a_job_that_fits_launches_and_spends_down_the_budget_for_the_next_one():
     q = [CloudQueued(1, 1000, 10.0, 30.0), CloudQueued(2, 900, 20.0, 30.0)]
     d = decide_cloud(q, 0, t(), spent_day=0, spent_month=0, committed=0)
     assert d.launch == [1] and d.blocked == {2: "budget"}
+
+
+def test_a_job_costing_exactly_the_remaining_budget_launches():
+    q = [CloudQueued(1, 1000, 10.0, 20.0)]
+    d = decide_cloud(q, 0, t(), spent_day=30.0, spent_month=0, committed=0)
+    assert d.launch == [1] and d.blocked == {}
+
+
+def test_float_accrual_does_not_spuriously_block_an_exact_fit():
+    """Two prior launches of 0.1 and 0.2 leave a remaining daily budget of
+    49.699999999999996 in raw floats; a job costing exactly 49.7 must still launch."""
+    target = t()
+    spent = 0.1 + 0.2
+    q = [CloudQueued(1, 1000, 10.0, target.daily_budget - spent)]
+    d = decide_cloud(q, 0, target, spent_day=spent, spent_month=0, committed=0)
+    assert d.launch == [1] and d.blocked == {}
+
+
+def test_decide_cloud_with_a_real_ledger_charges_a_running_job_exactly_once(tmp_path):
+    """The wiring `decide_cloud` depends on: settled_day()/committed() from a real Ledger must
+    charge a running attempt once, not zero or twice. Also shows why the raw spent_day() must
+    not be summed with committed(): doing so double-counts the same running job and wrongly
+    blocks a job that in fact fits."""
+    from pasar.cloud.cost import Ledger
+    from pasar.db import Store
+    from pasar.models import Attempt, JobSpec
+    from tests.fakes import FakeClock
+
+    store = Store(tmp_path / "pasar.db")
+    clock = FakeClock(1_700_000_000.0)
+    ledger = Ledger(store, clock)
+    target = t()
+
+    running = store.insert_job(JobSpec(command="python a.py", est_runtime=3600, cwd="/tmp"),
+                               1000, clock(), None)
+    store.insert_attempt(Attempt(running, 1, "cloud:c:sb-1", clock()))
+    ledger.record(target.name, running, 1, 30.0)
+    clock.advance(900)  # a quarter of its own estimated runtime: committed() stays at the flat estimate
+
+    settled_day = ledger.settled_day(target.name)
+    committed = ledger.committed(target.name)
+    assert settled_day == 0.0
+    assert committed == pytest.approx(30.0)
+
+    q = [CloudQueued(2, 1000, clock(), 15.0)]
+    right = decide_cloud(q, running_count=1, target=target, spent_day=settled_day,
+                         spent_month=ledger.settled_month(target.name), committed=committed)
+    assert right.launch == [2] and right.blocked == {}  # 50 - 0 - 30 = 20 >= 15
+
+    raw_day = ledger.spent_day(target.name)
+    assert raw_day == pytest.approx(30.0)  # the open row's flat estimate, already in committed too
+    wrong = decide_cloud(q, running_count=1, target=target, spent_day=raw_day,
+                         spent_month=ledger.spent_month(target.name), committed=committed)
+    assert wrong.blocked == {2: "budget"}  # 50 - 30 - 30 = -10: double-counting the running job
