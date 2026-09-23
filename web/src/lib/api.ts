@@ -1,6 +1,6 @@
 import type {
   GpuSeries, JobDetail, JobEvent, JobView, MascotManifest, MetricSummary, RestartBody, Series,
-  SubmitBody,
+  SparkMap, SubmitBody,
 } from "./types";
 
 export class ApiError extends Error {
@@ -57,6 +57,10 @@ export function getUsage(id: number): Promise<Series> {
 }
 export function getMetrics(id: number): Promise<MetricSummary[]> {
   return request("GET", `/api/jobs/${id}/metrics`);
+}
+/** Row sparklines for many jobs at once — one request for the whole table. */
+export function getSparks(ids: number[]): Promise<SparkMap> {
+  return request("GET", `/api/sparks?ids=${ids.join(",")}`);
 }
 export function getGpu(minutes = 30): Promise<GpuSeries> {
   return request("GET", `/api/gpu?minutes=${minutes}`);

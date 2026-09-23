@@ -50,6 +50,9 @@ export interface JobEvent {
 
 export interface MetricSummary { attempt: number; metric: string; avg: number | null; max: number | null; total: number | null }
 export type Series = [number, number][];
+/** One job's dashboard-row sparkline: the metric pasar picked for it, thinned for row size. */
+export interface JobSpark { key: string; points: Series; latest: number }
+export type SparkMap = Record<number, JobSpark>;
 export interface GpuSeries { power_w: Series; temp_c: Series; util_pct: Series }
 export type MascotManifest = Record<string, string[]>;
 
