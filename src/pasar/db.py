@@ -92,6 +92,7 @@ CREATE TABLE IF NOT EXISTS approvals (
     ts REAL NOT NULL,
     estimated_cost REAL,
     max_cost REAL,
+    hourly_rate REAL,
     PRIMARY KEY (job_id, attempt)
 );
 """
@@ -311,13 +312,22 @@ class Store:
 
     # approvals
     def add_approval(self, job_id: int, attempt: int, ts: float, estimated_cost: float | None,
-                     max_cost: float | None) -> None:
-        """What this attempt was approved to cost: the estimate it was approved against and the
-        ceiling that approval buys, which the launch is held to. One row per attempt: a paused or
-        reclaimed job needs approving again, so each attempt has its own. No approver is
-        recorded — pasard has no authentication, so there is nobody to name."""
-        self._x("INSERT OR REPLACE INTO approvals (job_id, attempt, ts, estimated_cost, max_cost)"
-                " VALUES (?, ?, ?, ?, ?)", (job_id, attempt, ts, estimated_cost, max_cost))
+                     max_cost: float | None, hourly_rate: float | None = None) -> None:
+        """What this attempt was approved to cost: the estimate it was approved against, the
+        ceiling that approval buys (the most it may bill, including the submitter's own
+        `--max-cost` when that is the lower figure), and the price per hour it was approved at.
+
+        The rate is stored as well as the ceiling because the two answer different questions: the
+        ceiling is what this attempt may spend, the rate is what the market was charging when
+        somebody said yes. A job whose `--max-cost` binds has a ceiling that cannot move — it is
+        the submitter's own number — so only the rate can show that the price has risen since.
+
+        One row per attempt: a paused or reclaimed job needs approving again, so each attempt has
+        its own. No approver is recorded — pasard has no authentication, so there is nobody to
+        name."""
+        self._x("INSERT OR REPLACE INTO approvals (job_id, attempt, ts, estimated_cost, max_cost,"
+                " hourly_rate) VALUES (?, ?, ?, ?, ?, ?)",
+                (job_id, attempt, ts, estimated_cost, max_cost, hourly_rate))
 
     def approvals(self, job_id: int) -> list[dict]:
         rows = self._q("SELECT * FROM approvals WHERE job_id = ? ORDER BY attempt", (job_id,))
