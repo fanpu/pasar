@@ -600,7 +600,8 @@ volumes = { "/data" = "datasets" }
 bundle_max = "256MiB"
 data_max = "4GiB"
 # base_image = "nvidia/cuda:12.8.1-runtime-ubuntu24.04"
-# rates = { H100 = 3.95 }          # override $/GPU-hour if the provider can't report rates
+# rates = { gpu_hour_cost_h100 = 3.95 }   # pin a price, keyed like `pasar cloud --json`'s rates
+# probe_past_budget = false  # true: let one approved job past the budget to ask the provider
 ```
 
 A cloud target with no `budget.daily` or `budget.monthly` is a config error, and pasard does not
@@ -616,6 +617,23 @@ provider. A target left without a provider keeps its waiting jobs (paused, await
 queued) where they are until it has one again; only a running job is failed, since nothing can
 follow its attempt. A job that finished meanwhile is pulled once the provider is back, however
 long that took: the retention sweep never deletes a job no automatic pull has tried.
+
+`rates` pins prices over the provider's live list, keyed the way the provider reports them
+(`pasar cloud --json` shows the keys): `gpu_hour_cost_<gpu>` in $/GPU-hour, and the sandbox's
+`cpu_hour_cost_sandbox` and `mem_gib_hour_cost_sandbox`, which every estimate adds to the GPU's.
+A GPU's pinned rate is used under every name it goes by, so `gpu_hour_cost_a100_80gb` also prices
+`--gpu A100-80GB`, and Modal's `gpu_hour_cost_a10g` prices `--gpu A10`. A key the provider does
+not use is never read. For a provider that reports no rates at all, pin the sandbox's two as well
+as each GPU's: a job that cannot be fully priced is never approved.
+
+`probe_past_budget` (default `false`) decides what happens when pasar's own budget arithmetic says
+the next approved job does not fit `budget.daily` or `budget.monthly`. Off, the job waits in the
+queue, blocked on `budget`. On, and only while nothing else runs on the target, that one job
+launches anyway and the provider's answer decides: an account with credit left runs it, one
+without refuses the launch in seconds, having spent nothing. pasar's arithmetic is over estimates
+and can disagree with the provider both ways. Turn it on only for a target whose account has a
+spending limit of its own at the provider; without one, the budget is the only thing between a
+job and a bill.
 
 `max_job_cost` (default $10) caps what one job spends over its whole life — every attempt,
 re-approval and extension — and is raised here, by whoever owns this file, not per job. A job that

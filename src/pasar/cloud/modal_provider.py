@@ -27,6 +27,7 @@ from pasar.cloud.base import (
     GpuRow,
     PersistFile,
     Phase,
+    aliased,
     gpu_rows,
 )
 from pasar.cloud.bundle import EnvSpec
@@ -120,6 +121,7 @@ class _Box:
 class ModalProvider:
     name = "modal"
     caps = Capabilities(graceful_stop=True, replay_output=True, billing=False)
+    gpu_names = GPU_NAMES
 
     def __init__(self, target: CloudTarget, state_dir: Path, sdk=None, clock=time.time,
                  sleep=time.sleep):
@@ -566,7 +568,7 @@ class ModalProvider:
 
     def _fetch_rates(self) -> dict[str, float]:
         raw = dict(self.sdk.Workspace.from_context(client=self.client).billing.rates())
-        rates = _aliased({k: float(v) for k, v in raw.items()})
+        rates = aliased({k: float(v) for k, v in raw.items()}, GPU_NAMES)
         with self._lock:
             self._rates, self._rates_at = rates, self.clock()
         return rates
@@ -751,29 +753,6 @@ class ModalProvider:
         for thread in [box.thread for box in boxes] + [rates_thread]:
             if thread is not None:
                 thread.join(max(0.0, deadline - time.monotonic()))
-
-
-def _aliased(rates: dict[str, float]) -> dict[str, float]:
-    """Also price each GPU under the spelling a person types. `hourly_rate` looks up
-    `gpu_hour_cost_<--gpu lowercased>`, so `--gpu A100-80GB` asks for `…a100-80gb` while Modal
-    lists `…a100_80gb`; an unpriced GPU refuses to estimate, which means the job never starts.
-
-    `GPU_NAMES` covers the GPUs whose Modal-accepted name is not just its rate key's own dashes
-    and underscores swapped — `a10g`'s billing key vs `A10`'s `gpu=` string, `rtx6000`'s vs
-    `RTX-PRO-6000`'s — so `--gpu A10` and `--gpu RTX-PRO-6000` need a rate key of their own, not
-    just the two this loop would otherwise produce."""
-    out = dict(rates)
-    for key, value in rates.items():
-        if not key.startswith("gpu_hour_cost_"):
-            continue
-        name = key[len("gpu_hour_cost_"):]
-        aliases = {name.replace("_", "-"), name.replace("-", "_")}
-        if name in GPU_NAMES:
-            display = GPU_NAMES[name].lower()
-            aliases |= {display, display.replace("-", "_")}
-        for alias in aliases:
-            out.setdefault(f"gpu_hour_cost_{alias}", value)
-    return out
 
 
 def _pasar_job_source() -> str:

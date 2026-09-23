@@ -14,7 +14,7 @@ from dataclasses import replace
 from pathlib import Path
 
 from pasar import gitinfo
-from pasar.cloud.base import GpuRow, parse_gpu
+from pasar.cloud.base import GpuRow, parse_gpu, price_list
 from pasar.cloud.bundle import Bundle, BundleError, EnvSpec, build_bundle, check_platform
 from pasar.cloud.cost import Ledger, estimate, hourly_rate
 from pasar.cloud.executor import CloudExecutor
@@ -247,8 +247,10 @@ class Daemon:
 
     # ---- cloud helpers
     def cloud_rates(self, target: CloudTarget) -> dict:
-        """Live prices, with anything the operator pinned in the config on top. Public: the API
-        and CLI read it too (`GET /api/cloud`), not just pricing done here.
+        """Live prices, with anything the operator pinned in the config on top, each GPU under
+        every spelling of its name (`price_list`): a pinned rate is the effective one under
+        whichever name `--gpu` or `pasar cloud` uses for that GPU. Public: the API and CLI read
+        it too (`GET /api/cloud`), not just pricing done here.
 
         Memoised per target for `CLOUD_RATE_TTL` seconds, because almost everything about a cloud
         job is priced on demand rather than stored: a job view prices a capped job twice and every
@@ -273,8 +275,9 @@ class Daemon:
                 except Exception:
                     log.exception("%s could not report its rates", target.name)
             self._rates[target.name] = (now, dict(rates))
-        rates.update(target.rates)
-        return rates
+        ex = self.executors.get(target.name)
+        names = getattr(ex.provider, "gpu_names", {}) if isinstance(ex, CloudExecutor) else {}
+        return price_list(rates, target.rates, names)
 
     def _hourly(self, target: CloudTarget, gpu: str) -> float:
         """Dollars per hour for one attempt of `gpu` on `target`, at today's rates."""

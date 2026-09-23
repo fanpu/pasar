@@ -35,7 +35,7 @@ def gpu_rows(rates: dict[str, float], names: dict[str, str],
     """Collapse `rates`'s `gpu_hour_cost_*` keys into one row per real GPU, cheapest first.
 
     `rates` is a provider's whole price list: `gpu_hour_cost_*` keys aliased both ways between
-    dashes and underscores (see `modal_provider._aliased`), plus CPU/memory/volume/endpoint keys
+    dashes and underscores (see `aliased`), plus CPU/memory/volume/endpoint keys
     that are not GPUs at all and are skipped by their prefix alone. Two aliases of the same GPU
     — `a100_80gb` and `a100-80gb` — must not become two rows: everything not given an explicit
     name in `names` is folded onto Modal's own dash style (`replace("_", "-").upper()`), so both
@@ -46,7 +46,7 @@ def gpu_rows(rates: dict[str, float], names: dict[str, str],
 
     Every row's name must also round-trip back through `hourly_rate`'s `.lower()` to a key still
     present in `rates`; that only holds if every alias this produces was itself written into
-    `rates` first, which is exactly what `_aliased` (extended with the same `names` exceptions)
+    `rates` first, which is exactly what `aliased` (given the same `names` exceptions)
     guarantees.
 
     `memory_gb` is keyed by the row's display name, not the rate key's spelling, and is a static,
@@ -60,6 +60,48 @@ def gpu_rows(rates: dict[str, float], names: dict[str, str],
         display = names.get(basename, basename.replace("_", "-").upper())
         best[display] = GpuRow(display, rate, memory_gb.get(display))
     return sorted(best.values(), key=lambda r: r.hourly_rate)
+
+
+GPU_RATE = "gpu_hour_cost_"
+
+
+def gpu_spellings(name: str, names: dict[str, str]) -> set[str]:
+    """Every spelling a GPU's rate key may need, given one of them (without `GPU_RATE`): its
+    rate-key name with dashes and underscores both ways, plus — for a GPU in `names`, whose
+    `--gpu` name is not just its rate key's own (`a10g` -> `A10`) — that name lowercased, both
+    ways too. Works from either end: `a10` finds its way back to `a10g` as well."""
+    shown = {key: display.lower() for key, display in names.items()}
+    for key, display in shown.items():
+        if name in (display, display.replace("-", "_")):
+            name = key
+    out = {name, name.replace("_", "-"), name.replace("-", "_")}
+    if name in shown:
+        out |= {shown[name], shown[name].replace("-", "_")}
+    return out
+
+
+def aliased(rates: dict[str, float], names: dict[str, str]) -> dict[str, float]:
+    """`rates` with each GPU also priced under every spelling of its name (`gpu_spellings`).
+    `hourly_rate` looks up `gpu_hour_cost_<--gpu lowercased>`, so `--gpu A100-80GB` asks for
+    `…a100-80gb` while Modal lists `…a100_80gb`; an unpriced GPU refuses to estimate, which means
+    the job never starts. A key `rates` has itself is never overwritten by another's alias."""
+    out = dict(rates)
+    for key, value in rates.items():
+        if key.startswith(GPU_RATE):
+            for spelling in gpu_spellings(key[len(GPU_RATE):], names):
+                out.setdefault(GPU_RATE + spelling, value)
+    return out
+
+
+def price_list(live: dict[str, float], pinned: dict[str, float],
+               names: dict[str, str]) -> dict[str, float]:
+    """A target's effective prices: the provider's `live` list with the config's `pinned` rates
+    on top, each aliased (`aliased`) before they meet. Aliasing the two separately is what lets
+    a pinned rate win under every spelling of its GPU, whichever spelling it was written in —
+    otherwise `gpu_hour_cost_a100_80gb` pinned in the config would price `--gpu A100-80GB` at
+    the live rate still sitting under `…a100-80gb`, and `pasar cloud` would list whichever of the
+    two happened to come last."""
+    return {**aliased(live, names), **aliased(pinned, names)}
 
 
 def parse_gpu(spec: str) -> tuple[str, int]:
@@ -119,6 +161,9 @@ class Provider(Protocol):
 
     name: str
     caps: Capabilities
+    # Rate-key names whose `--gpu` spelling differs from the key's own (Modal's `a10g` is
+    # `--gpu A10`), for `aliased`/`price_list`; empty for a provider with none.
+    gpu_names: dict[str, str]
 
     def prepare_image(self, env: EnvSpec) -> str:
         """Build or reuse an image for this environment; return an image key to pass to launch()."""

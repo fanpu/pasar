@@ -2562,7 +2562,7 @@ def test_submit_is_refused_when_the_estimate_is_past_the_jobs_cap(make_cloud, re
 
 
 def test_the_job_cap_refusal_suggests_each_gpu_once_even_under_two_spellings(make_cloud, repo):
-    # The rate map carries this GPU under both spellings (see modal_provider._aliased); it must
+    # The rate map carries this GPU under both spellings (see pasar.cloud.base.aliased); it must
     # be suggested once, by one name, not twice under two names for the same physical card.
     daemon, _ = make_cloud(rates={"gpu_hour_cost_a100_80gb": 0.80, "gpu_hour_cost_a100-80gb": 0.80})
     with pytest.raises(ValueError) as excinfo:
@@ -2574,7 +2574,7 @@ def test_the_job_cap_refusal_suggests_each_gpu_once_even_under_two_spellings(mak
 
 def test_the_job_cap_refusal_names_each_gpu_the_way_pasar_cloud_does(make_cloud, repo, tmp_path):
     # A live Modal rate table carries A10 under `a10g` and RTX-PRO-6000 under `rtx6000` (plus the
-    # aliases `_aliased` adds for each — see modal_provider.GPU_NAMES); walking the raw rate keys
+    # aliases `aliased` adds for each — see modal_provider.GPU_NAMES); walking the raw rate keys
     # with no naming table suggests each of these twice, once per spelling. The refusal must name
     # each GPU the one way `pasar cloud`/`--gpu` know it by, exactly once.
     sdk = FakeSDK()
@@ -2594,6 +2594,65 @@ def test_the_job_cap_refusal_names_each_gpu_the_way_pasar_cloud_does(make_cloud,
         assert msg.count("A10") == 1
         assert msg.count("6000") == 1
         assert "A10 ($" in msg and "RTX-PRO-6000 ($" in msg
+    finally:
+        provider.close()
+
+
+def modal_daemon(make_cloud, tmp_path, live, **target_kw):
+    """A daemon over a real `ModalProvider` (on the fake SDK) whose live price list is `live`:
+    the provider's own GPU spellings are what these rate tests are about."""
+    sdk = FakeSDK()
+    sdk.rates_value = live
+    target = CloudTarget(name="fake", provider="modal", daily_budget=50.0, monthly_budget=300.0)
+    provider = ModalProvider(target, tmp_path / "modal-state", sdk=sdk)
+    daemon, _ = make_cloud(provider=provider, **target_kw)
+    return daemon, provider
+
+
+SANDBOX = {"cpu_hour_cost_sandbox": 0.1419, "mem_gib_hour_cost_sandbox": 0.024}
+
+
+@pytest.mark.parametrize("key", ["gpu_hour_cost_a100_80gb", "gpu_hour_cost_a100-80gb"])
+def test_a_config_rate_prices_every_spelling_of_its_gpu(make_cloud, tmp_path, key):
+    # An override under Modal's own key must reach `--gpu A100-80GB` too, and one written the
+    # way `--gpu` spells it must reach the row `pasar cloud` lists: one GPU, one price.
+    daemon, provider = modal_daemon(make_cloud, tmp_path,
+                                    {"gpu_hour_cost_a100_80gb": 2.5, **SANDBOX},
+                                    rates={key: 1.0})
+    try:
+        target = daemon.cfg.clouds["fake"]
+        rates = daemon.cloud_rates(target)
+        assert rates["gpu_hour_cost_a100-80gb"] == rates["gpu_hour_cost_a100_80gb"] == 1.0
+        [row] = daemon.cloud_gpus(target)
+        assert row.name == "A100-80GB" and row.hourly_rate == 1.0
+        assert daemon._hourly(target, "A100-80GB") == hourly_rate(rates, "a100-80gb", 1)
+    finally:
+        provider.close()
+
+
+def test_a_config_rate_under_modals_billing_name_prices_the_name_gpu_accepts(make_cloud,
+                                                                              tmp_path):
+    daemon, provider = modal_daemon(make_cloud, tmp_path, {"gpu_hour_cost_a10g": 1.1, **SANDBOX},
+                                    rates={"gpu_hour_cost_a10g": 0.5})
+    try:
+        target = daemon.cfg.clouds["fake"]
+        assert daemon.cloud_rates(target)["gpu_hour_cost_a10"] == 0.5
+        assert [(r.name, r.hourly_rate) for r in daemon.cloud_gpus(target)] == [("A10", 0.5)]
+    finally:
+        provider.close()
+
+
+def test_config_rates_alone_price_every_gpu_they_list(make_cloud, tmp_path):
+    # No live price list at all (the provider could not report one): what the config pins is
+    # all there is, and each GPU it names must still price under the name `pasar cloud` shows.
+    daemon, provider = modal_daemon(make_cloud, tmp_path, {},
+                                    rates={"gpu_hour_cost_a100_80gb": 2.0,
+                                           "gpu_hour_cost_rtx6000": 3.0, **SANDBOX})
+    try:
+        target = daemon.cfg.clouds["fake"]
+        for row in daemon.cloud_gpus(target):
+            assert daemon._hourly(target, row.name) > 0
+        assert {r.name for r in daemon.cloud_gpus(target)} == {"A100-80GB", "RTX-PRO-6000"}
     finally:
         provider.close()
 

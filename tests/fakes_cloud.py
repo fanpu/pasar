@@ -52,6 +52,7 @@ class FakeProvider:
 
     def __init__(self, clock=None):
         self.clock = clock or (lambda: 0.0)
+        self.gpu_names: dict[str, str] = {}  # no GPU spelled differently in its billing
         self.boxes: dict[str, _Sandbox] = {}
         self.stopped: list[str] = []
         self.terminated: list[str] = []
