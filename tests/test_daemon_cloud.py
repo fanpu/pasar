@@ -869,29 +869,82 @@ def test_a_waiting_job_whose_target_is_gone_is_not_left_stranded(make_cloud, rep
         assert job.state == State.CANCELLED and job.reason == "target_gone"
 
 
+def fake_target(**kw):
+    return CloudTarget(**{"name": "fake", "provider": "fake", "daily_budget": 50.0,
+                          "monthly_budget": 300.0, **kw})
+
+
+def without_its_provider(tmp_path, clock, executor, probe, **target_kw):
+    """pasard restarted with the target still configured but its provider not built — a bad
+    ~/.modal.toml, a package gone missing: `build_providers` logs it and leaves it out."""
+    data = tmp_path / "data"
+    cfg = Config(clouds={"fake": fake_target(**target_kw)})
+    return Daemon(cfg, Store(data / "pasar.db"), executor, probe, data, clock=clock,
+                  background=run_now)
+
+
 def test_a_target_with_no_provider_says_so_rather_than_calling_itself_unconfigured(
         make_cloud, repo, tmp_path, clock, executor, probe):
     # Two different problems with two different fixes: a target taken out of the config wants
-    # putting back, a target with no provider on this pasard wants one installed. Submit and
-    # approve take care to tell them apart; so should the message somebody reads afterwards.
+    # putting back, a target whose provider could not be set up wants whatever stopped it fixed
+    # (often its credentials, not a missing package). Submit and approve take care to tell them
+    # apart; so should the message somebody reads afterwards.
     daemon, _ = make_cloud()
     job_id = start(daemon, repo)
-    waiting = daemon.submit(cloud_spec(repo))
-    data = tmp_path / "data"
-    cfg = Config(clouds={"fake": CloudTarget(name="fake", provider="fake", daily_budget=50.0,
-                                             monthly_budget=300.0)})
-    after = Daemon(cfg, Store(data / "pasar.db"), executor, probe, data, clock=clock)
+    after = without_its_provider(tmp_path, clock, executor, probe)
     after.tick()
 
     running = after.job(job_id)
-    assert running.state == State.FAILED and "no provider on this pasard" in running.summary
-    cancelled = after.job(waiting.id)
-    assert cancelled.state == State.CANCELLED
-    assert "no provider on this pasard" in cancelled.summary
-    assert "install fake's provider" in cancelled.summary
+    assert running.state == State.FAILED and "could not be set up" in running.summary
+    assert "~/.modal.toml" in running.summary and "restart pasard" in running.summary
+    [event] = [e["text"] for e in after.store.machine_events() if e["kind"] == "target_gone"]
+    assert "could not be set up" in event and "no longer configured" not in event
+
+
+def test_a_waiting_job_is_left_waiting_when_only_its_provider_failed(
+        make_cloud, repo, tmp_path, clock, executor, probe):
+    # The target is still configured; only its provider failed to start. Cancelling a paused
+    # job here would stamp it finished with nothing able to pull it — and its checkpoint is what
+    # its next attempt resumes from. Left as it is, it simply cannot move until the provider is
+    # back: approve refuses, and the lane never launches on a target with no provider.
+    daemon, provider = make_cloud()
+    paused = pause_with_a_checkpoint(daemon, provider, repo)
+    queued = daemon.submit(cloud_spec(repo))
+    daemon.approve(queued.id)
+    after = without_its_provider(tmp_path, clock, executor, probe)
+    after.tick()
+    after.tick()
+
+    assert after.job(paused).state == State.AWAITING
+    assert after.job(queued.id).state == State.QUEUED
+    assert after.store.cloud_finished_at(paused) is None
+    with pytest.raises(Conflict, match="no provider"):
+        after.approve(paused)
     events = [e["text"] for e in after.store.machine_events() if e["kind"] == "target_gone"]
-    assert len(events) == 2 and all("no provider on this pasard" in t for t in events)
-    assert not any("no longer configured" in t for t in events)
+    assert len(events) == 2  # one per job, not one per tick
+    assert all("left" in t and "cannot be approved or launched" in t for t in events)
+    assert provider.persisted[paused] == {"checkpoint.pt": b"weights"}
+
+    back, _ = make_cloud(provider)  # the provider is fixed and pasard restarted
+    back.tick()
+    assert back.job(queued.id).state == State.RUNNING
+    assert back.approve(paused).state == State.QUEUED
+
+
+def test_a_paused_job_cancelled_for_a_target_gone_says_what_it_left_behind(
+        make_cloud, repo, tmp_path, clock, executor, probe):
+    # "nothing was spent" is only true of a job that never ran.
+    daemon, provider = make_cloud()
+    paused = pause_with_a_checkpoint(daemon, provider, repo)
+    never_ran = daemon.submit(cloud_spec(repo))
+    data = tmp_path / "data"
+    after = Daemon(Config(), Store(data / "pasar.db"), executor, probe, data, clock=clock)
+    after.tick()
+
+    job = after.job(paused)
+    assert job.state == State.CANCELLED and "nothing was spent" not in job.summary
+    assert "still on fake" in job.summary and "put fake back in the config" in job.summary
+    assert "nothing was spent" in after.job(never_ran.id).summary
 
 
 def test_a_sandbox_whose_attempt_cannot_be_recorded_is_ended(cloud, repo, monkeypatch):
@@ -1579,7 +1632,33 @@ def test_housekeep_does_not_pull_again_once_a_pull_succeeded(cloud, repo, clock,
     assert provider.deleted_persist == [job_id]
 
 
-def test_housekeep_leaves_jobs_that_ended_before_the_retry_window(make_cloud, repo, clock):
+def test_housekeep_does_not_retry_a_tried_pull_past_the_retry_window(make_cloud, repo, clock):
+    daemon, provider = make_cloud()
+    roomy(daemon)
+    job_id = start(daemon, repo)
+    provider.persist(job_id, "checkpoint.pt", b"weights")
+    provider.fail_download.add(job_id)
+    provider.finish(handle_of(daemon, job_id), 0)
+    daemon.tick()
+    assert daemon.store.cloud_finished_at(job_id) == clock.t
+    assert len(pulls_of(daemon, job_id)) == 1
+    provider.fail_download.discard(job_id)
+
+    after, _ = make_cloud(provider)
+    after.background = lambda work: None  # whatever is queued now is what housekeep decided
+    roomy(after)
+    clock.advance(after.cfg.cloud_retention_days * 86400 + 1)
+    after.housekeep()
+
+    # Not tried again: what happens to the remote copy past the window is the sweep's business
+    # (see the tests of it below), and it never brings anything to local disk.
+    assert len(pulls_of(after, job_id)) == 1
+    assert after._pull_order and all(work == after.sweep for _, work in after._pull_order)
+
+
+def test_a_job_never_tried_is_pulled_even_past_the_retry_window(make_cloud, repo, clock):
+    # pasard went down before its pull ran and stayed down (or its provider did) past the
+    # window: the first try is still owed, and the sweep waits for it.
     daemon, provider = make_cloud()
     roomy(daemon)
     daemon.background = lambda work: None
@@ -1587,17 +1666,14 @@ def test_housekeep_leaves_jobs_that_ended_before_the_retry_window(make_cloud, re
     provider.persist(job_id, "checkpoint.pt", b"weights")
     provider.finish(handle_of(daemon, job_id), 0)
     daemon.tick()
-    assert daemon.store.cloud_finished_at(job_id) == clock.t
 
     after, _ = make_cloud(provider)
     roomy(after)
     clock.advance(after.cfg.cloud_retention_days * 86400 + 1)
     after.housekeep()
 
-    # Not pulled: what happens to the remote copy past the window is the sweep's business (see
-    # the tests of it below), and it never brings anything to local disk.
-    assert pulls_of(after, job_id) == []
-    assert not (after.data_dir / "pulls" / str(job_id)).exists()
+    assert (after.data_dir / "pulls" / str(job_id) / "checkpoint.pt").read_bytes() == b"weights"
+    assert after.store.cloud_swept(job_id)["bytes"] == 0  # the sweep found nothing left
 
 
 def test_a_pull_that_landed_but_could_not_delete_the_remote_copy_is_not_retried(
@@ -2136,6 +2212,57 @@ def test_a_job_whose_provider_is_gone_is_skipped_with_a_log_line(cloud, repo, cl
     daemon.executors["fake"] = executor  # the provider comes back: the next housekeep sweeps it
     clock.advance(3600)
     daemon.housekeep()
+    assert provider.deleted_persist == [job_id]
+
+
+def test_a_job_nobody_ever_tried_to_pull_is_never_swept(cloud, repo, clock):
+    # No automatic pull ever ran — its provider was down all through the window, say — so the
+    # volume holds the only copy and nobody has had a chance to fetch it: past the window or
+    # not, it is not the sweep's to delete.
+    daemon, provider = cloud
+    daemon.background = lambda work: None  # nothing queued ever runs
+    job_id = finish(daemon, provider, repo)
+    provider.persist(job_id, "checkpoint.pt", b"weights")
+    clock.advance(retention(daemon) + 86400)
+    daemon.housekeep()
+    daemon.sweep(job_id)
+
+    assert pulls_of(daemon, job_id) == []
+    assert provider.persisted[job_id] == {"checkpoint.pt": b"weights"}
+    assert provider.deleted_persist == [] and daemon.store.cloud_swept(job_id) is None
+
+
+def test_a_job_whose_provider_was_down_past_the_window_is_pulled_before_any_sweep(
+        make_cloud, repo, tmp_path, clock, executor, probe):
+    # The reproduced loss: a paused job's provider failed to start, the job ended while it was
+    # down, and by the time it came back the retention window had passed. It must be pulled
+    # first — a first try is owed whatever the window says — and never swept unpulled.
+    daemon, provider = make_cloud(approval_ttl=600)
+    job_id = pause_with_a_checkpoint(daemon, provider, repo)
+    down = without_its_provider(tmp_path, clock, executor, probe, approval_ttl=600)
+    clock.advance(601)
+    down.tick()  # nobody approved it in time
+    assert down.job(job_id).state == State.CANCELLED
+    clock.advance(retention(down) + 86400)
+    down.housekeep()
+    assert provider.persisted[job_id] == {"checkpoint.pt": b"weights"}
+
+    back, _ = make_cloud(provider, approval_ttl=600)
+    roomy(back)
+    back.housekeep()
+
+    pulled = back.data_dir / "pulls" / str(job_id) / "checkpoint.pt"
+    assert pulled.read_bytes() == b"weights"
+    assert back.store.last_pull(job_id, landed=True)["auto"]
+
+
+def test_once_tried_a_pull_past_the_window_is_not_tried_again_and_the_sweep_goes_ahead(
+        cloud, repo, clock):
+    daemon, provider = cloud
+    job_id = left_unpulled(daemon, provider, repo)  # one automatic try, skipped for room
+    clock.advance(retention(daemon) + 1)
+    daemon.housekeep()
+    assert daemon.store.count_pulls(job_id, auto=True) == 1
     assert provider.deleted_persist == [job_id]
 
 

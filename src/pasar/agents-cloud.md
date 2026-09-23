@@ -247,7 +247,7 @@ Cloud-only terminal reasons:
 | Reason | What happened | What to do |
 |---|---|---|
 | `pause_limit` | It ran out of its approved time 5 times running without finishing. Each pause on its own is not a failure, but 5 with nothing to show for them means something is wrong. | Check that it checkpoints and resumes, then ask about resubmitting with a longer `--time`. |
-| `target_gone` | Its target is no longer configured here: `failed` if it was running (its sandbox may still be billing: tell the user to end it at the provider), `cancelled` if it was only waiting (nothing was spent). | Tell the user. |
+| `target_gone` | Its target is no longer configured here, or its provider could not be set up (often a bad `~/.modal.toml`; pasard's log says which). `failed` if it was running: its sandbox may still be billing, so tell the user to end it at the provider. A waiting job is left waiting when only the provider failed, and `cancelled` when the target left the config; its summary says whether anything was spent and where earlier attempts' files are. | Tell the user what the summary says to fix. |
 
 ## Getting results back
 

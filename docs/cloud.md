@@ -289,7 +289,9 @@ deleted there, and nothing stays at the provider for good:
 - **The retention sweep deletes the only copy.** `cloud_retention_days` (default 3) after a job
   finished — counted from when it became `completed`, `failed` or `cancelled`, not from its last
   attempt — whatever is left of its persist dir at the provider is deleted, pulled or not, and a
-  `swept` machine event records what went. For a job pulled with `--keep` that is a spare copy;
+  `swept` machine event records what went. Only once something has tried to pull it: a job no
+  automatic pull ever tried (its provider was down the whole time, say) is pulled first, even
+  past the window, and swept only after that. For a job pulled with `--keep` that is a spare copy;
   for one whose automatic pull was skipped or gave up, and that nobody pulled by hand, it is the
   only copy, and the job's results are gone. Pull it before then.
 - **Pulled data is yours.** Nothing under `pull_dir` is ever deleted or counted by pasar:
@@ -493,8 +495,10 @@ the attempt's end kind is `paused`, which counts toward lost time like a preempt
 (failed after 5 `time_limit` pauses with nothing finished — a provider reclaim doesn't count
 toward the five), `cloud_preempted` (the provider reclaimed the sandbox), `price_rose` (the price
 moved above what was approved between approval and launch; back to **awaiting**, not a launch),
-`target_gone` (the job's target is no longer configured: `failed` if it was running, since its
-sandbox may still be billing at the provider, `cancelled` if it was only waiting), `rejected` and
+`target_gone` (the job's target is no longer configured, or its provider could not be set up:
+`failed` if it was running, since its sandbox may still be billing at the provider; if it was only
+waiting, `cancelled` when the target is gone from the config, but left where it is — awaiting or
+queued, unable to be approved or launched — when only its provider failed), `rejected` and
 `approval_expired` (never approved, or approved too late). Any failure while packaging, pricing or
 launching an attempt — a build failure, no capacity, a bad bundle — is `launch_error`, the same
 reason a local job's launch failure gets; there is no separate `image_build_error`, `no_capacity`
@@ -508,7 +512,8 @@ New machine-event kinds, alongside the existing `pressure`/`pressure_end`/`oom_k
 same thing from the job's side), `max_cost` (a pause was triggered by `--max-cost` rather than the
 approved run time, named separately from `time_limit` while it's known, since both pause the same
 way), `extended` (a person raised a running attempt's ceiling, and at what rate), `target_gone`
-(a target was removed from config, for both its running and waiting jobs), and `orphan_unit` (a
+(a target was removed from config, or its provider could not be set up, for both its running and
+waiting jobs), and `orphan_unit` (a
 live handle this pasard can no longer follow after a restart — the executor never adopted it back
 — which is terminated on the spot rather than left to bill unwatched). For results: `pulled`,
 `pull_skipped` (an automatic pull the free-space guard or `pull_max` stopped), `pull_changed`
@@ -603,7 +608,14 @@ start with it. `profile` names one Modal account per target, so several people's
 from one pasard, each job on its own target's credit: every call for that target carries that
 profile's tokens, and never whichever profile is active. A `profile` that `~/.modal.toml` does not
 have is never quietly swapped for another: the target gets no provider (pasard logs why, and
-`pasar cloud` shows it as `(no provider)`), so it takes no jobs. `max_job_cost` (default $10) caps
+`pasar cloud` shows it as `(no provider)`), so it takes no jobs. Check before deploying that
+`~/.modal.toml` has exactly one profile marked `active = true`: the SDK checks the whole file
+whenever it builds a client, even one for a named `profile`, and refuses if more than one is
+active, or if there are several profiles and none is — which leaves every Modal target with no
+provider. A target left without a provider keeps its waiting jobs (paused, awaiting approval, or
+queued) where they are until it has one again; only a running job is failed, since nothing can
+follow its attempt. A job that finished meanwhile is pulled once the provider is back, however
+long that took: the retention sweep never deletes a job no automatic pull has tried. `max_job_cost` (default $10) caps
 what one job spends over its whole life — every attempt, re-approval and extension — and is raised
 here, by whoever owns this file, not per job.
 

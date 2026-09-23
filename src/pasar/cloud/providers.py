@@ -8,7 +8,9 @@ from pasar.config import CloudTarget, Config
 
 log = logging.getLogger(__name__)
 
-INSTALL_HINT = {"modal": "install it with `uv pip install 'pasar[modal]'` and restart pasard"}
+INSTALL_HINT = {"modal": "if modal is not installed, install it with `uv pip install "
+                         "'pasar[modal]'`; if it is, check ~/.modal.toml has exactly one active "
+                         "profile and the target's `profile`; then restart pasard"}
 
 
 def _MODAL(target: CloudTarget, state_dir: Path):
@@ -26,9 +28,10 @@ def build_providers(cfg: Config, data_dir: Path) -> dict[str, object]:
     """One provider per configured target, skipping any that cannot be built.
 
     A target that is skipped is left out of the daemon's executors entirely, which is the case
-    `Daemon._unreachable` already handles: jobs waiting for it are cancelled and the message says
-    to install the provider. That is much better than refusing to start pasard, which would take
-    every local job down with it over a cloud target nobody is using today.
+    `Daemon._drop_unreachable` handles: a running job is failed, since nothing can follow it, and
+    waiting ones are left where they are until the provider is back. That is much better than
+    refusing to start pasard, which would take every local job down with it over a cloud target
+    nobody is using today.
     """
     providers: dict[str, object] = {}
     for name, target in cfg.clouds.items():

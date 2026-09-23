@@ -186,6 +186,9 @@ class Daemon:
         # An attribute rather than the bare constant so a test can make every pull due at once.
         self._pull_due: dict[int, float] = {}
         self.pull_settle = PULL_SETTLE
+        # Waiting jobs of a configured target whose provider failed to start, already told
+        # about: `_drop_unreachable` leaves them where they are and says so once each.
+        self._stranded: set[int] = set()
 
     # ---- helpers
     def job_dir(self, job_id: int) -> Path:
@@ -1258,6 +1261,13 @@ class Daemon:
             + (f". Partial downloads left from those tries, safe to delete once it is pulled: "
                f"{', '.join(staged)}" if staged else ""))
 
+    def _pull_tried(self, job_id: int) -> bool:
+        """Whether anything has had a go at bringing this job's results home: an automatic pull
+        tried at least once, or any pull landed a verified copy (a manual `--keep` one, say).
+        The sweep deletes only such a job — never one whose only copy nobody ever reached for."""
+        return (self.store.count_pulls(job_id, auto=True) > 0
+                or self.store.last_pull(job_id, landed=True) is not None)
+
     def _retention(self) -> float:
         """`cloud_retention_days` in seconds: how long after a cloud job finished its automatic
         pull is retried, and after which whatever it left at the provider is swept."""
@@ -1298,6 +1308,10 @@ class Daemon:
             return
         ended = self.store.cloud_finished_at(job_id)
         if ended is None or self.clock() - ended < self._retention():
+            return
+        if not self._pull_tried(job_id):
+            log.info("job %s is past cloud_retention_days but no automatic pull has tried it "
+                     "yet; it is not swept until one has", job_id)
             return
         target = job.spec.target
         ex = self.executors.get(target)
@@ -1351,17 +1365,24 @@ class Daemon:
 
     def _drop_unreachable(self, now: float) -> None:
         """Settle jobs on a target this pasard cannot reach — one removed from the config, or one
-        whose provider is gone. Without this a running job stays running forever, its attempt
-        never ends (so the budget stays committed to a target nothing can spend on), the poll
-        raises every tick where only the log sees it, and a waiting job can never be approved
-        nor expired. A running job is failed rather than quietly closed: its sandbox may well
-        still be alive, nothing here can end it, and somebody has to go and look."""
+        whose provider could not be set up. Without this a running job stays running forever,
+        its attempt never ends (so the budget stays committed to a target nothing can spend on),
+        and the poll raises every tick where only the log sees it. A running job is failed
+        rather than quietly closed: its sandbox may well still be alive, nothing here can end
+        it, and somebody has to go and look.
+
+        A waiting job of a target removed from the config is cancelled: nothing would ever
+        approve or expire it. One whose target is still configured, and only its provider
+        failed — a bad profile, most often — is left where it is and said so once: a fixed
+        config and a restart carry it on, where a cancel would have ended a paused job with
+        nothing able to reach its checkpoint."""
         for job in self.store.list_jobs(ACTIVE):
             if job.spec.target in self.executors:
                 continue
             att = self.store.current_attempt(job.id)
             why, fix = self._unreachable(job.spec.target)
-            summary = f"{why}, so this attempt cannot be followed"
+            summary = (f"{why}, so this attempt cannot be followed; it may still be running and "
+                       f"billing at the provider — end it there, and {fix}")
             if att is not None and att.end_time is None:
                 self.store.update_attempt(job.id, att.n, end_time=now, end_kind=EndKind.FAILED,
                                           reason="target_gone", summary=summary)
@@ -1376,26 +1397,48 @@ class Daemon:
             self.cloud_units.pop(job.id, None)
             self.usage.pop(job.id, None)
         for job in self.store.list_jobs([State.AWAITING, State.QUEUED]):
-            if job.spec.target in self.executors:
+            target = job.spec.target
+            if target in self.executors:
                 continue
-            why, fix = self._unreachable(job.spec.target)
+            why, fix = self._unreachable(target)
+            if target in self.cfg.clouds:
+                # Still configured; only its provider failed to start. Left exactly as it is:
+                # `approve` refuses without a provider and the lane only launches on targets
+                # that have one, so the job cannot move, or spend, until the provider is back.
+                # Cancelling it would end a paused job whose checkpoint its next attempt resumes
+                # from, with nothing able to pull it home. Said once per job, not every tick.
+                if job.id not in self._stranded:
+                    self._stranded.add(job.id)
+                    self.store.add_machine_event(
+                        now, "target_gone",
+                        f"job {job.id} is waiting for {target} and {why}; it is left {job.state} "
+                        f"and cannot be approved or launched until its provider is back — {fix}")
+                continue
+            if self.store.attempts(job.id):
+                left = (f"its earlier attempts were billed, and whatever they wrote is still on "
+                        f"{target}'s volume, out of reach until you {fix}, when it is pulled home")
+            else:
+                left = "nothing was spent"
             self.store.add_machine_event(
-                now, "target_gone", f"job {job.id} is waiting for {job.spec.target} and {why}; "
-                "it was cancelled rather than left waiting forever")
+                now, "target_gone", f"job {job.id} is waiting for {target} and {why}; "
+                f"it was cancelled rather than left waiting forever; {left}")
             self.store.update_job(
                 job.id, state=State.CANCELLED, reason="target_gone",
-                summary=f"{why}; nothing was spent — submit it again to a target that works, "
-                        f"or {fix}")
+                summary=f"{why}; {left} — submit it again to a target that works, or {fix}")
             self._cloud_ended(job, State.CANCELLED)
 
     def _unreachable(self, target: str) -> tuple[str, str]:
         """Why a target cannot be reached, and what would fix it. The two cases want different
-        things done about them — one is a config file to put back, the other a provider to
-        install — and `_submit_cloud` and `approve` already take care to tell them apart, so the
-        message somebody reads after their job was settled should too."""
+        things done about them — one is a config file to put back, the other a provider that
+        failed to start — and `_submit_cloud` and `approve` already take care to tell them
+        apart, so the message somebody reads after their job was settled should too. A provider
+        fails to start far more often over its credentials than over a missing package, and
+        `build_providers` logs which it was, so that is where the fix points."""
         if target in self.cfg.clouds:
-            return (f"{target} is configured but has no provider on this pasard",
-                    f"install {target}'s provider and restart pasard")
+            fix = (f"fix what pasard's log says stopped {target}'s provider when it started "
+                   "(a missing package, or for Modal a bad ~/.modal.toml: it needs exactly one "
+                   "active profile, and the target's `profile` in it) and restart pasard")
+            return f"{target} is configured but its provider could not be set up", fix
         return (f"{target} is no longer configured on this pasard",
                 f"put {target} back in the config and restart pasard")
 
@@ -1996,7 +2039,12 @@ class Daemon:
 
         Also the backstop for `_cloud_ended`: a finished cloud job with no stamp (one that
         finished before stamps existed, or down a path that missed one) is stamped now, which
-        gives it a fresh window and so its pull. Queued, not run: this is called from the tick."""
+        gives it a fresh window and so its pull. Queued, not run: this is called from the tick.
+
+        A job no automatic pull has ever tried is queued even past the window: its provider may
+        have been unreachable all through it (a bad profile at startup, say), and `_sweep`
+        refuses a job nobody has tried to pull, so without this it would sit at the provider,
+        billed, for good."""
         stamped = self.store.cloud_finished()
         for job in terminal:
             if not self._is_cloud(job):
@@ -2005,9 +2053,12 @@ class Daemon:
             if ended is None:
                 self.store.mark_cloud_finished(job.id, now)
                 ended = now
-            if (now - ended <= self._retention()
-                    and self.store.last_pull(job.id, landed=True) is None
-                    and self.store.count_pulls(job.id, auto=True) < AUTO_PULL_TRIES):
+            if self.store.last_pull(job.id, landed=True) is not None:
+                continue
+            tries = self.store.count_pulls(job.id, auto=True)
+            # The first try is owed whatever the window says: a job that finished while its
+            # provider was down may come back past it, and the sweep will not touch it untried.
+            if tries == 0 or (now - ended <= self._retention() and tries < AUTO_PULL_TRIES):
                 self._schedule_pull(job)
 
     def _sweep_unpulled(self, now: float, terminal: list[Job]) -> None:
@@ -2025,7 +2076,7 @@ class Daemon:
             if job.state not in TERMINAL or not self._is_cloud(job) or job.id in swept:
                 continue
             ended = stamped.get(job.id)
-            if ended is None or now - ended < window:
+            if ended is None or now - ended < window or not self._pull_tried(job.id):
                 continue
             if not isinstance(self.executors.get(job.spec.target), CloudExecutor):
                 log.warning("job %s's results at %s are past cloud_retention_days, but %s has "
