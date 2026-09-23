@@ -25,9 +25,10 @@ from pasar.mascot import manifest, resolve, resolve_builtin
 from pasar.metrics import Prometheus
 from pasar.models import TERMINAL, JobSpec, State
 from pasar.units import parse_duration, parse_size
-from pasar.views import attempt_view, job_view, schedule_projection, status_view
+from pasar.views import attempt_view, job_view, schedule_projection, spark_view, status_view
 
 RECENT = 86400
+MAX_SPARK_IDS = 200  # more rows than a dashboard ever shows at once
 KEEPALIVE_INTERVAL = 15.0  # seconds of quiet before an SSE stream sends a `: keep-alive` comment
 _MAX_INT = 2**62  # keeps user-supplied numbers well clear of sqlite's signed-64-bit columns
 
@@ -280,6 +281,21 @@ def create_app(daemon: Daemon, *, prom: Prometheus | None = None, wake=lambda: N
         )
         wake()
         return view(job)
+
+    # Deliberately not "/api/jobs/sparks": that would sit under the "/api/jobs/{job_id}" path and
+    # only work as long as it stayed declared first, which is a trap for whoever reorders next.
+    @app.get("/api/sparks")
+    async def sparks(ids: str = ""):
+        """Sparkline data for many jobs at once, so the dashboard table costs one request instead
+        of one per row. Jobs without a plottable metric are simply absent from the result."""
+        parts = [p for p in ids.split(",") if p]
+        if len(parts) > MAX_SPARK_IDS:
+            raise HTTPException(422, f"at most {MAX_SPARK_IDS} ids")
+        try:
+            job_ids = [int(p) for p in parts]
+        except ValueError:
+            raise HTTPException(422, "ids must be a comma-separated list of job ids") from None
+        return spark_view(daemon.store, job_ids)
 
     @app.get("/api/jobs/{job_id}/events")
     async def events(job_id: int):

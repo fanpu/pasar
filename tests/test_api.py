@@ -247,3 +247,23 @@ def test_patch_preempt_alone_keeps_bid(client, daemon, tmp_path):
     assert r.status_code == 200 and r.json()["preempt"] is True and r.json()["bid"] == 1200
     r = client.patch("/api/jobs/1", json={"bid": 1300})
     assert r.json()["preempt"] is True and r.json()["bid"] == 1300
+
+
+def test_sparks_returns_one_series_per_job(client, tmp_path, daemon):
+    submit(client, tmp_path)
+    submit(client, tmp_path)
+    submit(client, tmp_path)
+    daemon.store.add_event(1, 1, 5.0, "progress", 1, {"step": 1, "loss": 0.9})
+    daemon.store.add_event(1, 1, 6.0, "progress", 2, {"step": 2, "loss": 0.4})
+    daemon.store.add_event(2, 1, 5.0, "progress", 1, {"step": 1})  # nothing plottable
+
+    body = client.get("/api/sparks?ids=1,2,3").json()
+    assert set(body) == {"1"}
+    assert body["1"] == {"key": "loss", "points": [[5.0, 0.9], [6.0, 0.4]], "latest": 0.4}
+    assert client.get("/api/sparks?ids=").json() == {}
+
+
+def test_sparks_rejects_junk_and_oversized_id_lists(client):
+    assert client.get("/api/sparks?ids=1,nope").status_code == 422
+    too_many = ",".join(str(i) for i in range(api.MAX_SPARK_IDS + 1))
+    assert client.get(f"/api/sparks?ids={too_many}").status_code == 422
