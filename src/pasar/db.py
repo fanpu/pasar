@@ -241,6 +241,13 @@ class Store:
                        "ORDER BY id LIMIT 1", (job_id, kind, attempt))
         return self._event(rows[0]) if rows else None
 
+    def count_events(self, job_id: int, kind: str, attempt: int) -> int:
+        """How many `kind` events this attempt has reported. Counted in SQL rather than by
+        reading the rows: the only caller wants the number, and an attempt can report thousands."""
+        rows = self._q("SELECT COUNT(*) AS n FROM events WHERE job_id = ? AND kind = ? "
+                       "AND attempt = ?", (job_id, kind, attempt))
+        return rows[0]["n"]
+
     def last_event_before(self, job_id: int, kind: str, attempt: int) -> dict | None:
         """The latest `kind` event from an attempt earlier than `attempt`."""
         rows = self._q("SELECT * FROM events WHERE job_id = ? AND kind = ? AND attempt < ? "

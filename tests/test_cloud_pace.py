@@ -12,7 +12,7 @@ import pytest
 
 from pasar.cloud.cost import estimate, hourly_rate
 from pasar.cloud.executor import parse_unit
-from pasar.cloud.pace import MIN_OBSERVATION, needs_more_time
+from pasar.cloud.pace import MIN_OBSERVATION, MIN_REPORTS, needs_more_time
 from pasar.daemon import Conflict
 from pasar.models import JobSpec, State
 from pasar.views import job_view
@@ -21,6 +21,23 @@ from pasar.views import job_view
 def emit(daemon, job_id, **event):
     with (daemon.job_dir(job_id) / "events.jsonl").open("a") as f:
         f.write(json.dumps(event) + "\n")
+
+
+def steady_reports(daemon, clock, job_id, t0, step, total, over):
+    """Land `MIN_REPORTS` progress reports along one steady line: `step` of `total` steps in
+    `over` seconds, the last landing exactly `over` seconds into the attempt that started at `t0`.
+
+    Only the latest report sets the projected pace (`eta.progress_remaining` measures from the
+    attempt's start to the last report), so the earlier ones sit on that same line and leave every
+    projection below unchanged. They are here because one report is not a pace: a verdict needs
+    `MIN_REPORTS` of them."""
+    for i in range(1, MIN_REPORTS + 1):
+        clock.t = t0 + over * i / MIN_REPORTS
+        event = {"event": "progress", "step": round(step * i / MIN_REPORTS)}
+        if total is not None:
+            event["total_steps"] = total
+        emit(daemon, job_id, **event)
+        daemon.tick()
 
 
 # ---- the pure projection, against plain local jobs
@@ -37,12 +54,28 @@ def test_no_verdict_before_enough_observation(daemon, clock, make_spec):
     assert needs_more_time(daemon.store, job, atts, clock(), 600) is None
 
 
+def test_no_verdict_from_a_single_report(daemon, clock, make_spec):
+    # One report is one data point. A reporting bug or a botched resume (step 1 of a million,
+    # long into the run) clears the observation window on its own and looks exactly like a job
+    # genuinely crawling — and the projection it implies would size an extension somebody is
+    # asked to approve. Until the attempt has a cadence, there is no verdict.
+    daemon.submit(make_spec(est_runtime=600))
+    daemon.tick()
+    clock.advance(1000)
+    emit(daemon, 1, event="progress", step=1, total_steps=1_000_000)
+    daemon.tick()
+    clock.advance(400)  # well past the observation window, still only one report
+    job = daemon.job(1)
+    atts = daemon.store.attempts(1)
+    assert clock() - daemon.store.first_event(1, "progress", 1)["ts"] > MIN_OBSERVATION
+    assert daemon.store.count_events(1, "progress", 1) < MIN_REPORTS
+    assert needs_more_time(daemon.store, job, atts, clock(), 600) is None
+
+
 def test_projects_an_overrun_from_the_jobs_own_pace(daemon, clock, make_spec):
     daemon.submit(make_spec(est_runtime=600))
     daemon.tick()  # attempt starts at t0
-    clock.advance(400)
-    emit(daemon, 1, event="progress", step=1000, total_steps=5000)
-    daemon.tick()  # first report, at t0 + 400
+    steady_reports(daemon, clock, 1, clock.t, step=1000, total=5000, over=400)
     clock.advance(320)  # past the 300s observation window
     job = daemon.job(1)
     atts = daemon.store.attempts(1)
@@ -55,9 +88,8 @@ def test_projects_an_overrun_from_the_jobs_own_pace(daemon, clock, make_spec):
 def test_no_overrun_when_the_job_is_ahead_of_its_estimate(daemon, clock, make_spec):
     daemon.submit(make_spec(est_runtime=3600))
     daemon.tick()
-    clock.advance(400)
-    emit(daemon, 1, event="progress", step=4000, total_steps=5000)  # way ahead of pace
-    daemon.tick()
+    # way ahead of pace: 4000 of 5000 steps in 400s
+    steady_reports(daemon, clock, 1, clock.t, step=4000, total=5000, over=400)
     clock.advance(320)
     job = daemon.job(1)
     atts = daemon.store.attempts(1)
@@ -69,9 +101,7 @@ def test_no_verdict_from_an_estimate_only_projection(daemon, clock, make_spec):
     # there is no pace of the job's own to project from, so there is nothing to warn about.
     daemon.submit(make_spec(est_runtime=60))
     daemon.tick()
-    clock.advance(400)
-    emit(daemon, 1, event="progress", step=10)
-    daemon.tick()
+    steady_reports(daemon, clock, 1, clock.t, step=10, total=None, over=400)
     clock.advance(320)
     job = daemon.job(1)
     atts = daemon.store.attempts(1)
@@ -81,9 +111,7 @@ def test_no_verdict_from_an_estimate_only_projection(daemon, clock, make_spec):
 def test_no_verdict_once_the_attempt_has_ended(daemon, clock, make_spec, executor):
     daemon.submit(make_spec(est_runtime=600))
     daemon.tick()
-    clock.advance(400)
-    emit(daemon, 1, event="progress", step=1000, total_steps=5000)
-    daemon.tick()
+    steady_reports(daemon, clock, 1, clock.t, step=1000, total=5000, over=400)
     clock.advance(320)
     executor.exit("pasar-job-1-1", code=0)
     daemon.tick()
@@ -114,12 +142,12 @@ def handle_of(daemon, job_id):
 
 
 def lag_the_job(daemon, clock, job_id):
-    """Report pace slow enough, and long enough ago, to project a large overrun: 1000 of 5000
-    steps in 400s, observed 320s past the 300s threshold. Mirrors the pure projection tests
-    above, so the same arithmetic (1400s over a 900s window) applies here too."""
-    clock.advance(400)
-    emit(daemon, job_id, event="progress", step=1000, total_steps=5000)
-    daemon.tick()
+    """Report pace slow enough, often enough and long enough ago to project a large overrun:
+    `MIN_REPORTS` reports on the line 1000 of 5000 steps in 400s, the last read 320s past the
+    300s threshold. Mirrors the pure projection tests above, so the same arithmetic (a 2000s
+    projected attempt against a 900s window) applies here too."""
+    att = daemon.store.current_attempt(job_id)
+    steady_reports(daemon, clock, job_id, att.start_time, step=1000, total=5000, over=400)
     clock.advance(320)
     daemon.tick()
 

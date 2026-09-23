@@ -6,6 +6,7 @@ from fastapi.testclient import TestClient
 
 from pasar import api
 from pasar.api import create_app
+from pasar.cloud.pace import MIN_REPORTS
 from pasar.units import GiB
 
 
@@ -409,12 +410,17 @@ def test_lower_max_cost_becomes_the_enforced_ceiling(client, cloud_daemon, cloud
 
 
 def _lag(cloud_daemon, clock, job_id):
-    """Report pace slow enough, and observed long enough, to project a large overrun: 1000 of
-    5000 steps in 400s, read 320s past the 300s observation threshold."""
-    clock.advance(400)
-    with (cloud_daemon.job_dir(job_id) / "events.jsonl").open("a") as f:
-        f.write(json.dumps({"event": "progress", "step": 1000, "total_steps": 5000}) + "\n")
-    cloud_daemon.tick()
+    """Report pace slow enough, often enough and observed long enough to project a large overrun:
+    MIN_REPORTS reports on the line 1000 of 5000 steps in 400s, the last read 320s past the 300s
+    observation threshold. Only the last report sets the pace, so the earlier ones on the same
+    line just supply the cadence a verdict needs."""
+    t0 = cloud_daemon.store.current_attempt(job_id).start_time
+    for i in range(1, MIN_REPORTS + 1):
+        clock.t = t0 + 400 * i / MIN_REPORTS
+        with (cloud_daemon.job_dir(job_id) / "events.jsonl").open("a") as f:
+            f.write(json.dumps({"event": "progress", "step": round(1000 * i / MIN_REPORTS),
+                                "total_steps": 5000}) + "\n")
+        cloud_daemon.tick()
     clock.advance(320)
     cloud_daemon.tick()
 

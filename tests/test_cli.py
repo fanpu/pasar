@@ -6,6 +6,7 @@ from fastapi.testclient import TestClient
 
 from pasar.api import create_app
 from pasar.cli import ApiError, base_url, call, main, wait_code
+from pasar.cloud.pace import MIN_REPORTS
 
 
 @pytest.fixture
@@ -356,10 +357,16 @@ def test_show_and_cloud_surface_a_job_that_needs_more_time(client, capsys, cloud
     job_id = cloud_daemon.job(1).id
     cloud_daemon.approve(job_id)
     cloud_daemon.tick()  # the attempt starts now
-    cloud_daemon.clock.advance(400)
-    with (cloud_daemon.job_dir(job_id) / "events.jsonl").open("a") as f:
-        f.write(json.dumps({"event": "progress", "step": 1000, "total_steps": 5000}) + "\n")
-    cloud_daemon.tick()  # the report lands 400s in: far behind the 10m estimate's pace
+    # Three reports on one line: 1000 of 5000 steps in 400s, far behind the 10m estimate's pace.
+    # One report is never a pace (pasar.cloud.pace.MIN_REPORTS), and only the last of them sets
+    # the projection.
+    t0 = cloud_daemon.store.current_attempt(job_id).start_time
+    for i in range(1, MIN_REPORTS + 1):
+        cloud_daemon.clock.t = t0 + 400 * i / MIN_REPORTS
+        with (cloud_daemon.job_dir(job_id) / "events.jsonl").open("a") as f:
+            f.write(json.dumps({"event": "progress", "step": round(1000 * i / MIN_REPORTS),
+                                "total_steps": 5000}) + "\n")
+        cloud_daemon.tick()
     cloud_daemon.clock.advance(320)  # past the 300s observation window
     cloud_daemon.tick()
 
