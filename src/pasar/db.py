@@ -312,8 +312,10 @@ class Store:
     # approvals
     def add_approval(self, job_id: int, attempt: int, ts: float, estimated_cost: float | None,
                      max_cost: float | None) -> None:
-        """Who let this attempt run, and at what price. One row per attempt, kept for the record:
-        a paused or reclaimed job needs approving again, so each attempt has its own."""
+        """What this attempt was approved to cost: the estimate it was approved against and the
+        ceiling that approval buys, which the launch is held to. One row per attempt: a paused or
+        reclaimed job needs approving again, so each attempt has its own. No approver is
+        recorded — pasard has no authentication, so there is nobody to name."""
         self._x("INSERT OR REPLACE INTO approvals (job_id, attempt, ts, estimated_cost, max_cost)"
                 " VALUES (?, ?, ?, ?, ?)", (job_id, attempt, ts, estimated_cost, max_cost))
 

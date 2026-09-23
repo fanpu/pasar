@@ -406,6 +406,37 @@ def test_a_running_job_is_counted_once_against_the_budget(make_cloud, repo, cloc
     assert len(provider.boxes) == 2
 
 
+def test_a_price_above_the_approved_ceiling_is_not_launched(cloud, repo, monkeypatch, clock):
+    # The launch re-prices from the live rates; what a person agreed to pay is the approval's
+    # ceiling, so a rate rise between the two has to go back to them rather than be charged.
+    daemon, provider = cloud
+    job = daemon.submit(cloud_spec(repo))
+    daemon.approve(job.id)
+    ceiling = daemon.store.approvals(job.id)[0]["max_cost"]
+    monkeypatch.setattr(provider, "rates", lambda: {"gpu_hour_cost_h100": 7.90,
+                                                    "cpu_hour_cost_sandbox": 0.14,
+                                                    "mem_gib_hour_cost_sandbox": 0.024})
+    clock.advance(60)
+    daemon.tick()
+    job = daemon.job(job.id)
+    assert job.state == State.AWAITING and job.reason == "price_rose"
+    assert job.queue_time == clock.t  # it waits for approval afresh
+    assert provider.boxes == {} and daemon.store.cloud_spend("fake") == []
+    events = [e for e in daemon.store.machine_events() if e["kind"] == "price_rise"]
+    assert len(events) == 1 and f"{ceiling:.2f}" in events[0]["text"]
+    daemon.approve(job.id)  # approving at the new price runs it
+    daemon.tick()
+    assert daemon.job(job.id).state == State.RUNNING
+    assert daemon.store.cloud_spend("fake")[0]["estimated"] > ceiling
+
+
+def test_a_steady_price_launches_at_the_approved_figure(cloud, repo):
+    daemon, _ = cloud
+    job_id = start(daemon, repo)
+    assert daemon.store.cloud_spend("fake")[0]["estimated"] == pytest.approx(
+        daemon.store.approvals(job_id)[0]["max_cost"])
+
+
 def test_concurrency_cap_holds_the_rest_of_the_queue(make_cloud, repo):
     daemon, provider = make_cloud(max_running=1)
     start(daemon, repo)

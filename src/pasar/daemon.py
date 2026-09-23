@@ -38,6 +38,7 @@ ACTIVE = (State.RUNNING, State.STOPPING)
 LOCAL = "local"
 _BASE_ENV_KEYS = ("PATH", "HOME", "USER", "LANG", "SHELL")
 PAUSE_LIMIT = 5  # attempts a cloud job may end `paused` before it has to be submitted afresh
+PRICE_TOLERANCE = 1e-6  # dollars of float noise, which is not a price rise
 USAGE_HISTORY = 1800  # samples per job (an hour at the default 2s tick), current attempt only
 RECENT = 86400  # matches api.RECENT: usage_history for jobs finished longer ago than this is dropped
 
@@ -277,7 +278,9 @@ class Daemon:
 
     def approve(self, job_id: int) -> Job:
         """Let one attempt run, at today's price. Approval is per attempt: a paused or reclaimed
-        job comes back here rather than straight to the queue."""
+        job comes back here rather than straight to the queue. The row records the price only —
+        the estimate and the ceiling the launch is held to — because pasard has no
+        authentication and there is nobody to name as the approver."""
         job = self.job(job_id)
         if job.state != State.AWAITING:
             raise Conflict(f"job {job_id} is {job.state}, not awaiting approval")
@@ -711,6 +714,23 @@ class Daemon:
                    PASAR_GRACE_SECONDS=str(job.spec.grace))
         return env
 
+    def _over_the_approval(self, job: Job, n: int, price: float, now: float) -> bool:
+        """Whether this attempt now costs more than the approval for it allowed. The launch
+        prices from live rates, and a rate that moved between the two is a price nobody agreed
+        to: send the job back for approval rather than spend it."""
+        ceiling = next((r["max_cost"] for r in self.store.approvals(job.id)
+                        if r["attempt"] == n), None)
+        if ceiling is None or price <= ceiling + PRICE_TOLERANCE:
+            return False
+        self.store.add_machine_event(
+            now, "price_rise", f"job {job.id} was approved at up to ${ceiling:.2f} for this run "
+            f"but now costs ${price:.2f}; it is waiting for approval again")
+        self.store.update_job(
+            job.id, state=State.AWAITING, queue_time=now, reason="price_rose",
+            summary=f"the price rose to ${price:.2f}, above the ${ceiling:.2f} approved for this "
+                    "run; approve it again to run at the new price")
+        return True
+
     def _launch_cloud(self, job: Job, target: CloudTarget, ex: CloudExecutor, now: float) -> None:
         prior = self.store.attempts(job.id)
         n = len(prior) + 1
@@ -720,11 +740,17 @@ class Daemon:
             bundle = self._read_bundle(d)
             env = self._cloud_env(d, job, target, n)
             price = self._cost(target, job.spec.gpu, self._approved_seconds(job.spec, target))
+        except (OSError, ValueError, KeyError) as e:
+            self._fail_launch(job, n, pending, now, str(e))
+            return
+        if self._over_the_approval(job, n, price, now):
+            return
+        try:
             _write_private(d / "launch.json", json.dumps(
                 {"command": job.spec.command, "cwd": job.spec.cwd, "env": env}))
             with (d / "output.log").open("a") as f:
                 f.write(_separator(n, now, prior[-1] if prior else None))
-        except (OSError, ValueError, KeyError) as e:
+        except (OSError, ValueError) as e:
             self._fail_launch(job, n, pending, now, str(e))
             return
         try:
