@@ -148,6 +148,21 @@ def test_committed_treats_a_non_positive_est_runtime_as_full_estimate(store, led
     assert ledger.committed("modal") == pytest.approx(4.0)
 
 
+def test_committed_can_price_one_attempt_at_a_figure_not_yet_written(store, ledger, clock):
+    """What an extension needs to ask before it writes anything: the new ceiling replaces this
+    attempt's commitment rather than adding a second one beside it."""
+    j1 = store.insert_job(spec(est_runtime=3600), 1000, clock(), None)
+    j2 = store.insert_job(spec(est_runtime=3600), 1000, clock(), None)
+    store.insert_attempt(Attempt(j1, 1, "cloud:modal:sb-1", clock()))
+    store.insert_attempt(Attempt(j2, 1, "cloud:modal:sb-2", clock()))
+    ledger.record("modal", j1, 1, 4.0)
+    ledger.record("modal", j2, 1, 1.0)
+    assert ledger.committed("modal") == pytest.approx(5.0)
+    assert ledger.committed("modal", replacing=(j1, 1, 9.0)) == pytest.approx(10.0)
+    assert ledger.committed("modal", replacing=(j1, 2, 9.0)) == pytest.approx(5.0)  # another
+    assert ledger.committed("modal") == pytest.approx(5.0)  # asking changes nothing
+
+
 def test_committed_ignores_finished_attempts(store, ledger, clock):
     j = store.insert_job(spec(est_runtime=3600), 1000, clock(), None)
     store.insert_attempt(Attempt(j, 1, "cloud:modal:sb-1", clock(), end_time=clock() + 100))

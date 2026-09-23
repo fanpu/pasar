@@ -59,26 +59,35 @@ class Ledger:
         attempt = self.store.current_attempt(row["job_id"])
         return attempt is not None and attempt.n == row["attempt"] and attempt.end_time is None
 
-    def committed(self, target: str) -> float:
+    def committed(self, target: str, replacing: tuple[int, int, float] | None = None) -> float:
         """Dollars still to come from `target`'s running jobs. Each running attempt contributes
         at least its recorded estimate — it is still billing, so its estimate is never money
         already accounted for — and more once elapsed time against its own runtime estimate
         says it has run past that: `elapsed/est_runtime` is the best proxy this has for money
         already burnt, and a spend gate that under-counts a runaway job is worse than one that
         over-counts a job about to finish on time. A job with no useful pace information (a
-        non-positive `est_runtime`) contributes its full estimate rather than nothing."""
+        non-positive `est_runtime`) contributes its full estimate rather than nothing.
+
+        `replacing` is `(job_id, attempt, estimated)`: price that one attempt at the given figure
+        instead of the one on its row, so a caller can ask what the total *would* be before
+        writing anything. Raising a running attempt's ceiling replaces that attempt's commitment
+        rather than adding a second one beside it, so adding the new figure to `committed()`
+        would count the attempt twice and refuse extensions the budget could well afford."""
         total = 0.0
         for row in self.store.cloud_spend(target):
             if not self._open(row):
                 continue
+            estimated = row["estimated"]
+            if replacing is not None and (row["job_id"], row["attempt"]) == replacing[:2]:
+                estimated = replacing[2]
             job = self.store.get_job(row["job_id"])
             attempt = self.store.current_attempt(row["job_id"])
             est_runtime = job.spec.est_runtime
             if est_runtime <= 0:
-                total += row["estimated"]
+                total += estimated
                 continue
             elapsed = self.clock() - attempt.start_time
-            total += max(row["estimated"], row["estimated"] * elapsed / est_runtime)
+            total += max(estimated, estimated * elapsed / est_runtime)
         return total
 
     def spent_day(self, target: str) -> float:

@@ -322,8 +322,8 @@ class Daemon:
         extended once and still falling further behind can be extended again — nothing here caps
         how many times, only how far past `--max-cost` any single call may reach.
 
-        Bounded by two ceilings, and refused rather than quietly trimmed when either binds, so
-        nobody is told a job was extended when it was not:
+        Bounded by three ceilings, and refused rather than quietly trimmed when any of them binds,
+        so nobody is told a job was extended when it was not:
 
         - the target's own `max_runtime`, which is the limit the sandbox itself is launched with
           (`_launch_cloud`): time past it cannot be run at any price, and a projection that asks
@@ -338,6 +338,10 @@ class Daemon:
         job whose cap is already what is binding its ceiling has nothing left to extend into — the
         message says so plainly and points at resubmitting with a higher cap instead of leaving
         the person to discover it when the extension appears to do nothing.
+
+        Refused past the target's own daily and monthly budgets (`_afford_extension`), which a
+        first approval also has to clear on its way through the lane: a bigger commitment made
+        here is money taken from every other job on the target, so it goes through the same gate.
 
         The ledger is told the same new ceiling (`ledger.record`, the same call `_launch_cloud`
         makes): a longer approved run is a bigger commitment, and the budget gate that reads
@@ -389,6 +393,7 @@ class Daemon:
                 f"${job.spec.max_cost:.2f} --max-cost it was submitted with; that cap is what is "
                 "binding, so it cannot be extended past it — submit it again with a higher "
                 "--max-cost if it should be allowed to run longer")
+        self._afford_extension(target, job_id, att.n, new_cost)
         self.store.add_approval(job_id, att.n, now, new_cost, new_cost, rate)
         self.ledger.record(target.name, job_id, att.n, new_cost)
         note = (f"extended to {fmt_duration(new_seconds)} of run time, up to ${new_cost:.2f} at "
@@ -399,6 +404,31 @@ class Daemon:
         self.store.update_job(job_id, summary=note)
         self.changed()
         return self.job(job_id)
+
+    def _afford_extension(self, target: CloudTarget, job_id: int, n: int, cost: float) -> None:
+        """Refuse an extension the target's budgets cannot pay for.
+
+        A first approval passes the same two budgets on its way through the lane
+        (`decide_cloud`); without this, the second and much larger commitment would be the one
+        that walked past them, quietly taking the room every other job on the target is held to.
+        Approval can't override the budget, and neither can an extension.
+
+        `committed(replacing=…)` prices this attempt at the new ceiling *instead of* the one it
+        already promised, because an extension replaces that commitment rather than adding to it
+        — adding the two would refuse extensions the budget could comfortably afford."""
+        after = self.ledger.committed(target.name, replacing=(job_id, n, cost))
+        day = self.ledger.settled_day(target.name)
+        month = self.ledger.settled_month(target.name)
+        for total, spent, budget, period in ((day + after, day, target.daily_budget, "daily"),
+                                             (month + after, month, target.monthly_budget,
+                                              "monthly")):
+            if total > budget + PRICE_TOLERANCE:
+                raise Conflict(
+                    f"extending job {job_id} to ${cost:.2f} would commit ${total:.2f} against "
+                    f"{target.name}'s ${budget:.2f} {period} budget (${spent:.2f} already "
+                    f"settled, ${after:.2f} committed by jobs still running), so it cannot be "
+                    "extended that far — raise the budget, or let it pause at its approved time "
+                    "and approve it again once there is room")
 
     def _write_bundle(self, d: Path, bundle: Bundle) -> None:
         (d / "bundle.json").write_text(json.dumps({

@@ -325,6 +325,54 @@ def test_extending_refuses_to_reach_past_the_targets_own_limit(cloud_daemon, clo
     assert cloud_provider.stopped == []
 
 
+def test_extending_refuses_to_walk_past_the_targets_daily_budget(cloud_daemon, cloud_provider,
+                                                                  cloud_cwd, clock):
+    # A first approval clears the target's budgets on its way through the lane; without the same
+    # gate here, the second and much larger commitment is the one that walks past them, taking
+    # the room every other job on the target is held to.
+    daemon = cloud_daemon
+    job_id = start(daemon, cloud_cwd)
+    lag_the_job(daemon, clock, job_id)
+    committed = daemon.ledger.committed("fake")
+    daemon.cfg.clouds["fake"].daily_budget = committed + 0.10
+    before = dict(daemon.store.approvals(job_id)[0])
+
+    with pytest.raises(Conflict, match="daily budget") as excinfo:
+        daemon.approve(job_id, extend=True)
+    assert f"${daemon.cfg.clouds['fake'].daily_budget:.2f} daily budget" in str(excinfo.value)
+
+    assert dict(daemon.store.approvals(job_id)[0]) == before
+    assert daemon.ledger.committed("fake") == pytest.approx(committed)
+    assert daemon.job(job_id).state == State.RUNNING
+    assert cloud_provider.stopped == []
+
+
+def test_extending_refuses_to_walk_past_the_targets_monthly_budget(cloud_daemon, cloud_cwd,
+                                                                    clock):
+    daemon = cloud_daemon
+    job_id = start(daemon, cloud_cwd)
+    lag_the_job(daemon, clock, job_id)
+    committed = daemon.ledger.committed("fake")
+    daemon.cfg.clouds["fake"].monthly_budget = committed + 0.10  # the daily one stays generous
+    before = dict(daemon.store.approvals(job_id)[0])
+
+    with pytest.raises(Conflict, match="monthly budget"):
+        daemon.approve(job_id, extend=True)
+    assert dict(daemon.store.approvals(job_id)[0]) == before
+
+
+def test_an_extension_the_budget_can_afford_still_goes_through(cloud_daemon, cloud_cwd, clock):
+    # The new ceiling replaces this attempt's commitment rather than adding to it: a gate that
+    # summed the two would refuse extensions the budget covers twice over.
+    daemon = cloud_daemon
+    job_id = start(daemon, cloud_cwd)
+    lag_the_job(daemon, clock, job_id)
+    before = daemon.ledger.committed("fake")
+    daemon.approve(job_id, extend=True)
+    after = daemon.ledger.committed("fake")
+    assert before < after < daemon.cfg.clouds["fake"].daily_budget
+
+
 def test_extending_when_nothing_is_overdue_is_refused(cloud_daemon, cloud_cwd):
     daemon = cloud_daemon
     job_id = start(daemon, cloud_cwd)
