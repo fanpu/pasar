@@ -260,7 +260,8 @@ noticed before the limit.
 
 ## What Modal does (measured)
 
-Checked against Modal 1.5.5 with short sandboxes on 2026-09-22, since the design leans on these:
+Checked against Modal 1.5.5 with short sandboxes on 2026-09-22 and 2026-09-23 (CPU first, then a
+T4), since the design leans on these:
 
 | Question | Answer |
 |---|---|
@@ -269,11 +270,16 @@ Checked against Modal 1.5.5 with short sandboxes on 2026-09-22, since the design
 | Graceful stop | `Sandbox.exec("bash", "-c", "kill -TERM 1")` reaches the wrapper: a trap ran, the grace sleep completed, and the sandbox exited 143. |
 | Finding jobs after a restart | `Sandbox.list(tags={"pasar_job": …})` returns live sandboxes with their tags. |
 | Telling a provider kill from our own | Not from the exit code: a terminated sandbox reports 137 either way, and `terminate(wait=True)` returns it. pasar relies on its own record of whether it asked, so an unexplained 137 is a reclaim (`cloud_preempted`). |
-| Rates | `Workspace.from_context().billing.rates()` gives per-hour prices, e.g. `gpu_hour_cost_l40s` and `mem_gib_hour_cost_sandbox`, so cost estimates come from live prices rather than a config table. |
+| Rates | `Workspace.from_context().billing.rates()` gives per-hour prices (`gpu_hour_cost_t4` 0.59, `gpu_hour_cost_l40s` 1.95, plus `cpu_hour_cost_sandbox` 0.1419 and `mem_gib_hour_cost_sandbox` 0.024), so cost estimates come from live prices rather than a config table, and must include the CPU and memory parts, not just the GPU. |
 | Billed cost | `workspace.billing.report(start=…, resolution="h", tag_names=["*"])` per object, and `billing.summary()` gives month-to-date cost, which is what the monthly budget meter should use. (The module-level `modal.billing.workspace_billing_report` is deprecated.) |
 | Spending limit | Not in the SDK: `settings.valid_settings()` lists only `default-environment` and `image-builder-version`. So pasar can't read or verify a workspace spending limit; setup docs must tell you to set one in the Modal dashboard. |
 | Environment build | A container-side `uv sync --frozen --no-install-project` over a copied lockfile works and is cached across runs (a rebuild with warm layers took ~6 s). `Image.uv_sync()` raises "uv workspaces are not supported". |
-| GPUs | **Blocked on this account**: `Please add a payment method to use T4 GPU sandboxes.` Everything above was measured on CPU sandboxes; the GPU path (`nvidia-smi` sampling, real GPU cost) is still unverified. |
+| GPUs | Work once the workspace has a payment method. A T4 sandbox came up with driver 580.95.05 and 15360 MiB. |
+| Start-up | With a warm image: `Sandbox.create` returned in 5.2 s, first output at 8.4 s. A cold image build is the slow case and shows as its own phase. |
+| Telemetry | `nvidia-smi --query-gpu=index,utilization.gpu,memory.used,memory.total,power.draw,temperature.gpu` works inside the sandbox, so the wrapper can sample it and emit control lines. No provider API needed. |
+| Graceful stop under GPU | Same as CPU: SIGTERM, the trap wrote a checkpoint to the volume, exit 143, all within 1.5 s. |
+| Persist volume | A checkpoint written in the container was readable from the local machine right after (`Volume.listdir` / `read_file`), which is what `pasar pull` needs. `copy_files` covers `--resume-from` and `batch_upload` covers `--data`. (`Volume.reload()` only works inside a container; the local client doesn't need it.) |
+| Billed cost lag | A finished sandbox had not appeared in `billing.report(resolution="h")` ~20 s later, so billed numbers arrive late. The live estimate from rates is what the UI shows until they land; reconciliation runs on a timer. |
 
 ## The wrapper protocol
 
