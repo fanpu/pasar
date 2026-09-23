@@ -129,3 +129,55 @@ def test_env_key_is_stable_and_changes_with_lock_contents(tmp_path):
 def test_platform_check_passes_for_this_repo():
     from pasar.cloud.bundle import check_platform
     check_platform(".")            # pasar's own lock resolves for x86_64
+
+
+def test_env_spec_includes_workspace_members(tmp_path):
+    repo = git_repo(tmp_path / "repo")
+    (repo / "pyproject.toml").write_text(
+        '[project]\nname = "x"\nversion = "0"\n\n'
+        '[tool.uv.workspace]\nmembers = ["packages/*"]\n')
+    member = repo / "packages" / "inner"
+    member.mkdir(parents=True)
+    (member / "pyproject.toml").write_text('[project]\nname = "inner"\nversion = "0"\n')
+    subprocess.run(["git", "-C", str(repo), "add", "-A"], check=True)
+
+    b = build_bundle(str(repo), tmp_path / "b.tar", 1 << 20)
+
+    assert "packages/inner/pyproject.toml" in b.env.files
+    assert b.env.files["packages/inner/pyproject.toml"].startswith(b'[project]')
+
+
+def test_env_spec_includes_the_readme_pyproject_names(tmp_path):
+    repo = git_repo(tmp_path / "repo")
+    (repo / "pyproject.toml").write_text(
+        '[project]\nname = "x"\nversion = "0"\nreadme = "docs/INTRO.md"\n')
+    (repo / "docs").mkdir()
+    (repo / "docs" / "INTRO.md").write_text("hello")
+    subprocess.run(["git", "-C", str(repo), "add", "-A"], check=True)
+
+    b = build_bundle(str(repo), tmp_path / "b.tar", 1 << 20)
+
+    assert b.env.files["docs/INTRO.md"] == b"hello"
+
+
+def test_env_key_ignores_files_uv_never_reads(tmp_path):
+    """The image cache key must not move when unrelated code changes, or every edit pays for a
+    fresh multi-minute environment build."""
+    repo = git_repo(tmp_path / "repo")
+    first = build_bundle(str(repo), tmp_path / "a.tar", 1 << 20).env.key
+    (repo / "train.py").write_text("print('changed')")
+    subprocess.run(["git", "-C", str(repo), "add", "-A"], check=True)
+    second = build_bundle(str(repo), tmp_path / "b.tar", 1 << 20).env.key
+    assert first == second
+
+
+def test_missing_workspace_member_fails_at_submit(tmp_path):
+    """A lockfile that cannot resolve must fail here, where it costs nothing, not in a paid
+    image build."""
+    repo = git_repo(tmp_path / "repo")
+    (repo / "pyproject.toml").write_text(
+        '[project]\nname = "x"\nversion = "0"\n\n'
+        '[tool.uv.workspace]\nmembers = ["packages/gone"]\n')
+    subprocess.run(["git", "-C", str(repo), "add", "-A"], check=True)
+    with pytest.raises(BundleError, match="packages/gone"):
+        build_bundle(str(repo), tmp_path / "b.tar", 1 << 20)

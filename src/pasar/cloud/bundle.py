@@ -4,8 +4,9 @@ import hashlib
 import os
 import subprocess
 import tarfile
+import tomllib
 from dataclasses import dataclass
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 LOCK_FILES = ("pyproject.toml", "uv.lock", ".python-version")
 
@@ -57,6 +58,89 @@ def _list_files(cwd: str) -> list[str]:
     return names
 
 
+def _referenced(root: Path, rel: str, data: bytes) -> list[str]:
+    """Paths a pyproject names that uv reads while it resolves: the readme (uv builds the root
+    project's metadata even under --no-install-project) and a license file. Anything unparsable
+    contributes nothing — a broken pyproject is uv's error to report, with uv's message."""
+    try:
+        table = tomllib.loads(data.decode("utf-8"))
+    except (ValueError, UnicodeDecodeError):
+        return []
+    project = table.get("project") or {}
+    named = []
+    for key in ("readme", "license-files", "license"):
+        value = project.get(key)
+        if isinstance(value, str):
+            named.append(value)
+        elif isinstance(value, dict) and isinstance(value.get("file"), str):
+            named.append(value["file"])
+        elif isinstance(value, list):
+            named.extend(v for v in value if isinstance(v, str))
+    base = PurePosixPath(rel).parent
+    out = []
+    for name in named:
+        # A license can be an SPDX expression ("MIT") rather than a path; only keep the ones
+        # that are really files, and never one that points outside the repository.
+        path = (base / name) if str(base) != "." else PurePosixPath(name)
+        if ".." in path.parts:
+            continue
+        if (root / path).is_file():
+            out.append(str(path))
+    return out
+
+
+def _members(root: Path, data: bytes) -> list[str]:
+    """Every workspace member's pyproject, resolved from the globs uv itself resolves. A member
+    glob that matches a directory without a pyproject.toml is uv's own error case, so it is
+    raised here rather than left for a paid image build to discover."""
+    try:
+        table = tomllib.loads(data.decode("utf-8"))
+    except (ValueError, UnicodeDecodeError):
+        return []
+    workspace = (table.get("tool") or {}).get("uv", {}).get("workspace") or {}
+    excluded = set()
+    for pattern in workspace.get("exclude") or []:
+        excluded.update(str(p.relative_to(root)) for p in root.glob(pattern))
+    found = []
+    for pattern in workspace.get("members") or []:
+        matches = sorted(p for p in root.glob(pattern) if p.is_dir())
+        if not matches:
+            raise BundleError(f"this project's uv workspace lists {pattern!r}, which matches "
+                              "nothing, so its lockfile cannot be used in the cloud")
+        for path in matches:
+            rel = str(path.relative_to(root))
+            if rel in excluded:
+                continue
+            if not (path / "pyproject.toml").is_file():
+                raise BundleError(f"uv workspace member {rel} has no pyproject.toml, so this "
+                                  "project's lockfile cannot be used in the cloud")
+            found.append(f"{rel}/pyproject.toml")
+    return found
+
+
+def _env_files(root: Path) -> dict[str, bytes]:
+    """Everything a container-side `uv sync --frozen --no-install-project` reads, keyed by its
+    path relative to the repository root. This set — and only this set — decides the image cache
+    key, so a code change never invalidates a multi-minute environment build, and a dependency
+    change always does."""
+    files: dict[str, bytes] = {}
+    for name in LOCK_FILES:
+        path = root / name
+        if path.is_file():
+            files[name] = path.read_bytes()
+    if "uv.lock" not in files:
+        raise BundleError(f"cloud jobs need a uv.lock next to pyproject.toml in {root}")
+    pending = [name for name in files if name.endswith("pyproject.toml")]
+    for rel in _members(root, files["pyproject.toml"]) if "pyproject.toml" in files else []:
+        files[rel] = (root / rel).read_bytes()
+        pending.append(rel)
+    for rel in pending:
+        for extra in _referenced(root, rel, files[rel]):
+            if extra not in files:
+                files[extra] = (root / extra).read_bytes()
+    return files
+
+
 def build_bundle(cwd: str, dest: Path, max_bytes: int) -> Bundle:
     try:
         root = _git(cwd, "rev-parse", "--show-toplevel").strip()
@@ -65,13 +149,7 @@ def build_bundle(cwd: str, dest: Path, max_bytes: int) -> Bundle:
     root_path = Path(root).resolve()
     rel_cwd = str(Path(cwd).resolve().relative_to(root_path))
     listed = _list_files(cwd)
-    env_files = {}
-    for name in LOCK_FILES:
-        f = root_path / name
-        if f.exists():
-            env_files[name] = f.read_bytes()
-    if "uv.lock" not in env_files:
-        raise BundleError(f"cloud jobs need a uv.lock next to pyproject.toml in {root}")
+    env_files = _env_files(root_path)
     sizes = {}
     for name in listed:
         path = root_path / name
