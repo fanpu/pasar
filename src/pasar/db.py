@@ -103,9 +103,14 @@ CREATE TABLE IF NOT EXISTS pulls (
     files INTEGER,
     bytes INTEGER,
     remote_deleted INTEGER NOT NULL DEFAULT 0,
-    error TEXT
+    error TEXT,
+    auto INTEGER NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS pulls_job ON pulls(job_id);
+CREATE TABLE IF NOT EXISTS cloud_finished (
+    job_id INTEGER PRIMARY KEY,
+    ts REAL NOT NULL
+);
 """
 
 _JOB_UPDATABLE = {"spec", "state", "bid", "queue_time", "retries_used", "reason", "summary",
@@ -382,21 +387,23 @@ class Store:
 
     # pulls
     def add_pull(self, job_id: int, ts: float, dest: str | None, files: int | None,
-                 size: int | None, remote_deleted: bool, error: str | None) -> None:
-        """One outcome of one pull of a cloud job's persist dir, manual or automatic. `files` and
-        `size` (the `bytes` column) are what landed locally, verified — NULL when nothing did,
-        which is how a refusal or a failure reads; 0 and 0 when the job left nothing to pull.
-        `error` may be set on a row that did land: a verified local copy whose remote one could
-        not then be deleted."""
-        self._x("INSERT INTO pulls (job_id, ts, dest, files, bytes, remote_deleted, error)"
-                " VALUES (?, ?, ?, ?, ?, ?, ?)",
-                (job_id, ts, dest, files, size, int(remote_deleted), error))
+                 size: int | None, remote_deleted: bool, error: str | None,
+                 auto: bool = False) -> None:
+        """One outcome of one pull of a cloud job's persist dir, `auto` for the automatic one.
+        `files` and `size` (the `bytes` column) are what landed locally, verified — NULL when
+        nothing did, which is how a refusal or a failure reads; 0 and 0 when the provider showed
+        nothing to pull. `error` may be set on a row that did land: a verified local copy whose
+        remote one could not then be deleted."""
+        self._x("INSERT INTO pulls (job_id, ts, dest, files, bytes, remote_deleted, error, auto)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                (job_id, ts, dest, files, size, int(remote_deleted), error, int(auto)))
 
     @staticmethod
     def _pull(row: sqlite3.Row) -> dict:
         d = dict(row)
         d.pop("id")
         d["remote_deleted"] = bool(d["remote_deleted"])
+        d["auto"] = bool(d["auto"])
         return d
 
     def pulls(self, job_id: int) -> list[dict]:
@@ -404,10 +411,34 @@ class Store:
         return [self._pull(r) for r in rows]
 
     def last_pull(self, job_id: int, landed: bool = False) -> dict | None:
-        """The job's latest pull, or with `landed` its latest one that got a verified copy onto
-        local disk (or found nothing to pull). The two differ: a manual pull refused for a bad
-        `--to` after the automatic one succeeded is the latest pull, but not where the data is."""
-        where = " AND files IS NOT NULL" if landed else ""
+        """The job's latest pull, or with `landed` its latest one that got a verified copy of
+        at least one file onto local disk. The two differ: a manual pull refused for a bad
+        `--to` after the automatic one succeeded is the latest pull, but not where the data is.
+        A pull that found nothing has not landed anything: a volume listed straight after a
+        sandbox exits may not show what it just wrote yet, so an empty answer is not final."""
+        where = " AND files > 0" if landed else ""
         rows = self._q(f"SELECT * FROM pulls WHERE job_id = ?{where} ORDER BY id DESC LIMIT 1",
                        (job_id,))
         return self._pull(rows[0]) if rows else None
+
+    def count_pulls(self, job_id: int, auto: bool | None = None) -> int:
+        """How many pulls of this job were recorded; `auto=True` counts only the automatic ones,
+        which is what their retry cap is measured against."""
+        where = "" if auto is None else " AND auto = ?"
+        args: tuple = (job_id,) if auto is None else (job_id, int(auto))
+        return self._q(f"SELECT COUNT(*) AS n FROM pulls WHERE job_id = ?{where}", args)[0]["n"]
+
+    # when a cloud job finished
+    def mark_cloud_finished(self, job_id: int, ts: float) -> None:
+        """Stamp when a cloud job became terminal. The first stamp wins: being told again, by
+        housekeep's backstop say, must not restart the clock its results are kept by."""
+        self._x("INSERT OR IGNORE INTO cloud_finished (job_id, ts) VALUES (?, ?)", (job_id, ts))
+
+    def cloud_finished_at(self, job_id: int) -> float | None:
+        rows = self._q("SELECT ts FROM cloud_finished WHERE job_id = ?", (job_id,))
+        return rows[0]["ts"] if rows else None
+
+    def cloud_finished(self) -> dict[int, float]:
+        """Every stamped cloud job and when it finished: what a job's results are aged by, both
+        for retrying its pull and for how long a provider keeps them."""
+        return {r["job_id"]: r["ts"] for r in self._q("SELECT job_id, ts FROM cloud_finished")}

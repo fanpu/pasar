@@ -135,15 +135,26 @@ def test_cloud_spend_is_empty_for_a_target_with_no_rows(store):
 
 def test_pulls_round_trip_and_the_latest_is_what_is_read(store):
     assert store.last_pull(1) is None and store.pulls(1) == []
-    store.add_pull(1, 10.0, "/p/1", None, None, False, "no room")
-    store.add_pull(1, 20.0, "/p/1", 2, 99, True, None)
+    store.add_pull(1, 10.0, "/p/1", None, None, False, "no room", auto=True)
+    store.add_pull(1, 20.0, "/p/1", 2, 99, True, None, auto=True)
     store.add_pull(1, 30.0, "/elsewhere", None, None, False, "not empty")
-    store.add_pull(2, 15.0, None, 0, 0, False, None)
+    store.add_pull(2, 15.0, None, 0, 0, False, None, auto=True)
 
     assert [p["ts"] for p in store.pulls(1)] == [10.0, 20.0, 30.0]
     assert store.last_pull(1)["error"] == "not empty"
     # What landed is asked for separately: a later refusal (a bad --to, say) must not hide it.
     landed = store.last_pull(1, landed=True)
     assert landed == {"job_id": 1, "ts": 20.0, "dest": "/p/1", "files": 2, "bytes": 99,
-                      "remote_deleted": True, "error": None}
-    assert store.last_pull(2, landed=True)["files"] == 0
+                      "remote_deleted": True, "error": None, "auto": True}
+    # Finding nothing is not landing: a volume listed too early reads empty too.
+    assert store.last_pull(2)["files"] == 0 and store.last_pull(2, landed=True) is None
+    assert store.count_pulls(1) == 3 and store.count_pulls(1, auto=True) == 2
+
+
+def test_when_a_cloud_job_finished_is_stamped_once(store):
+    assert store.cloud_finished_at(1) is None and store.cloud_finished() == {}
+    store.mark_cloud_finished(1, 10.0)
+    store.mark_cloud_finished(1, 20.0)  # the first stamp wins
+    store.mark_cloud_finished(2, 15.0)
+    assert store.cloud_finished_at(1) == 10.0
+    assert store.cloud_finished() == {1: 10.0, 2: 15.0}

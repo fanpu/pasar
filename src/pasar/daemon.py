@@ -51,6 +51,9 @@ RECENT = 86400  # matches api.RECENT: usage_history for jobs finished longer ago
 # failed download, a full disk, pasard restarted mid-pull). Stands in for the cloud retention
 # period until that is configurable: past it, a job's results are left for a manual `pasar pull`.
 PULL_RETRY_WINDOW = 3 * 86400
+# Automatic pulls of one job before pasard stops trying and leaves it to a person. Each failed
+# try may leave a full-size staging copy behind, so this is also what bounds those.
+AUTO_PULL_TRIES = 3
 
 
 class NotFound(Exception):
@@ -108,7 +111,8 @@ def _free_space(dest: Path) -> int:
 def _in_thread(work) -> None:
     """Run `work` on its own daemon thread: the default background seam. A daemon thread dies
     with pasard rather than holding up its exit, which leaves a pull cut short exactly as one
-    that failed — nothing deleted at the provider — for housekeep's retry to pick up."""
+    that failed — nothing deleted at the provider — for housekeep's retry to pick up. Only
+    ever one at a time for pulls: see `_schedule_pull`."""
     threading.Thread(target=work, name="pasar-pull", daemon=True).start()
 
 
@@ -156,9 +160,12 @@ class Daemon:
         # of one `pull()` call, never across a tick.
         self._pulling: set[int] = set()
         self._pull_lock = threading.Lock()
-        # Automatic pulls handed to `background` and not yet finished, under the same lock: what
-        # keeps housekeep's retry sweep from queueing a second pull behind one still waiting.
+        # Automatic pulls waiting or running, under the same lock: `_pull_order` is the queue
+        # the one worker drains, `_pull_queued` every job in it or being pulled by it (what
+        # keeps housekeep from queueing a job twice), `_pull_worker` whether that worker is up.
+        self._pull_order: deque[int] = deque()
         self._pull_queued: set[int] = set()
+        self._pull_worker = False
         # Where slow work goes so it never runs on the tick: a multi-GiB fetch inline in
         # `_finish` would stall the loop that serves the web UI. Injectable so tests run it on
         # their own thread, deterministically. So is the free-space probe, so a test can pretend
@@ -765,6 +772,7 @@ class Daemon:
             raise Conflict(f"job {job_id} is {job.state}, not awaiting approval")
         self.store.update_job(job_id, state=State.CANCELLED, reason="rejected",
                               summary="rejected instead of approved")
+        self._cloud_ended(job, State.CANCELLED)
         self.changed()
         return self.job(job_id)
 
@@ -775,6 +783,8 @@ class Daemon:
         if job.state in (State.QUEUED, State.AWAITING):
             self.store.update_job(job_id, state=State.CANCELLED, reason="cancelled",
                                   summary="cancelled before it started")
+            # A paused job's checkpoint is still at the provider: cancelled, it is results now.
+            self._cloud_ended(job, State.CANCELLED)
         else:
             self.store.update_job(job_id, state=State.STOPPING, stop_requested="cancel")
             if job.state == State.RUNNING:
@@ -903,18 +913,19 @@ class Daemon:
         try:
             result = self._pull(job_id, job, ex.provider, dest, keep, auto, landed)
         except Exception as e:
-            self._record_pull(job_id, dest, landed, str(e) or type(e).__name__)
+            self._record_pull(job_id, dest, landed, str(e) or type(e).__name__, auto)
             raise
         finally:
             with self._pull_lock:
                 self._pulling.discard(job_id)
-        self._record_pull(job_id, dest, landed, None)
+        self._record_pull(job_id, dest, landed, None, auto)
         return result
 
-    def _record_pull(self, job_id: int, dest: Path, landed: dict, error: str | None) -> None:
+    def _record_pull(self, job_id: int, dest: Path, landed: dict, error: str | None,
+                     auto: bool) -> None:
         self.store.add_pull(job_id, self.clock(), landed.get("dest", str(dest)),
                             landed.get("files"), landed.get("bytes"),
-                            landed.get("deleted", False), error)
+                            landed.get("deleted", False), error, auto=auto)
 
     def _check_room(self, job: Job, dest: Path, files: int, size: int, auto: bool) -> None:
         """Refuse, before a byte is fetched, a pull that should not happen. See `pull`."""
@@ -1017,34 +1028,73 @@ class Daemon:
         return {"job_id": job_id, "files": files, "bytes": size, "dest": str(dest),
                 "deleted": deleted}
 
+    def _cloud_ended(self, job: Job, state: State) -> None:
+        """Every path that moves a cloud job into a terminal state calls this: `_finish`, and
+        the ones that end a job without an attempt ending with it — cancelled or rejected while
+        waiting, an approval that expired, a target that went away, a launch that failed. It
+        stamps when the job finished, which its results are aged by (the retry window here,
+        how long the provider keeps them later), and queues its automatic pull. Stamped here
+        rather than read off the last attempt: a job paused for days and then cancelled
+        finished when it was cancelled, not when it paused."""
+        if state not in TERMINAL or not self._is_cloud(job):
+            return
+        self.store.mark_cloud_finished(job.id, self.clock())
+        self._schedule_pull(job)
+
     def _schedule_pull(self, job: Job) -> None:
-        """Hand a finished cloud job's automatic pull to `background`, unless one is already
-        queued or running. Only for a target this pasard has a provider for: without one there
-        is nothing to reach, and `pull` would only refuse."""
+        """Queue a finished cloud job's automatic pull, unless it is already queued or being
+        pulled, and start the worker if it is not running. One worker, so one pull at a time:
+        each pull's room check has to see what the pull before it landed — side by side, a batch
+        of jobs finishing together would each find the same free space and all go ahead — and a
+        provider is asked for one job's files at a time. Only for a target this pasard has a
+        provider for: without one there is nothing to reach, and `pull` would only refuse."""
         if not isinstance(self.executors.get(job.spec.target), CloudExecutor):
             return
         with self._pull_lock:
             if job.id in self._pulling or job.id in self._pull_queued:
                 return
             self._pull_queued.add(job.id)
-        job_id = job.id
+            self._pull_order.append(job.id)
+            if self._pull_worker:
+                return
+            self._pull_worker = True
         try:
-            self.background(lambda: self.auto_pull(job_id))
+            self.background(self._drain_pulls)
         except Exception:
-            # A thread that could not even be started: nothing ran, so nothing is queued, and
-            # the next housekeep will try again.
+            # A worker that could not even be started: nothing will run what is queued, so
+            # nothing is, and the next housekeep will queue it again.
             with self._pull_lock:
-                self._pull_queued.discard(job_id)
-            log.exception("could not schedule job %s's automatic pull", job_id)
+                self._pull_worker = False
+                self._pull_queued.difference_update(self._pull_order)
+                self._pull_order.clear()
+            log.exception("could not start the automatic pull worker")
+
+    def _drain_pulls(self) -> None:
+        """The worker: pull queued jobs one after another until the queue is empty, then stop.
+        Deciding to stop happens under the lock, so a job queued at that moment either is seen
+        here or finds no worker and starts one."""
+        while True:
+            with self._pull_lock:
+                if not self._pull_order:
+                    self._pull_worker = False
+                    return
+                job_id = self._pull_order.popleft()
+            try:
+                self.auto_pull(job_id)
+            except Exception:
+                log.exception("job %s's automatic pull failed", job_id)
 
     def auto_pull(self, job_id: int) -> None:
         """The automatic pull of a finished cloud job into `<pull_dir>/<job_id>`, as the
-        background runs it: `pull` with the unattended guards on, and every way it can end
-        caught here. Nobody is waiting on the answer, so an exception has nowhere useful to go —
-        it becomes a machine event instead, next to the `pulls` row `pull` already wrote. A
-        skipped or failed pull never touches the job itself: a completed job stays completed
-        with its remote copy intact, and the next housekeep tries again."""
+        worker runs it: `pull` with the unattended guards on, and every way it can end caught
+        here. Nobody is waiting on the answer, so an exception has nowhere useful to go — it
+        becomes a machine event instead, next to the `pulls` row `pull` already wrote. A skipped
+        or failed pull never touches the job itself: a completed job stays completed with its
+        remote copy intact, and the next housekeep tries again, up to `AUTO_PULL_TRIES`."""
+        tries = self.store.count_pulls(job_id, auto=True)
         try:
+            if tries >= AUTO_PULL_TRIES:
+                return
             self.pull(job_id, auto=True)
         except PullSkipped as e:
             self.store.add_machine_event(self.clock(), "pull_skipped",
@@ -1058,6 +1108,25 @@ class Daemon:
             with self._pull_lock:
                 self._pull_queued.discard(job_id)
             self.changed()
+        if tries < AUTO_PULL_TRIES <= self.store.count_pulls(job_id, auto=True):
+            self._give_up_pulling(job_id)
+
+    def _give_up_pulling(self, job_id: int) -> None:
+        """Said once, by the try that used up the last of `AUTO_PULL_TRIES`, if that try failed:
+        nothing will fetch this job's results now unless a person does. A job whose tries all
+        found nothing simply left nothing, which is common and needs nobody."""
+        last = self.store.last_pull(job_id)
+        if self.store.last_pull(job_id, landed=True) is not None or not last["error"]:
+            return
+        target = self.job(job_id).spec.target
+        staged = sorted(str(p) for p in self._pull_root().glob(f".pasar-pull-{job_id}-*"))
+        self.store.add_machine_event(
+            self.clock(), "pull_gave_up",
+            f"job {job_id}'s automatic pull failed {AUTO_PULL_TRIES} times and will not be tried "
+            f"again; its results are still at {target} — pull them by hand with `pasar pull "
+            f"{job_id} --to <dir>`"
+            + (f". Partial downloads left from those tries, safe to delete once it is pulled: "
+               f"{', '.join(staged)}" if staged else ""))
 
     # ---- the loop
     def tick(self) -> None:
@@ -1102,6 +1171,7 @@ class Daemon:
                 f"end it at the provider, or {fix}")
             self.store.update_job(job.id, state=State.FAILED, reason="target_gone",
                                   summary=summary, stop_requested=None)
+            self._cloud_ended(job, State.FAILED)
             self.cloud_units.pop(job.id, None)
             self.usage.pop(job.id, None)
         for job in self.store.list_jobs([State.AWAITING, State.QUEUED]):
@@ -1115,6 +1185,7 @@ class Daemon:
                 job.id, state=State.CANCELLED, reason="target_gone",
                 summary=f"{why}; nothing was spent — submit it again to a target that works, "
                         f"or {fix}")
+            self._cloud_ended(job, State.CANCELLED)
 
     def _unreachable(self, target: str) -> tuple[str, str]:
         """Why a target cannot be reached, and what would fix it. The two cases want different
@@ -1136,6 +1207,7 @@ class Daemon:
             self.store.update_job(
                 job.id, state=State.CANCELLED, reason="approval_expired",
                 summary=f"nobody approved it within {fmt_duration(target.approval_ttl)}")
+            self._cloud_ended(job, State.CANCELLED)
 
     def _pause_overdue(self, now: float) -> None:
         """Stop a cloud attempt that has used the run time its approval bought. The wrapper
@@ -1326,10 +1398,9 @@ class Daemon:
             extra["queue_time"] = now
         self.store.update_job(job_id, state=state, reason=reason, summary=summary,
                               stop_requested=None, retries_used=retries_used, **extra)
-        if state in TERMINAL and self._is_cloud(job):
-            # Scheduled, never run here: this is the tick. `TERMINAL` excludes AWAITING, whose
-            # checkpoint is what the next attempt resumes from.
-            self._schedule_pull(job)
+        # Its pull is queued, never run here: this is the tick. `TERMINAL` excludes AWAITING,
+        # whose checkpoint is what the next attempt resumes from.
+        self._cloud_ended(job, state)
         if self.metrics is not None and not self._is_cloud(job):
             # The metrics recorder summarises this machine's GPU over the attempt's window,
             # which has nothing to do with a job that ran somewhere else.
@@ -1472,6 +1543,7 @@ class Daemon:
         state, retries_used = self._retry_state(job)
         self.store.update_job(job.id, state=state, reason="launch_error", summary=message,
                               retries_used=retries_used)
+        self._cloud_ended(job, state)
 
     def _launch(self, job: Job, now: float) -> None:
         prior = self.store.attempts(job.id)
@@ -1625,6 +1697,7 @@ class Daemon:
                 ex.cleanup(unit)
             self.store.update_job(job.id, state=State.FAILED, reason="launch_error",
                                   summary=f"the attempt could not be recorded: {e}")
+            self._cloud_ended(job, State.FAILED)
             return
         self.store.update_job(job.id, state=State.RUNNING, reason=None, summary="")
 
@@ -1685,14 +1758,12 @@ class Daemon:
         against a 20 GiB log budget would delete other jobs' logs to make room for it."""
         now = self.clock()
         finished = []
-        ended_jobs = []
-        for job in self.store.list_jobs(TERMINAL):
+        terminal = self.store.list_jobs(TERMINAL)
+        for job in terminal:
             att = self.store.current_attempt(job.id)
-            ended = att.end_time if att and att.end_time else job.queue_time
-            finished.append((ended, job.id))
-            ended_jobs.append((ended, job))
+            finished.append(((att.end_time if att and att.end_time else job.queue_time), job.id))
         finished.sort()
-        self._retry_pulls(now, ended_jobs)
+        self._retry_pulls(now, terminal)
         for ended, job_id in finished:
             if now - ended >= RECENT:
                 self.usage_history.pop(job_id, None)
@@ -1712,15 +1783,26 @@ class Daemon:
             total -= sizes.get(job_id, 0)
             shutil.rmtree(self.job_dir(job_id), ignore_errors=True)
 
-    def _retry_pulls(self, now: float, ended_jobs: list[tuple[float, Job]]) -> None:
-        """Schedule the automatic pull again for a finished cloud job whose results never
-        landed: a download that failed, a disk that was full, a pasard restarted before or
-        during the pull. Going by a landed `pulls` row, not by the last outcome, is what stops
-        this looping: a job pulled once (or found with nothing to pull) is never asked about
-        again, even though its remote dir now reads as empty. Only within `PULL_RETRY_WINDOW`
-        of the job ending, so a job whose results will not come down is not retried forever.
-        Scheduled, not run: this is called from the tick."""
-        for ended, job in ended_jobs:
-            if (self._is_cloud(job) and now - ended <= PULL_RETRY_WINDOW
-                    and self.store.last_pull(job.id, landed=True) is None):
+    def _retry_pulls(self, now: float, terminal: list[Job]) -> None:
+        """Queue the automatic pull again for a finished cloud job whose results never landed:
+        a download that failed, a disk that was full, a pasard restarted before or during the
+        pull, a volume that listed empty too soon. Going by a landed `pulls` row, not by the
+        last outcome, is what stops this looping: a job pulled once is never asked about again,
+        even though its remote dir now reads as empty. Bounded twice over: `AUTO_PULL_TRIES`
+        automatic tries per job, and only within `PULL_RETRY_WINDOW` of the job finishing.
+
+        Also the backstop for `_cloud_ended`: a finished cloud job with no stamp (one that
+        finished before stamps existed, or down a path that missed one) is stamped now, which
+        gives it a fresh window and so its pull. Queued, not run: this is called from the tick."""
+        stamped = self.store.cloud_finished()
+        for job in terminal:
+            if not self._is_cloud(job):
+                continue
+            ended = stamped.get(job.id)
+            if ended is None:
+                self.store.mark_cloud_finished(job.id, now)
+                ended = now
+            if (now - ended <= PULL_RETRY_WINDOW
+                    and self.store.last_pull(job.id, landed=True) is None
+                    and self.store.count_pulls(job.id, auto=True) < AUTO_PULL_TRIES):
                 self._schedule_pull(job)
