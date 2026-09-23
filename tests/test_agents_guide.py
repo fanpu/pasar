@@ -143,3 +143,13 @@ def test_wait_exit_codes_match_cli_constants():
         assert re.search(rf"\b{code}\b", guide), f"exit code {code} missing from guide"
     for code in (cli.EX_USAGE, cli.EX_UNAVAILABLE, cli.EX_API):
         assert str(code) in guide, f"exit code {code} missing from guide"
+
+
+def test_the_cloud_topic_compares_the_gb10s_measured_speed_like_for_like():
+    # The GB10 row is what it achieved here; the other rows are vendor peaks. The guide has to
+    # carry the measurement, not a placeholder, and say the two are not the same kind of figure.
+    text = load_guide("cloud")
+    assert "MEASURED_" not in text
+    [row] = [line for line in text.splitlines() if line.startswith("| GB10")]
+    assert "88" in row and "240" in row and "273" in row
+    assert "achieved" in text and "peak" in text

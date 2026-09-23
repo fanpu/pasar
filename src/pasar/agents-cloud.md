@@ -42,11 +42,12 @@ H100-class card, so a run that takes a day here can finish in hours.
 What it doesn't buy: memory. Only the H200, B200 and B300 have more than the GB10. A job that
 only fits here because of the unified memory needs one of those, or sharding across several GPUs.
 
-Vendor spec-sheet figures. They are rough guides for napkin math, not benchmarks:
+Figures for napkin math, not benchmarks. The GB10 row is what it achieved here. Every other row
+is the vendor's listed peak, of which real work reaches only part (see the napkin math):
 
 | GPU (`--gpu`) | Memory (GB) | Dense BF16 TFLOPS | Bandwidth (GB/s) |
 |---|---|---|---|
-| GB10 (local) | 128 unified | MEASURED_BF16_TFLOPS measured here (NVIDIA publishes none) | MEASURED_BW_GBS measured here (vendor: 273) |
+| GB10 (local) | 128 unified | ~88 achieved here on large BF16 matmuls (NVIDIA publishes none) | ~240 achieved here (vendor: 273) |
 | `T4` | 16 | 65 (FP16: T4 has no BF16) | 300 |
 | `L4` | 24 | 121 | 300 |
 | `A10` | 24 | 125 | 600 |
@@ -60,12 +61,13 @@ Vendor spec-sheet figures. They are rough guides for napkin math, not benchmarks
 | `B300` | 270 | 2,250 | 7,700 |
 
 - Dense means without sparsity. NVIDIA's sheets lead with the sparse figure, which is twice
-  this. Sources: NVIDIA's data sheet for each card, and Modal's GPU docs for which variant it
-  rents, checked September 2026. The H100 and H200 are the SXM parts (Modal says so).
+  this. Sources: NVIDIA's data sheet for each card (for the RTX PRO 6000, its architecture
+  whitepaper), and Modal's GPU docs for which variant it rents, checked September 2026. The H100
+  and H200 are the SXM parts (Modal says so).
 - Approximate: the T4 figure is FP16 standing in for BF16. Modal doesn't say whether its A100s
   are PCIe or SXM, hence the bandwidth range. It doesn't say which RTX PRO 6000 edition it rents
-  either: ~504 is NVIDIA's Workstation Edition figure, and the Server Edition has the lower
-  bandwidth. For the B300, NVIDIA's sheet says 270 GB per GPU while Modal's own figures imply 288.
+  either: ~504 is the Workstation Edition's figure in NVIDIA's architecture whitepaper (the data
+  sheets give none), and the Server Edition has the lower bandwidth. For the B300, NVIDIA's sheet says 270 GB per GPU while Modal's own figures imply 288.
 - `A100` on its own means the 40 GB card. `pasar cloud` lists what a target actually accepts,
   with each GPU's memory. Prices are never in this guide: read them from `pasar cloud`.
 
@@ -107,10 +109,18 @@ sweep is one ask, with the per-job and the total cost.
 
 ## The napkin math
 
-- **Speedup.** Take the table's ratio for the column that limits the job (TFLOPS for large-batch,
-  matmul-heavy training; bandwidth for small batches, decoding and optimizer-heavy steps), then
-  discount it. Real jobs run well below peak, and startup, data loading and Python don't speed up
-  at all. Halving the spec ratio is a fair first guess. Say it is rough.
+- **Speedup.** Use the column that limits the job (TFLOPS for large-batch, matmul-heavy training;
+  bandwidth for small batches, decoding and optimizer-heavy steps), in two steps:
+  1. Compare like for like. The GB10 row is achieved, the others are peak, and a datacenter card
+     reaches roughly two-thirds of its listed peak on real matmuls (bandwidth usually fares a bit
+     better; two-thirds stays on the safe side). So the ratio is the cloud figure × 2/3 ÷ the
+     GB10's: an H100 is 989 × 2/3 ÷ 88 ≈ 7.5× the GB10, an A100 312 × 2/3 ÷ 88
+     ≈ 2.4×.
+  2. Discount that for the parts of a real job a faster GPU doesn't speed up: data loading,
+     Python, small kernels. Taking about two-thirds of it again is a fair first guess for a
+     training loop that keeps the GPU busy; take less if it doesn't. The H100 comes out near 5×.
+
+  Both two-thirds are rough. Say so.
 - **Cloud time** = local run time ÷ speedup, plus a few minutes to start (longer the first time an
   image is built).
 - **Cost per hour** = the GPU's `$/HOUR` from `pasar cloud` (times the count, for `H100:4`), plus
@@ -122,19 +132,20 @@ sweep is one ask, with the per-job and the total cost.
 - **Ceiling.** One approval lets an attempt run up to the target's `timeout_factor` × `--time`
   (1.5 × by default), unless `--max-cost` or what is left of the job cap stops it sooner.
 
-**Worked example.** All numbers are illustrative, not real rates or measurements.
+**Worked example.** The speed ratios come from the table; the job's timings and the prices are
+illustrative, not real rates or measurements.
 
 - A fine-tune timed at 1.1 s/step over 200 steps, with 20,000 steps to go: about 6 hours.
   `pasar ls` says it would start in about an hour, so the result is about 7 hours away.
 - It peaked at 50 GB on the GB10, so it needs an 80 GB card: `A100-80GB`, `H100` or bigger.
-- Say the table puts the H100 at 8× the GB10's BF16 TFLOPS. Halved, that's about 4×, so about
-  1.5 hours in the cloud, plus a few minutes to start.
-- Say `pasar cloud` shows the H100 at $3/hour and the sandbox adds $1/hour: $4/hour, so about $6.
-  Pass `--time 1h30m --max-cost 8`. That lets the attempt run up to 2 hours, and it stays under
-  the $10 job cap.
-- The A100-80GB has about a third of the H100's TFLOPS in the table: say 2.5× the GB10, so about
-  1.3× halved. At, say, $2/hour plus $1, that's about 5 hours and $14: slower, dearer, and over
-  the cap. The faster card is the cheaper one.
+- The H100 is about 7.5× the GB10 like for like, and about 5× once the rest of the job is
+  counted, so about 1h15m in the cloud, plus a few minutes to start.
+- Say `pasar cloud` shows the H100 at $3/hour and the sandbox adds $1/hour: $4/hour, so about $5.
+  Pass `--time 1h15m --max-cost 7`. That lets the attempt run up to 1h45m, and it stays under the
+  $10 job cap.
+- The A100-80GB is about 2.4× the GB10 like for like, so about 1.6× for the whole job: about 3h45m.
+  At, say, $2/hour plus $1, that's about $11: slower, dearer, and over the cap. The faster card is
+  the cheaper one.
 
 ## Asking the user
 
@@ -152,8 +163,9 @@ Put these in the ask, briefly:
 
 For example, with the numbers above: "This fine-tune would take ~6 h on the GB10 (1.1 s/step,
 timed over 200 steps, 20k steps) plus ~1 h in the queue. On an H100 (it needs ~50 GB) I'd expect
-~4× faster, a rough guess from the spec ratio halved: ~1.5 h. At ~$4/h from `pasar cloud` that's
-~$6; I'd pass `--max-cost 8`, under the $10 job cap. It already checkpoints to persist_dir. Want
+~5× faster, a rough guess (its peak discounted to what cards really reach, against the GB10's
+measured speed, then discounted again for the rest of the job): ~1h15m. At ~$4/h from `pasar
+cloud` that's ~$5; I'd pass `--max-cost 7`, under the $10 job cap. It already checkpoints to persist_dir. Want
 me to submit it?"
 
 ## Spending prudently
@@ -161,8 +173,8 @@ me to submit it?"
 - Stay well under the job cap. A run that would need most of it is better preceded by a short
   first run, as a separate small job that proves the setup and checkpoints, then the user's
   decision on the rest.
-- Always pass `--max-cost`, a little above the estimate (the example: $6 estimated, `--max-cost
-  8`). A cap that bites pauses the job rather than killing it, and the next approval resumes from
+- Always pass `--max-cost`, a little above the estimate (the example: $5 estimated, `--max-cost
+  7`). A cap that bites pauses the job rather than killing it, and the next approval resumes from
   the checkpoint.
 - Size `--time` for the whole run, not for a slice of it. A job may pause at its approved run
   time only 5 times in its whole life (`pause_limit`): every `time_limit` pause counts, across all
@@ -176,11 +188,11 @@ me to submit it?"
 
 Once the user has said yes:
 
-    $ pasar submit --time 1h30m --max-cost 8 --on modal --gpu H100 --tag sft \
+    $ pasar submit --time 1h15m --max-cost 7 --on modal --gpu H100 --tag sft \
         --note "sft on the full set" -- .venv/bin/python train.py
     submitted #7 train (awaiting) on modal
-      estimated $6.00, capped at $8.00 (your --max-cost) for this run
-      it will be paused after 2h00m instead of 2h15m, to stay under that cap
+      estimated $5.00, capped at $7.00 (your --max-cost) for this run
+      it will be paused after 1h45m instead of 1h52m, to stay under that cap
       a person has to approve it before it launches: POST /api/jobs/7/approve (no web UI for it yet)
 
 (Figures illustrative.) The last line is for the user, not for you.
