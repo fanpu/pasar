@@ -489,13 +489,24 @@ def test_the_provider_passes_its_own_client_to_every_call(tmp_path, monkeypatch)
         p.prepare_image(EnvSpec({}, "img"))
         req = launch_request(tmp_path)
         req.tags["pasar_target"] = "modal"
-        p.launch(req)
+        handle = p.launch(req)
         box = sdk.wait_for_sandbox()
         assert box.kwargs["client"] is sdk.clients["alice"]
         assert sdk.app_clients == [sdk.clients["alice"]]
         assert all(c is sdk.clients["alice"] for c in sdk.volume_clients)
         p.rates()
         assert sdk.workspace_clients == [sdk.clients["alice"]]
+        # Listing too: a `_find` that dropped the client would look in the wrong account, find
+        # nothing, and settle a live job as lost — which then gets pulled and deleted under it.
+        assert p.list() == [(handle, box.tags)]
+        fresh = ModalProvider(target, tmp_path / "s2", sdk=sdk)  # a restart: finds it by tag
+        try:
+            fresh.terminate(handle)
+            assert box.terminated is True
+        finally:
+            fresh.close()
+        assert len(sdk.list_clients) == 2
+        assert all(c is sdk.clients["alice"] for c in sdk.list_clients)
     finally:
         p.close()
 

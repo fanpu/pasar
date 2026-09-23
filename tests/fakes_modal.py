@@ -291,6 +291,7 @@ class FakeSDK:
         self.app_clients = []
         self.volume_clients = []
         self.workspace_clients = []
+        self.list_clients = []
         sdk = self
 
         class Client:
@@ -310,7 +311,12 @@ class FakeSDK:
 
             @staticmethod
             def list(*, app_id=None, tags=None, client=None):
+                # Like the real thing, a listing only sees the account its client belongs to:
+                # a sandbox launched on one account is invisible to a listing on another.
+                sdk.list_clients.append(client)
                 for box in sdk.sandboxes:
+                    if box.kwargs.get("client") is not client:
+                        continue
                     if tags and any(box.tags.get(k) != v for k, v in tags.items()):
                         continue
                     yield box
