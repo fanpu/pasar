@@ -59,7 +59,9 @@ class FakeProvider:
                            console_url=f"https://fake/{handle}")
 
     def read_output(self, handle: str, cursor: int) -> tuple[bytes, int]:
-        b = self.boxes[handle]
+        b = self.boxes.get(handle)
+        if b is None:
+            return b"", cursor
         return b.out[cursor:], len(b.out)
 
     def request_stop(self, handle: str) -> None:
@@ -67,7 +69,9 @@ class FakeProvider:
 
     def terminate(self, handle: str) -> None:
         self.terminated.append(handle)
-        self.finish(handle, 137, by_provider=False)
+        b = self.boxes.get(handle)
+        if b is not None and b.phase is not Phase.EXITED:
+            self.finish(handle, 137, by_provider=False)
 
     def list(self) -> list[tuple[str, dict[str, str]]]:
         return [(h, b.req.tags) for h, b in self.boxes.items() if b.phase is not Phase.GONE]
@@ -99,3 +103,6 @@ class FakeProvider:
 
     def reclaim(self, handle: str) -> None:
         self.finish(handle, 137, by_provider=True)
+
+    def forget(self, handle: str) -> None:
+        self.boxes.pop(handle, None)
