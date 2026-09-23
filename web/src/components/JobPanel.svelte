@@ -1,7 +1,7 @@
 <script lang="ts">
   import { getJob, cancelJob, setBid, restartJob, getEvents, getGpu, getMetrics, getUsage, ApiError } from "../lib/api";
   import { mascot } from "../lib/mascot.svelte";
-  import { fmtGib, gib, hm } from "../lib/format";
+  import { fmtGib, gib, hm, metric } from "../lib/format";
   import { jobColor, JOB_COLORS } from "../lib/colors";
   import { eventRows } from "../lib/eventlog";
   import { progressSeries } from "../lib/series";
@@ -299,10 +299,6 @@
   const memoryFormat = (v: number): string => `${gib(v)} GiB`;
   const powerFormat = (v: number): string => `${Math.round(v)} W`;
   const tempFormat = (v: number): string => `${Math.round(v)} °C`;
-  function progressFormat(v: number): string {
-    if (v !== 0 && Math.abs(v) < 0.001) return v.toExponential(1);
-    return v.toFixed(3);
-  }
 
   /** i-th progress series' colour, drawn from the job palette starting just after the job's own
    * colour so it never repeats the job's own chip/timeline colour. */
@@ -448,7 +444,7 @@
             <LineChart label="temperature" points={gpu.temp_c} color={JOB_COLORS[4]} format={tempFormat} note={gpuNote} />
           {/if}
           {#each Object.entries(progSeries) as [key, points], i (key)}
-            <LineChart label={key} {points} color={progressColor(jobView, i)} format={progressFormat} />
+            <LineChart label={key} {points} color={progressColor(jobView, i)} format={metric} />
           {/each}
         </div>
         {#if isFinishedState && hasMetricsSummary}

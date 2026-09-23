@@ -78,6 +78,12 @@ describe("dashboard pieces", () => {
     render(Sparkline, { points: [[1, 10], [2, 20], [3, 15]], color: "#3b8fd9" });
     expect(screen.getByRole("img", { name: "10–20" })).toBeInTheDocument();
   });
+  it("sparkline summarises small values with a caller's format, not whole numbers", () => {
+    render(Sparkline, {
+      points: [[1, 0.412], [2, 0.388]], color: "#3b8fd9", format: (v: number) => v.toFixed(3),
+    });
+    expect(screen.getByRole("img", { name: "0.388\u20130.412" })).toBeInTheDocument();
+  });
   it("toast shows only while a message is set", () => {
     const { rerender } = render(Toast, { message: "#48 sweep-wd started!", image: "/m.png" });
     expect(screen.getByRole("status")).toHaveTextContent("#48 sweep-wd started!");

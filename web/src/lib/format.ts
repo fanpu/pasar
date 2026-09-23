@@ -59,3 +59,11 @@ const OOM_REASONS = new Set(["oom", "gpu_oom", "kernel_oom"]);
 export function isOom(reason: string | null): boolean {
   return reason !== null && OOM_REASONS.has(reason);
 }
+
+/** A reported training metric at a glance — loss, accuracy, whatever the job sends. Three
+ * decimals reads well for the usual 0–1 range; anything smaller would show as "0.000", so it
+ * falls back to an exponent. */
+export function metric(v: number): string {
+  if (v !== 0 && Math.abs(v) < 0.001) return v.toExponential(1);
+  return v.toFixed(3);
+}

@@ -105,48 +105,60 @@ describe("JobTable", () => {
     expect(bid.closest("tr")).toBe(table.querySelector("tr.row"));
   });
 
-  it("formats lost time, or a dash when nothing was lost", () => {
-    render(JobTable, {
-      jobs: [
-        job({ id: 10, state: "completed", end_time: NOW - 60, submitter: "alice", lost: { preemption: 660, failure: 0, known: true } }),
-        job({ id: 11, state: "completed", end_time: NOW - 120, submitter: "bob", lost: { preemption: 0, failure: 0, known: true } }),
-      ],
-      pool: 105 * GIB,
-      now: NOW,
-      selected: null,
-      onopen: () => {},
-    });
-    expect(screen.getByText("11m")).toBeInTheDocument();
-    expect(screen.getByText("–")).toBeInTheDocument();
-  });
-
-  it("renders '?' when total lost time is 0 and unknown", () => {
+  it("shows the metric name, its latest value and a sparkline on the row", () => {
     const { container } = render(JobTable, {
-      jobs: [
-        job({ id: 13, state: "completed", end_time: NOW - 60, submitter: "alice", lost: { preemption: 0, failure: 0, known: false } }),
-      ],
+      jobs: [job({ id: 10, state: "running", start_time: NOW - 600 })],
+      sparks: { 10: { key: "loss", points: [[1, 0.9], [2, 0.412]] as [number, number][], latest: 0.412 } },
       pool: 105 * GIB,
       now: NOW,
       selected: null,
       onopen: () => {},
     });
     const table = container.querySelector("table")!;
-    const lostCell = within(table).getByText("?");
-    expect(lostCell).toBeInTheDocument();
-    expect(lostCell).toHaveAttribute("title", "unknown: the job doesn't report checkpoints");
+    expect(within(table).getByText("loss")).toBeInTheDocument();
+    expect(within(table).getByText("0.412")).toBeInTheDocument();
+    expect(within(table).getByRole("img", { name: "0.412\u20130.900" })).toBeInTheDocument();
   });
 
-  it("renders '11m?' when lost time is nonzero and unknown", () => {
-    render(JobTable, {
-      jobs: [
-        job({ id: 14, state: "completed", end_time: NOW - 60, submitter: "alice", lost: { preemption: 660, failure: 0, known: false } }),
-      ],
+  it("leaves the metric cell empty for a job that never reported one", () => {
+    const { container } = render(JobTable, {
+      jobs: [job({ id: 11, state: "running", start_time: NOW - 600 })],
+      sparks: {},
       pool: 105 * GIB,
       now: NOW,
       selected: null,
       onopen: () => {},
     });
-    expect(screen.getByText("11m?")).toBeInTheDocument();
+    const table = container.querySelector("table")!;
+    expect(within(table).queryByRole("img")).toBeNull();
+    expect(table.querySelector("td.metric")!.textContent!.trim()).toBe("");
+  });
+
+  it("puts the metric where lost time used to be, which the detail panel still shows", () => {
+    const { container } = render(JobTable, {
+      jobs: [job({ id: 12, state: "completed", end_time: NOW - 60, lost: { preemption: 660, failure: 0, known: true } })],
+      pool: 105 * GIB,
+      now: NOW,
+      selected: null,
+      onopen: () => {},
+    });
+    const headers = Array.from(container.querySelectorAll("thead th")).map((th) => th.textContent);
+    expect(headers).toEqual(["job", "state", "bid", "memory", "time", "metric", "by"]);
+    expect(screen.queryByText("11m")).toBeNull();
+  });
+
+  it("carries the sparkline onto the phone cards too", () => {
+    const { container } = render(JobTable, {
+      jobs: [job({ id: 13, state: "running", start_time: NOW - 600 })],
+      sparks: { 13: { key: "test_acc", points: [[1, 0.2], [2, 0.8]] as [number, number][], latest: 0.8 } },
+      pool: 105 * GIB,
+      now: NOW,
+      selected: null,
+      onopen: () => {},
+    });
+    const cards = container.querySelector(".cards")!;
+    expect(within(cards as HTMLElement).getByText("test_acc")).toBeInTheDocument();
+    expect(within(cards as HTMLElement).getByText("0.800")).toBeInTheDocument();
   });
 
   it("clicking a row and pressing Enter both call onopen with the job id", async () => {

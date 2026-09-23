@@ -1,13 +1,14 @@
 <script lang="ts">
-  import { fmtGib, gib, dur, hm, reasonLabel } from "../lib/format";
+  import { fmtGib, gib, dur, hm, metric, reasonLabel } from "../lib/format";
   import { jobColor } from "../lib/colors";
   import { mascot } from "../lib/mascot.svelte";
   import { EMPTY_FILTER, effectiveSort, isActive, type Filter, type SortKey, type StateFilter } from "../lib/jobfilter";
   import FilterBar from "./FilterBar.svelte";
   import JobChip from "./JobChip.svelte";
+  import Sparkline from "./Sparkline.svelte";
   import StatePill from "./StatePill.svelte";
   import TagSummary from "./TagSummary.svelte";
-  import type { JobView } from "../lib/types";
+  import type { JobView, SparkMap } from "../lib/types";
 
   const ZERO_COUNTS: Record<StateFilter, number> = { running: 0, queued: 0, completed: 0, failed: 0, cancelled: 0 };
 
@@ -26,12 +27,15 @@
     // not just the rows currently on screen. Defaults to `jobs` so callers/tests that don't pass
     // it (and aren't exercising more than one filter at once) keep working.
     sourceJobs?: JobView[];
+    // Row sparklines by job id, fetched on their own slow schedule (see lib/sparks.svelte.ts).
+    // Jobs that never reported a numeric metric are simply absent.
+    sparks?: SparkMap;
     onfilter?: (f: Filter, replace?: boolean) => void;
   }
   let {
     jobs, now, selected, onopen,
     filter = EMPTY_FILTER, total = jobs.length, counts = ZERO_COUNTS, known = { tags: [], by: [] },
-    sourceJobs = jobs, onfilter = () => {},
+    sourceJobs = jobs, sparks = {}, onfilter = () => {},
   }: Props = $props();
 
   const active = $derived(isActive(filter));
@@ -185,13 +189,9 @@
     return `est. ${dur(job.est_runtime)}${job.run_time > 0 ? ` · ran ${dur(job.run_time)}` : ""}`;
   }
 
-  function lost(job: JobView): { text: string; faint: boolean; title?: string } {
-    const total = job.lost.preemption + job.lost.failure;
-    if (total === 0 && !job.lost.known) {
-      return { text: "?", faint: false, title: "unknown: the job doesn't report checkpoints" };
-    }
-    const text = (total > 0 ? dur(total) : "–") + (job.lost.known ? "" : "?");
-    return { text, faint: total === 0 };
+  /** The one metric pasar picked for this job's row, or null when it never reported numbers. */
+  function spark(job: JobView) {
+    return sparks[job.id] ?? null;
   }
 
   function cardMeta(job: JobView): string {
@@ -261,7 +261,12 @@
         <div class="small faint">ran {dur(job.run_time)}</div>
       {/if}
     </td>
-    <td class="small" class:faint={lost(job).faint} title={lost(job).title}>{lost(job).text}</td>
+    <td class="metric">
+      {#if spark(job)}
+        <div class="mhead"><span class="mkey">{spark(job)!.key}</span> <b>{metric(spark(job)!.latest)}</b></div>
+        <Sparkline points={spark(job)!.points} color={jobColor(job)} height={22} format={metric} />
+      {/if}
+    </td>
     <td class="small dim">
       {#if job.submitter}
         <button type="button" class="link" onclick={(e) => onByClick(e, job.submitter)}>{job.submitter}</button>
@@ -297,6 +302,12 @@
     </div>
     {#if isLive(job)}
       <div class="bar"><i style="width: {timePct(job)}%; background: linear-gradient(90deg, #a9d8f5, #cdbcf5)"></i></div>
+    {/if}
+    {#if spark(job)}
+      <div class="cardmetric">
+        <div class="mhead"><span class="mkey">{spark(job)!.key}</span> <b>{metric(spark(job)!.latest)}</b></div>
+        <Sparkline points={spark(job)!.points} color={jobColor(job)} height={26} format={metric} />
+      </div>
     {/if}
   </div>
 {/snippet}
@@ -342,7 +353,7 @@
           <th class:sorted={isSorted("bid")}><button type="button" class="hcell" onclick={() => onSort("bid")}>bid{#if isSorted("bid")}<span class="arr">{arrow()}</span>{/if}</button></th>
           <th class:sorted={isSorted("memory")}><button type="button" class="hcell" onclick={() => onSort("memory")}>memory{#if isSorted("memory")}<span class="arr">{arrow()}</span>{/if}</button></th>
           <th class:sorted={isSorted("time")}><button type="button" class="hcell" onclick={() => onSort("time")}>time{#if isSorted("time")}<span class="arr">{arrow()}</span>{/if}</button></th>
-          <th>lost</th>
+          <th>metric</th>
           <th class:sorted={isSorted("by")}><button type="button" class="hcell" onclick={() => onSort("by")}>by{#if isSorted("by")}<span class="arr">{arrow()}</span>{/if}</button></th>
         </tr>
       </thead>
@@ -399,6 +410,11 @@
 
   .bar i.over { background: var(--stop); }
 
+  td.metric { min-width: 132px; }
+  .mhead { font-size: 11.5px; font-weight: 700; color: var(--ink-2); display: flex; align-items: baseline; gap: 5px; }
+  .mkey { text-transform: lowercase; color: var(--ink-3); max-width: 84px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .mhead b { color: var(--ink); font-variant-numeric: tabular-nums; }
+
   .empty { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 8px; padding: 24px 0; color: var(--ink-2); font-weight: 700; text-align: center; }
   .empty img { width: 72px; height: 72px; }
   .empty p { margin: 0; }
@@ -416,6 +432,7 @@
     .card .meta .fail { color: var(--fail); }
     .card .bar { height: 7px; border-radius: 99px; background: #f4ecf0; overflow: hidden; margin: 8px 0 0 43px; }
     .card .bar i { display: block; height: 100%; border-radius: 99px; }
+    .card .cardmetric { margin: 8px 0 0 43px; }
     .cards .grp { font-size: 11.5px; font-weight: 900; color: var(--ink-3); text-transform: uppercase; letter-spacing: 0.6px; margin: 14px 2px 0; }
     .sortsel { display: inline-block !important; }
   }

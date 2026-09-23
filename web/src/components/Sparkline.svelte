@@ -3,13 +3,16 @@
     points: [number, number][];
     color: string;
     height?: number;
+    /** How the min–max summary reads to a screen reader. Whole numbers suit the GPU tiles
+     * (watts, °C, %); a loss of 0.412 needs decimals or it announces as "0–0". */
+    format?: (v: number) => string;
   }
-  let { points, color, height = 30 }: Props = $props();
+  let { points, color, height = 30, format = (v) => String(Math.round(v)) }: Props = $props();
 
   const values = $derived(points.map(([, v]) => v));
   const lo = $derived(values.length ? Math.min(...values) : 0);
   const hi = $derived(values.length ? Math.max(...values) : 0);
-  const label = $derived(`${Math.round(lo)}–${Math.round(hi)}`);
+  const label = $derived(`${format(lo)}–${format(hi)}`);
 
   const top = 3;
   const path = $derived.by(() => {

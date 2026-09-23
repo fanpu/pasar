@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { ago, dur, fmtGib, gib, GIB, hm, isOom, reasonLabel } from "../lib/format";
+import { ago, dur, fmtGib, gib, GIB, hm, isOom, metric, reasonLabel } from "../lib/format";
 
 describe("format", () => {
   it("gib", () => {
@@ -34,5 +34,15 @@ describe("format", () => {
     expect(["oom", "gpu_oom", "kernel_oom"].every(isOom)).toBe(true);
     expect(isOom("exit")).toBe(false);
     expect(isOom(null)).toBe(false);
+  });
+});
+
+describe("metric", () => {
+  it("keeps three decimals, and falls back to exponent for vanishingly small values", () => {
+    expect(metric(0.412)).toBe("0.412");
+    expect(metric(12)).toBe("12.000");
+    expect(metric(0)).toBe("0.000");
+    expect(metric(0.00004)).toBe("4.0e-5");
+    expect(metric(-0.00004)).toBe("-4.0e-5");
   });
 });
