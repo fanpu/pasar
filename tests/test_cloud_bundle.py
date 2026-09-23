@@ -60,6 +60,71 @@ def test_bundle_outside_a_repo(tmp_path):
         build_bundle(str(tmp_path / "loose"), tmp_path / "b.tar", max_bytes=1 << 20)
 
 
+def test_bundle_keeps_a_tracked_non_ascii_name(tmp_path):
+    repo = git_repo(tmp_path / "repo")
+    (repo / "café.txt").write_text("scratch\n")
+    subprocess.run(["git", "-C", str(repo), "add", "-A"], check=True)
+    b = build_bundle(str(repo), tmp_path / "b.tar", max_bytes=1 << 20)
+    assert "café.txt" in names(b)
+
+
+def test_bundle_rejects_a_symlink_pointing_outside_the_repo(tmp_path):
+    repo = git_repo(tmp_path / "repo")
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "secret.bin").write_bytes(b"x")
+    (repo / "link_out").symlink_to(outside / "secret.bin")
+    subprocess.run(["git", "-C", str(repo), "add", "-A"], check=True)
+    with pytest.raises(BundleError, match="link_out"):
+        build_bundle(str(repo), tmp_path / "b.tar", max_bytes=1 << 20)
+
+
+def test_bundle_keeps_a_symlink_pointing_inside_the_repo(tmp_path):
+    repo = git_repo(tmp_path / "repo")
+    (repo / "real.txt").write_text("hi\n")
+    (repo / "link_in").symlink_to(repo / "real.txt")
+    subprocess.run(["git", "-C", str(repo), "add", "-A"], check=True)
+    b = build_bundle(str(repo), tmp_path / "b.tar", max_bytes=1 << 20)
+    with tarfile.open(b.path) as t:
+        assert "link_in" in [m.name for m in t.getmembers() if m.issym()]
+
+
+def test_bundle_file_vanishing_mid_archive_raises_bundle_error(tmp_path, monkeypatch):
+    repo = git_repo(tmp_path / "repo")
+    real_add = tarfile.TarFile.add
+
+    def flaky_add(self, name, *a, arcname=None, **kw):
+        if arcname == "train.py":
+            raise FileNotFoundError(arcname)
+        return real_add(self, name, *a, arcname=arcname, **kw)
+
+    monkeypatch.setattr(tarfile.TarFile, "add", flaky_add)
+    with pytest.raises(BundleError, match="train.py"):
+        build_bundle(str(repo), tmp_path / "b.tar", max_bytes=1 << 20)
+
+
+def test_env_key_is_stable_and_changes_with_lock_contents(tmp_path):
+    repo_a = git_repo(tmp_path / "a")
+    repo_b = git_repo(tmp_path / "b")
+    key_a = build_bundle(str(repo_a), tmp_path / "a.tar", max_bytes=1 << 20).env.key
+    key_b = build_bundle(str(repo_b), tmp_path / "b.tar", max_bytes=1 << 20).env.key
+    assert key_a == key_b
+
+    (repo_a / "uv.lock").write_text("version = 2\n")
+    key_changed_lock = build_bundle(str(repo_a), tmp_path / "a2.tar", max_bytes=1 << 20).env.key
+    assert key_changed_lock != key_a
+
+    (repo_a / "uv.lock").write_text("version = 1\n")
+    (repo_a / "pyproject.toml").write_text('[project]\nname = "y"\nversion = "0"\n')
+    key_changed_pyproject = build_bundle(str(repo_a), tmp_path / "a3.tar", max_bytes=1 << 20).env.key
+    assert key_changed_pyproject != key_a
+
+    (repo_a / "pyproject.toml").write_text('[project]\nname = "x"\nversion = "0"\n')
+    (repo_a / ".python-version").write_text("3.12\n")
+    key_changed_pyversion = build_bundle(str(repo_a), tmp_path / "a4.tar", max_bytes=1 << 20).env.key
+    assert key_changed_pyversion != key_a
+
+
 @pytest.mark.skipif(shutil.which("uv") is None, reason="needs uv")
 def test_platform_check_passes_for_this_repo():
     from pasar.cloud.bundle import check_platform
