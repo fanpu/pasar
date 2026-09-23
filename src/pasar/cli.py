@@ -11,7 +11,7 @@ import time
 import httpx
 
 from pasar.config import DEFAULT_ADDRESS
-from pasar.guide import load_guide
+from pasar.guide import TOPICS, load_guide
 from pasar.units import fmt_duration, fmt_gib
 
 EX_USAGE, EX_UNAVAILABLE, EX_API = 64, 69, 70
@@ -370,13 +370,15 @@ def build_parser() -> Parser:
 
     add("status", "machine and memory pool status")
     add("cloud", "cloud targets: budgets, spend, rates and jobs awaiting approval")
-    sub.add_parser("guide", help="print the agent guide (works without a daemon running)")
+    g = sub.add_parser("guide", help="print the agent guide (works without a daemon running)")
+    g.add_argument("topic", nargs="?", choices=sorted(TOPICS),
+                   help="print one topic's guide instead, e.g. `cloud` before any cloud work")
     return p
 
 
 def run(args, client: httpx.Client) -> int:
     if args.cmd == "guide":
-        sys.stdout.write(load_guide())
+        sys.stdout.write(load_guide(args.topic))
         return 0
     out = (lambda obj: print(json.dumps(obj, indent=2))) if args.json else None
     if args.cmd == "submit":

@@ -77,7 +77,7 @@ to plan the queue; overrunning is fine.
 
 ## 6. Cloud jobs checkpoint more, not less
 
-A job submitted with `--on <target>` (see [the agent guide](../src/pasar/agents.md#cloud-jobs))
+A job submitted with `--on <target>` (see [the cloud agent guide](../src/pasar/agents-cloud.md))
 follows everything above, with the stakes raised: it is paused when it reaches its approved run
 time, the provider can reclaim the GPU under it without warning, and every minute of lost work
 was paid for. Checkpoint on time, not on steps, and checkpoint more often than you would locally:

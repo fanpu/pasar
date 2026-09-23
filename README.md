@@ -96,7 +96,8 @@ copy. **Storage is billed even when no compute is running**, and pasar's budgets
 count compute only.
 
 See [docs/cloud.md](docs/cloud.md) for the design and every setting, and
-[`src/pasar/agents.md`](src/pasar/agents.md#cloud-jobs) for the full rules.
+[`src/pasar/agents-cloud.md`](src/pasar/agents-cloud.md) (`pasar guide cloud`) for the rules
+agents follow.
 
 ## For AI agents and API users
 
@@ -107,6 +108,7 @@ version is always one command or request away:
 
     pasar guide                                  # works even when pasard is down
     curl http://127.0.0.1:8750/llms.txt          # same text, served by pasard
+    pasar guide cloud                            # the cloud GPU guide (/llms-cloud.txt)
 
 Submit work as granular as possible: one job per run. A hyperparameter sweep should be many
 jobs (one per configuration), not one command that loops over every point. Small jobs give the

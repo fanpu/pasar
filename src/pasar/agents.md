@@ -7,7 +7,8 @@ only if it asks to with `--preempt`. A job takes the **whole GPU** by default (r
 **memory slice** (`--mem`) to share the box with other jobs when it suits sharing. Every job is a real systemd unit, so it
 survives a pasard restart and can be inspected with normal Linux tools. This guide matches the
 pasar version installed on this machine; run `pasar guide` any time to reprint it, or fetch it
-over HTTP at `/llms.txt` (see below).
+over HTTP at `/llms.txt` (see below). Cloud GPUs have a guide of their own: `pasar guide cloud`
+(or `/llms-cloud.txt`).
 
 ## Connecting
 
@@ -224,97 +225,28 @@ These apply to every `pasar` command, not just `wait`:
 | `launch_error` | pasar couldn't even start the attempt (bad `--cwd`, systemd error). | Fix the command/cwd, then restart. |
 | `cancelled` | Someone ran `pasar cancel <id>`, or the daemon shut it down as part of a cancel. | Nothing to do; resubmit if you still need it. |
 | `preempted` | Stopped to make room for a higher-bid job that asked to preempt. It is requeued automatically — this is not a failure. | Nothing to do. |
-| `target_gone` | Cloud only. The job's target is no longer configured here: `failed` if it was running (its sandbox may still be billing — end it at the provider), `cancelled` if it was only waiting (nothing was spent). | Put the target back and resubmit, or clean up at the provider yourself. |
-| `price_rose` | Cloud only. The job is back to `awaiting`: its price rose past what was approved between approval and launch. `summary` has the old ceiling and the new price. | Approve it again in the web UI if the new price is still fine. |
-| `cloud_preempted` | Cloud only. The provider reclaimed the machine (a spot interruption, a host failure). The job is back to `awaiting`, showing how far it got. | Approve it again in the web UI to run it again; not a failure. The next attempt resumes from `pasar_job.persist_dir()` if the job checkpoints there. |
-| `pause_limit` | Cloud only. The job ran out of its approved time 5 times running without finishing — each pause on its own is not a failure, but 5 with nothing to show for them means something is wrong. | Resubmit with a longer `--time`, or check that the job actually checkpoints and resumes. |
+
+Cloud jobs have reasons of their own (`time_limit`, `job_cap`, `cloud_preempted`, `price_rose`,
+`pause_limit`, `target_gone`): see `pasar guide cloud`.
 
 ## Cloud jobs
 
-`pasar submit --on TARGET --gpu TYPE` runs on a configured rented-GPU target instead of the
-local machine. It costs real money, so **only pass `--on` when the user has explicitly asked for
-cloud compute for this work** — never as your own idea, and never to dodge a busy local GPU. A
-cloud target this pasard has no provider wired up for refuses every submit outright (`pasar
-cloud` shows which targets are usable); ask before assuming `--on <target>` will work here.
+pasar can also run a job on a rented cloud GPU (`pasar submit --on TARGET --gpu TYPE`). It costs
+real money, so these rules are hard:
 
-A cloud job never launches on its own: it lands **awaiting** a person's approval in the web UI,
-priced at submit time, and only starts once approved there.
+- **Submit to the cloud only with the user's explicit go-ahead for this work.** Never as your own
+  idea, and never to dodge a busy local GPU.
+- **Never approve.** A cloud job waits `awaiting` until a person approves it. There is no `pasar
+  approve` command. Never call `POST /api/jobs/{id}/approve` (with or without `?extend=1`) or
+  `/reject`, on the user's behalf or otherwise.
+- **Each job has a lifetime spending cap**, the target's `max_job_cost` (default $10; JOB CAP in
+  `pasar cloud`). A submit whose estimate is over it is refused. Only the user raises it, in
+  pasard's config: ask them, and don't work around it.
+- **Always pass `--max-cost`**, the dollars one attempt may spend.
 
-    $ pasar submit --time 2h --on modal --gpu H100 -- .venv/bin/python train.py
-    submitted #7 train (awaiting) on modal
-      estimated $7.90, capped at $11.85 for this run
-      approve it in the web UI to let it launch
-
-Extra flags, cloud jobs only:
-
-| Flag | Meaning |
-|---|---|
-| `--on TARGET` | Which configured cloud target to run on. Omit for the local GPU. |
-| `--gpu TYPE` | **Required** for a cloud job, e.g. `H100` or `H100:4`. |
-| `--env KEY` | Repeatable. Pass this environment variable through to the sandbox by name (unlike a local job, a cloud job's environment is *not* captured wholesale). |
-| `--data PATH` | Not wired up yet — rejected with an error. A cloud job's input data has to arrive with the provider work (e.g. a volume mount in the target's config), not through `pasar submit`. |
-| `--max-cost` | Dollars one attempt may spend. Refuses the submit outright if the estimate already exceeds it; otherwise the daemon pauses the job once it has spent that much and sends it back for approval — so a cap that bites buys fewer hours too (`pasar show` prints the shortened run time). |
-
-`--mem`, `--retries` and `--preempt` are refused for a cloud job, and `pasar restart` on one is
-refused too (it would spend money on whatever is in the working tree now, unseen): the error
-gives the equivalent `pasar submit` command to run instead.
-
-**There is no `pasar approve` command, and agents must never call `POST /api/jobs/{id}/approve`
-(with or without `?extend=1`) or `/reject` directly.** Approval is meant to be a web-UI-only
-action; that UI doesn't exist yet, so for now a person does it by calling the endpoint directly
-themselves — still never an agent, on the user's behalf or otherwise. A person looks at the price
-before it's spent, whether that is a new job's first launch or a running job's request for more
-time (see `needs_more_time` below). `pasar cloud [--json]` shows what's waiting:
-
-    $ pasar cloud
-    TARGET  PROVIDER  RUNNING  TODAY           MONTH            JOB CAP  STORED              RATES
-    modal   modal     1/2      $7.90 / $50.00  $7.90 / $300.00  $10.00   0.0 GiB (0 job(s))  gpu_hour_cost_h100=$3.95, ...
-
-    1 job(s) awaiting approval:
-    ID  NAME   STATE     BID   MEMORY            TIME  BY
-    7   train  awaiting  1000  H100 (~$7.90)      —    agent-3
-
-A cloud job's `state` field also passes through `awaiting` if its approved run time runs out
-before the job finishes (`reason` `time_limit`; after 5 such pauses without finishing it fails
-instead, `reason` `pause_limit`), if the provider reclaims the machine (reason
-`cloud_preempted`), or if its price rose past what was approved between approval and launch
-(reason `price_rose`, with the old ceiling and new price in `summary`) — in every case, it needs
-approving again in the web UI, the same as a fresh submission. An approved job starts a fresh
-attempt from the same code snapshot, with `PASAR_RESUMING=1`: it resumes from its last checkpoint
-if it wrote one under `pasar_job.persist_dir()`, or starts over if it never checkpointed.
-`pasar wait` keeps waiting through
-all of these (they aren't a terminal state); use `--timeout` if you don't want to wait on a human.
-If the target stops being configured on this pasard, a running cloud job ends `failed` (reason
-`target_gone` — its sandbox may still be running and billing at the provider, since nothing here
-can reach it any more) and a waiting one ends `cancelled` (reason `target_gone`, nothing was
-spent) — both ordinary terminal states with `pasar wait`'s usual exit codes.
-
-What a cloud job wrote under `pasar_job.persist_dir()` is pulled into `<pull_dir>/<id>/` when it
-finishes and deleted at the provider. A pull skipped for disk space, or given up on, leaves it
-there only until `cloud.persist.sweeps_at`, when it is deleted for good. `pasar pull <id> [--to
-DIR] [--keep]` fetches it by hand, verifies the file count and byte total against what the
-provider reports, and only then deletes the remote copy (`--keep` leaves it, for the sweep).
-Refused for a job that hasn't finished yet (its checkpoint is still live and the next attempt may
-resume from it), a local job (there is nothing on a provider to pull), or a destination that
-already has something in it. A job that never wrote anything reports that and exits `0`.
-
-`pasar show <id>` and `pasar ls`/`pasar show --json` carry a `cloud` object for cloud jobs:
-`target`, `gpu`, `phase` (where the *attempt* the daemon is watching has got to — `pending`,
-`starting`, `running`, `success`, `exit-code`, `stopped`, `reclaimed`, `time_limit` or `signal`
-— and `null` when there is no live attempt; where the *job* has got to is its own `state` field),
-`estimated_cost`, `max_cost` (the ceiling actually governing the job
-right now — the approved figure once launched, a live-priced one before approval), `user_capped`
-(whether that ceiling is the submitter's own `--max-cost`), `approved_seconds`/`full_seconds` (the
-run time one approval buys, and what it would buy without `--max-cost`), `console_url` (only
-while the daemon is actively watching the attempt), and `needs_more_time` (extra seconds a
-running attempt's own pace projects past its approved run time, or `null` when it's on pace or
-there isn't yet enough progress reported to judge — that needs both 5 minutes of observation and
-at least 3 progress reports since the attempt started). A job flagged this way keeps running
-either way; a person can raise its ceiling in the web UI (`POST /api/jobs/{id}/approve?extend=1`,
-also never for an agent to call) or let it pause at the limit and approve it again from there.
-`persist` (`null` until the job finishes) says what it left behind: `files`/`bytes`/`pulled_at`/
-`pulled_to` of the last pull that landed, `remote_deleted`, `remote_bytes` (still at the provider,
-as last measured), `sweeps_at`, `swept_at`/`swept_bytes` and `last_error`.
+**Run `pasar guide cloud` before submitting cloud work.** It covers everything about running a
+cloud job: its flags, approval, pauses, `pasar cloud`, `pasar pull` and the `cloud` object in
+JSON.
 
 ## HTTP API quick reference
 
@@ -340,7 +272,7 @@ whatever `PASAR_URL` would be (default `http://127.0.0.1:8750`).
 | `GET /api/gpu` | GPU power/temperature/utilisation history from Prometheus, if configured. |
 | `GET /api/stream` | SSE stream of `{status, jobs}` snapshots, one per state change. |
 | `GET /llms.txt` | This guide, as `text/plain`. |
-| `GET /agents.md` | This guide, as `text/markdown` (identical text). |
+| `GET /llms-cloud.txt` | The cloud guide (`pasar guide cloud`), as `text/plain`. |
 
 Submit example:
 

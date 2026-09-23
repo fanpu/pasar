@@ -422,6 +422,10 @@ def create_app(daemon: Daemon, *, prom: Prometheus | None = None, wake=lambda: N
     async def llms_txt():
         return PlainTextResponse(load_guide())
 
+    @app.get("/llms-cloud.txt")
+    async def llms_cloud_txt():
+        return PlainTextResponse(load_guide("cloud"))
+
     ui = WEBUI_DIR if webui_dir is None else webui_dir
     assets = (ui / "assets").resolve()
 

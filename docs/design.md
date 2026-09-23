@@ -256,7 +256,7 @@ Git commit and uncommitted diff of the working directory are recorded automatica
 
 Every command accepts `--json`. `pasar wait` exit codes: `0` completed, `1` failed, `2` oom, `3` cancelled, `4` timeout. Codes 64 and above are CLI errors (bad arguments, daemon unreachable).
 
-`pasar guide` prints a self-contained agent-facing guide (packaged as `src/pasar/agents.md`, shipped in the wheel) — it works without a daemon running.
+`pasar guide` prints a self-contained agent-facing guide (packaged as `src/pasar/agents.md`, shipped in the wheel) — it works without a daemon running. `pasar guide cloud` prints the cloud GPU topic (`src/pasar/agents-cloud.md`), also served at `/llms-cloud.txt`.
 
 ## HTTP API
 
