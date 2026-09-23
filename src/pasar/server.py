@@ -10,6 +10,7 @@ from pathlib import Path
 import uvicorn
 
 from pasar.api import create_app
+from pasar.cloud.providers import build_providers
 from pasar.config import Config, load_config
 from pasar.daemon import Daemon
 from pasar.db import Store
@@ -34,7 +35,8 @@ def build(cfg: Config, wake=lambda: None, shutdown: asyncio.Event | None = None)
     store = Store(data / "pasar.db")
     prom = Prometheus(cfg.prometheus_url) if cfg.prometheus_url else None
     metrics = MetricsRecorder(prom, store) if prom else None
-    daemon = Daemon(cfg, store, SystemdExecutor(), Probe(), data, metrics=metrics)
+    daemon = Daemon(cfg, store, SystemdExecutor(), Probe(), data, metrics=metrics,
+                    providers=build_providers(cfg, data))
     return daemon, create_app(daemon, prom=prom, wake=wake, shutdown=shutdown)
 
 

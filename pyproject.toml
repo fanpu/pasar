@@ -13,6 +13,9 @@ dependencies = [
     "pydantic>=2",
 ]
 
+[project.optional-dependencies]
+modal = ["modal>=1.5"]
+
 [project.scripts]
 pasar = "pasar.cli:main"
 pasard = "pasar.server:main"

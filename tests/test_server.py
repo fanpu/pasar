@@ -1,4 +1,4 @@
-from pasar.config import DEFAULT_ADDRESS, Config
+from pasar.config import DEFAULT_ADDRESS, CloudTarget, Config
 from pasar.server import build, split_bind, tick_and_housekeep, uvicorn_servers
 
 
@@ -12,6 +12,15 @@ def test_build_creates_data_dir(tmp_path):
     _daemon, app = build(cfg)
     assert (tmp_path / "data" / "pasar.db").exists()
     assert any(r.path == "/api/status" for r in app.routes)
+
+
+def test_build_hands_the_daemon_its_providers(tmp_path, monkeypatch):
+    """The single line that decides whether a configured cloud target can run anything at all."""
+    monkeypatch.setattr("pasar.server.build_providers", lambda cfg, data: {"modal": object()})
+    cloud = CloudTarget(name="modal", provider="modal", daily_budget=1.0, monthly_budget=10.0)
+    cfg = Config(data_dir=str(tmp_path), mascot_dir=str(tmp_path / "m"), clouds={"modal": cloud})
+    daemon, _app = build(cfg)
+    assert "modal" in daemon.executors
 
 
 def test_tick_and_housekeep_survives_a_tick_exception(caplog):
