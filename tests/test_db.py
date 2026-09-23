@@ -91,3 +91,32 @@ def test_gpu_samples_roundtrip(store):
     store.add_gpu_samples(1, 1, 100.0, [[0, 55.0, 1024.0, 81920.0, 240.5, 61.0]])
     rows = store.gpu_samples(1, 1)
     assert rows[0][1] == 0 and rows[0][2] == 55.0
+
+
+def test_cloud_spend_roundtrip_and_scoping(store):
+    j = store.insert_job(spec(), 1000, 1.0, None)
+    store.record_cloud_spend("modal", j, 1, "2026-01-01", 5.0, None)
+    store.record_cloud_spend("other", j, 1, "2026-01-01", 100.0, None)
+    rows = store.cloud_spend("modal")
+    assert len(rows) == 1
+    assert rows[0]["job_id"] == j and rows[0]["estimated"] == 5.0 and rows[0]["billed"] is None
+    assert store.cloud_spend_on("modal", "2026-01-01")[0]["estimated"] == 5.0
+    assert store.cloud_spend_on("modal", "2026-01-02") == []
+    assert len(store.cloud_spend_in_month("modal", "2026-01")) == 1
+    assert store.cloud_spend_in_month("modal", "2026-02") == []
+
+
+def test_cloud_spend_upsert_keeps_the_original_day(store):
+    j = store.insert_job(spec(), 1000, 1.0, None)
+    store.record_cloud_spend("modal", j, 1, "2026-01-01", 5.0, None)
+    store.record_cloud_spend("modal", j, 1, "2026-01-02", 5.0, 7.25)
+    rows = store.cloud_spend("modal")
+    assert len(rows) == 1
+    assert rows[0]["day"] == "2026-01-01"
+    assert rows[0]["billed"] == 7.25
+
+
+def test_cloud_spend_is_empty_for_a_target_with_no_rows(store):
+    assert store.cloud_spend("modal") == []
+    assert store.cloud_spend_on("modal", "2026-01-01") == []
+    assert store.cloud_spend_in_month("modal", "2026-01") == []

@@ -76,6 +76,16 @@ CREATE TABLE IF NOT EXISTS gpu_samples (
     util REAL, mem_used REAL, mem_total REAL, power REAL, temp REAL
 );
 CREATE INDEX IF NOT EXISTS gpu_samples_job ON gpu_samples(job_id, attempt, ts);
+CREATE TABLE IF NOT EXISTS cloud_spend (
+    target TEXT NOT NULL,
+    job_id INTEGER NOT NULL,
+    attempt INTEGER NOT NULL,
+    day TEXT NOT NULL,
+    estimated REAL NOT NULL,
+    billed REAL,
+    PRIMARY KEY (target, job_id, attempt)
+);
+CREATE INDEX IF NOT EXISTS cloud_spend_day ON cloud_spend(target, day);
 """
 
 _JOB_UPDATABLE = {"spec", "state", "bid", "queue_time", "retries_used", "reason", "summary",
@@ -272,3 +282,30 @@ class Store:
             (job_id, attempt),
         )
         return [tuple(r) for r in rows]
+
+    # cloud spend
+    def record_cloud_spend(self, target: str, job_id: int, attempt: int, day: str,
+                           estimated: float, billed: float | None) -> None:
+        """Insert one attempt's cost row, or refresh its figures if it already has one. `day`
+        only takes effect on the first call for this (target, job_id, attempt): it is left out
+        of the update so a later call cannot move a row to a different day."""
+        self._x(
+            "INSERT INTO cloud_spend (target, job_id, attempt, day, estimated, billed)"
+            " VALUES (?, ?, ?, ?, ?, ?)"
+            " ON CONFLICT(target, job_id, attempt)"
+            " DO UPDATE SET estimated = excluded.estimated, billed = excluded.billed",
+            (target, job_id, attempt, day, estimated, billed),
+        )
+
+    def cloud_spend(self, target: str) -> list[dict]:
+        rows = self._q("SELECT * FROM cloud_spend WHERE target = ?", (target,))
+        return [dict(r) for r in rows]
+
+    def cloud_spend_on(self, target: str, day: str) -> list[dict]:
+        rows = self._q("SELECT * FROM cloud_spend WHERE target = ? AND day = ?", (target, day))
+        return [dict(r) for r in rows]
+
+    def cloud_spend_in_month(self, target: str, month: str) -> list[dict]:
+        rows = self._q("SELECT * FROM cloud_spend WHERE target = ? AND day LIKE ?",
+                       (target, month + "-%"))
+        return [dict(r) for r in rows]
