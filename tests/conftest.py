@@ -9,7 +9,7 @@ from pasar.daemon import Daemon
 from pasar.db import Store
 from pasar.models import JobSpec
 from tests.fakes import FakeClock, FakeExecutor, FakeProbe
-from tests.fakes_cloud import FakeProvider
+from tests.fakes_cloud import FakeProvider, run_now
 
 # The pasar checkout itself: a real git repository with a pyproject.toml and uv.lock right
 # where build_bundle wants them, so API/CLI tests can submit a cloud job without setting up a
@@ -55,7 +55,7 @@ def daemon(tmp_path, clock, executor, probe, platform_check):
     data = tmp_path / "data"
     data.mkdir()
     return Daemon(Config(), Store(data / "pasar.db"), executor, probe, data, clock=clock,
-                  platform_check=platform_check)
+                  platform_check=platform_check, background=run_now)
 
 
 @pytest.fixture

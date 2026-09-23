@@ -32,6 +32,16 @@ def test_pull_dir_defaults_under_data_dir_but_can_be_overridden(tmp_path):
     assert cfg.pull_dir == str(tmp_path / "elsewhere")
 
 
+def test_pull_guards_default_to_a_20gib_margin_and_no_cap_and_parse_as_sizes(tmp_path):
+    cfg = _write(tmp_path, "")
+    assert cfg.pull_min_free == 20 * GiB
+    assert cfg.pull_max == 0  # no limit
+
+    cfg = _write(tmp_path, 'pull_min_free = "5G"\npull_max = "100G"\n')
+    assert cfg.pull_min_free == 5 * GiB
+    assert cfg.pull_max == 100 * GiB
+
+
 def test_parses_sizes_and_durations(tmp_path):
     p = tmp_path / "config.toml"
     p.write_text(

@@ -47,6 +47,10 @@ EXTENSION_MARGIN = 1.1  # buffer added to a projected overrun so one extension d
                         # immediately re-flagged by ordinary noise in the next progress report
 USAGE_HISTORY = 1800  # samples per job (an hour at the default 2s tick), current attempt only
 RECENT = 86400  # matches api.RECENT: usage_history for jobs finished longer ago than this is dropped
+# How far back housekeep looks for a finished cloud job whose automatic pull never landed (a
+# failed download, a full disk, pasard restarted mid-pull). Stands in for the cloud retention
+# period until that is configurable: past it, a job's results are left for a manual `pasar pull`.
+PULL_RETRY_WINDOW = 3 * 86400
 
 
 class NotFound(Exception):
@@ -55,6 +59,11 @@ class NotFound(Exception):
 
 class Conflict(Exception):
     pass
+
+
+class PullSkipped(Conflict):
+    """A pull that measured what it would fetch and chose not to: not enough room on the
+    destination filesystem, or more than `pull_max`. Nothing was downloaded or deleted."""
 
 
 def _write_private(path: Path, text: str) -> None:
@@ -87,10 +96,26 @@ def _disk_usage(dest: Path) -> tuple[int, int]:
     return len(files), sum(p.stat().st_size for p in files)
 
 
+def _free_space(dest: Path) -> int:
+    """Free bytes on the filesystem `dest` would be written to. `dest` itself usually does not
+    exist yet (a pull creates it), so this asks about its nearest ancestor that does."""
+    p = Path(dest).absolute()
+    while not p.exists():
+        p = p.parent
+    return shutil.disk_usage(p).free
+
+
+def _in_thread(work) -> None:
+    """Run `work` on its own daemon thread: the default background seam. A daemon thread dies
+    with pasard rather than holding up its exit, which leaves a pull cut short exactly as one
+    that failed — nothing deleted at the provider — for housekeep's retry to pick up."""
+    threading.Thread(target=work, name="pasar-pull", daemon=True).start()
+
+
 class Daemon:
     def __init__(self, cfg: Config, store: Store, executor: Executor, probe, data_dir: Path,
                  clock=time.time, metrics=None, providers: dict | None = None,
-                 platform_check=check_platform):
+                 platform_check=check_platform, background=_in_thread):
         self.cfg = cfg
         self.store = store
         self.executor = executor
@@ -131,6 +156,15 @@ class Daemon:
         # of one `pull()` call, never across a tick.
         self._pulling: set[int] = set()
         self._pull_lock = threading.Lock()
+        # Automatic pulls handed to `background` and not yet finished, under the same lock: what
+        # keeps housekeep's retry sweep from queueing a second pull behind one still waiting.
+        self._pull_queued: set[int] = set()
+        # Where slow work goes so it never runs on the tick: a multi-GiB fetch inline in
+        # `_finish` would stall the loop that serves the web UI. Injectable so tests run it on
+        # their own thread, deterministically. So is the free-space probe, so a test can pretend
+        # a disk is full without filling one.
+        self.background = background
+        self.disk_free = _free_space
 
     # ---- helpers
     def job_dir(self, job_id: int) -> Path:
@@ -811,7 +845,8 @@ class Daemon:
         not write into the test process's own working directory."""
         return Path(self.cfg.pull_dir) if self.cfg.pull_dir else self.data_dir / "pulls"
 
-    def pull(self, job_id: int, dest: Path | None = None, keep: bool = False) -> dict:
+    def pull(self, job_id: int, dest: Path | None = None, keep: bool = False,
+             auto: bool = False) -> dict:
         """Fetch a finished cloud job's persist dir to local disk, verify it landed whole, and
         delete the remote copy — the only copy of whatever the job left behind, until this runs.
 
@@ -835,6 +870,17 @@ class Daemon:
         on disk after the fact. A mismatch, or the download itself raising, deletes nothing: not
         the remote copy, not the staged local one — the error names where the staged copy is, so
         nothing is lost even when a pull cannot finish.
+
+        Once past the refusals that say the job cannot be pulled at all, every outcome is
+        recorded as a `pulls` row — landed, found nothing, skipped, failed — so the job can
+        say where its results went, or why they are still at the provider. Whether one landed
+        is also what housekeep's retry sweep goes by (see `_retry_pulls`).
+
+        `auto` is the automatic post-finish pull (see `auto_pull`), which nobody is watching:
+        it pulls nothing if that would leave less than `pull_min_free` on the destination
+        filesystem, or if the job left more than a non-zero `pull_max`. A pull a person asked
+        for skips both — they chose it, and `--to` can point somewhere bigger — and is refused
+        only when the files plainly cannot fit, which would fill the disk and then fail anyway.
         """
         job = self.job(job_id)
         if job.state not in TERMINAL:
@@ -853,13 +899,50 @@ class Daemon:
             if job_id in self._pulling:
                 raise Conflict(f"job {job_id} is already being pulled")
             self._pulling.add(job_id)
+        landed: dict = {}
         try:
-            return self._pull(job_id, job, ex.provider, dest, keep)
+            result = self._pull(job_id, job, ex.provider, dest, keep, auto, landed)
+        except Exception as e:
+            self._record_pull(job_id, dest, landed, str(e) or type(e).__name__)
+            raise
         finally:
             with self._pull_lock:
                 self._pulling.discard(job_id)
+        self._record_pull(job_id, dest, landed, None)
+        return result
 
-    def _pull(self, job_id: int, job: Job, provider, dest: Path, keep: bool) -> dict:
+    def _record_pull(self, job_id: int, dest: Path, landed: dict, error: str | None) -> None:
+        self.store.add_pull(job_id, self.clock(), landed.get("dest", str(dest)),
+                            landed.get("files"), landed.get("bytes"),
+                            landed.get("deleted", False), error)
+
+    def _check_room(self, job: Job, dest: Path, files: int, size: int, auto: bool) -> None:
+        """Refuse, before a byte is fetched, a pull that should not happen. See `pull`."""
+        job_id = job.id
+        where = (f"it is left at {job.spec.target}; pull it by hand with "
+                 f"`pasar pull {job_id} --to <dir>`")
+        if auto and self.cfg.pull_max and size > self.cfg.pull_max:
+            raise PullSkipped(
+                f"job {job_id} left {files} file(s), {fmt_gib(size)} ({size} bytes), more than "
+                f"pull_max ({fmt_gib(self.cfg.pull_max)}) allows one automatic pull; {where}")
+        margin = self.cfg.pull_min_free if auto else 0
+        free = self.disk_free(dest)
+        if free - size < margin:
+            if auto:
+                raise PullSkipped(
+                    f"job {job_id} left {fmt_gib(size)} ({size} bytes), and pulling it to "
+                    f"{dest} would leave {fmt_gib(max(free - size, 0))} free there, under "
+                    f"pull_min_free ({fmt_gib(margin)}); {where}")
+            raise PullSkipped(
+                f"job {job_id} left {fmt_gib(size)} ({size} bytes), but only {fmt_gib(free)} "
+                f"({free} bytes) is free where {dest} would go; nothing was fetched or "
+                "deleted — pick a --to with more room")
+
+    def _pull(self, job_id: int, job: Job, provider, dest: Path, keep: bool, auto: bool,
+              landed: dict) -> dict:
+        """The pull itself; `landed` is filled in as facts become true (what reached `dest`,
+        verified; whether the remote copy was then deleted) so `pull` can record exactly how
+        far it got, whichever way this returns."""
         if dest.exists():
             if not dest.is_dir():
                 raise Conflict(f"{dest} exists and is not a directory; pulling into it is "
@@ -872,7 +955,9 @@ class Daemon:
         if files == 0 and size == 0:
             # Not an error: a job that never wrote a checkpoint is common, and there is nothing
             # to delete at the provider either.
+            landed.update(files=0, bytes=0, dest=None)
             return {"job_id": job_id, "files": 0, "bytes": 0, "dest": None, "deleted": False}
+        self._check_room(job, dest, files, size, auto)
         # Downloaded into a private staging directory, never straight into `dest`: the
         # non-empty check above is check-then-act, so two pulls of *different* jobs racing the
         # same `--to` can both pass it before either has written a byte. Downloading straight
@@ -911,10 +996,18 @@ class Daemon:
                 f"before this one could move into it ({e}); nothing was deleted at the "
                 f"provider — the verified download is kept at {staging}: move it into place "
                 "by hand, or pull again with a different --to") from None
+        landed.update(files=files, bytes=size, dest=str(dest))
         deleted = False
         if not keep:
-            provider.delete_persist(job_id)
+            try:
+                provider.delete_persist(job_id)
+            except Exception as e:
+                raise Conflict(
+                    f"job {job_id}'s pull landed at {dest} and was verified, but the remote copy "
+                    f"could not be deleted ({e}); it is still at {job.spec.target}, and the "
+                    "local copy is complete") from e
             deleted = True
+            landed["deleted"] = True
         now = self.clock()
         self.store.add_machine_event(
             now, "pulled",
@@ -923,6 +1016,48 @@ class Daemon:
         self.changed()
         return {"job_id": job_id, "files": files, "bytes": size, "dest": str(dest),
                 "deleted": deleted}
+
+    def _schedule_pull(self, job: Job) -> None:
+        """Hand a finished cloud job's automatic pull to `background`, unless one is already
+        queued or running. Only for a target this pasard has a provider for: without one there
+        is nothing to reach, and `pull` would only refuse."""
+        if not isinstance(self.executors.get(job.spec.target), CloudExecutor):
+            return
+        with self._pull_lock:
+            if job.id in self._pulling or job.id in self._pull_queued:
+                return
+            self._pull_queued.add(job.id)
+        job_id = job.id
+        try:
+            self.background(lambda: self.auto_pull(job_id))
+        except Exception:
+            # A thread that could not even be started: nothing ran, so nothing is queued, and
+            # the next housekeep will try again.
+            with self._pull_lock:
+                self._pull_queued.discard(job_id)
+            log.exception("could not schedule job %s's automatic pull", job_id)
+
+    def auto_pull(self, job_id: int) -> None:
+        """The automatic pull of a finished cloud job into `<pull_dir>/<job_id>`, as the
+        background runs it: `pull` with the unattended guards on, and every way it can end
+        caught here. Nobody is waiting on the answer, so an exception has nowhere useful to go —
+        it becomes a machine event instead, next to the `pulls` row `pull` already wrote. A
+        skipped or failed pull never touches the job itself: a completed job stays completed
+        with its remote copy intact, and the next housekeep tries again."""
+        try:
+            self.pull(job_id, auto=True)
+        except PullSkipped as e:
+            self.store.add_machine_event(self.clock(), "pull_skipped",
+                                         f"job {job_id} was not pulled automatically: {e}")
+        except Exception as e:
+            if not isinstance(e, Conflict):
+                log.exception("job %s's automatic pull failed", job_id)
+            self.store.add_machine_event(self.clock(), "pull_failed",
+                                         f"job {job_id}'s automatic pull did not finish: {e}")
+        finally:
+            with self._pull_lock:
+                self._pull_queued.discard(job_id)
+            self.changed()
 
     # ---- the loop
     def tick(self) -> None:
@@ -1191,6 +1326,10 @@ class Daemon:
             extra["queue_time"] = now
         self.store.update_job(job_id, state=state, reason=reason, summary=summary,
                               stop_requested=None, retries_used=retries_used, **extra)
+        if state in TERMINAL and self._is_cloud(job):
+            # Scheduled, never run here: this is the tick. `TERMINAL` excludes AWAITING, whose
+            # checkpoint is what the next attempt resumes from.
+            self._schedule_pull(job)
         if self.metrics is not None and not self._is_cloud(job):
             # The metrics recorder summarises this machine's GPU over the attempt's window,
             # which has nothing to do with a job that ran somewhere else.
@@ -1538,13 +1677,22 @@ class Daemon:
                                                  f"{unit} is running but no job owns it")
 
     def housekeep(self) -> None:
-        """Delete files of old finished jobs by age, then by total size. Database rows stay."""
+        """Delete files of old finished jobs by age, then by total size. Database rows stay.
+
+        Only ever `jobs/<id>/`, which is pasar's own record of a job. What a pull fetched lives
+        under `pull_dir` instead, and is neither deleted nor counted towards
+        `log_retention_size` here: it is the user's data, and a 50 GiB checkpoint counted
+        against a 20 GiB log budget would delete other jobs' logs to make room for it."""
         now = self.clock()
         finished = []
+        ended_jobs = []
         for job in self.store.list_jobs(TERMINAL):
             att = self.store.current_attempt(job.id)
-            finished.append(((att.end_time if att and att.end_time else job.queue_time), job.id))
+            ended = att.end_time if att and att.end_time else job.queue_time
+            finished.append((ended, job.id))
+            ended_jobs.append((ended, job))
         finished.sort()
+        self._retry_pulls(now, ended_jobs)
         for ended, job_id in finished:
             if now - ended >= RECENT:
                 self.usage_history.pop(job_id, None)
@@ -1563,3 +1711,16 @@ class Daemon:
                 break
             total -= sizes.get(job_id, 0)
             shutil.rmtree(self.job_dir(job_id), ignore_errors=True)
+
+    def _retry_pulls(self, now: float, ended_jobs: list[tuple[float, Job]]) -> None:
+        """Schedule the automatic pull again for a finished cloud job whose results never
+        landed: a download that failed, a disk that was full, a pasard restarted before or
+        during the pull. Going by a landed `pulls` row, not by the last outcome, is what stops
+        this looping: a job pulled once (or found with nothing to pull) is never asked about
+        again, even though its remote dir now reads as empty. Only within `PULL_RETRY_WINDOW`
+        of the job ending, so a job whose results will not come down is not retried forever.
+        Scheduled, not run: this is called from the tick."""
+        for ended, job in ended_jobs:
+            if (self._is_cloud(job) and now - ended <= PULL_RETRY_WINDOW
+                    and self.store.last_pull(job.id, landed=True) is None):
+                self._schedule_pull(job)

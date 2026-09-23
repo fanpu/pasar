@@ -15,13 +15,13 @@ import pytest
 from pasar.cloud.cost import estimate, hourly_rate
 from pasar.cloud.executor import parse_unit
 from pasar.config import CloudTarget, Config
-from pasar.daemon import CLOUD_RATE_TTL, PAUSE_LIMIT, Conflict, Daemon
+from pasar.daemon import CLOUD_RATE_TTL, PAUSE_LIMIT, PULL_RETRY_WINDOW, Conflict, Daemon
 from pasar.db import Store
 from pasar.executor.base import UnitState
 from pasar.models import EndKind, JobSpec, State
 from pasar.units import GiB
 from pasar.views import cloud_view
-from tests.fakes_cloud import FakeProvider, launch_request
+from tests.fakes_cloud import FakeProvider, launch_request, run_now
 
 
 class StubMetrics:
@@ -60,7 +60,7 @@ def make_cloud(tmp_path, clock, executor, probe, platform_check):
         cfg = Config(clouds={"fake": CloudTarget(**{**base, **target_kw})})
         daemon = Daemon(cfg, Store(data / "pasar.db"), executor, probe, data, clock=clock,
                         metrics=metrics, providers={"fake": provider},
-                        platform_check=platform_check)
+                        platform_check=platform_check, background=run_now)
         return daemon, provider
 
     return make
@@ -1246,6 +1246,365 @@ def test_pull_of_two_different_jobs_racing_the_same_dest_deletes_at_most_one_rem
     staging_a = _staging_dir(tmp_path, job_a)
     assert (staging_a / "checkpoint.pt").read_bytes() == b"AAAAAAA"
     assert str(staging_a) in str(exc.value)
+
+
+# ---- automatic pull
+
+ROOMY = 1 << 50  # free bytes a test's fake filesystem reports when room is not the point
+
+
+def roomy(daemon, free=ROOMY):
+    """Pin what the destination filesystem reports as free, and record which path was asked:
+    the guard must look at the nearest directory that exists, since `pulls/<id>` does not yet."""
+    asked: list[Path] = []
+
+    def disk_free(path):
+        asked.append(Path(path))
+        return free
+
+    daemon.disk_free = disk_free
+    return asked
+
+
+def pulls_of(daemon, job_id):
+    return daemon.store.pulls(job_id)
+
+
+def events_of(daemon, kind):
+    return [e["text"] for e in daemon.store.machine_events(200) if e["kind"] == kind]
+
+
+def end_as(daemon, provider, repo, outcome, **kw):
+    """Launch one cloud job and end it `outcome`-wise; returns its id once the tick settled it."""
+    job_id = start(daemon, repo, **kw)
+    handle = handle_of(daemon, job_id)
+    if outcome == "cancelled":
+        daemon.cancel(job_id)
+    provider.finish(handle, 0 if outcome == "completed" else 1)
+    daemon.tick()
+    assert daemon.job(job_id).state == State(outcome)
+    return job_id
+
+
+@pytest.mark.parametrize("how", ["time_limit", "reclaimed"])
+def test_a_paused_job_is_never_pulled_and_its_checkpoint_never_deleted(cloud, repo, clock, how):
+    # The next attempt resumes from exactly this directory: pulling it away (and deleting the
+    # remote copy) would make that attempt silently redo everything the first one was paid for.
+    daemon, provider = cloud
+    roomy(daemon)
+    job_id = start(daemon, repo)
+    provider.persist(job_id, "checkpoint.pt", b"weights")
+    if how == "time_limit":
+        out_of_time(daemon, provider, job_id, 1)
+    else:
+        provider.reclaim(handle_of(daemon, job_id))
+    daemon.tick()
+    assert daemon.job(job_id).state == State.AWAITING
+
+    daemon.housekeep()  # the retry sweep must not pick it up either
+    clock.advance(3600)
+    daemon.housekeep()
+    daemon.auto_pull(job_id)  # nor may the pull itself, even if something did schedule it
+
+    assert provider.persisted[job_id] == {"checkpoint.pt": b"weights"}
+    assert provider.deleted_persist == []
+    assert not (daemon.data_dir / "pulls" / str(job_id)).exists()
+    assert daemon.job(job_id).state == State.AWAITING
+    assert all(p["files"] is None for p in pulls_of(daemon, job_id))
+
+
+def test_housekeep_neither_deletes_nor_counts_what_was_pulled(make_cloud, repo, clock):
+    daemon, provider = make_cloud()
+    roomy(daemon)
+    job_id = start(daemon, repo)
+    provider.persist(job_id, "checkpoint.pt", b"w" * 4096)
+    provider.finish(handle_of(daemon, job_id), 0)
+    daemon.tick()
+    pulled = daemon.data_dir / "pulls" / str(job_id)
+    assert (pulled / "checkpoint.pt").stat().st_size == 4096
+
+    jobs = daemon.data_dir / "jobs"
+    tree = sum(f.stat().st_size for f in jobs.rglob("*") if f.is_file())
+    # Retention sized to fit pasar's own job files exactly, and a pulled file alone bigger than
+    # that: were the pull dir counted, housekeep would delete job files to get back under it.
+    daemon.cfg.log_retention_size = tree
+    (pulled / "extra.bin").write_bytes(b"x" * (tree + 1))
+    before = sorted(p for p in jobs.rglob("*"))
+
+    daemon.housekeep()
+
+    assert sorted(p for p in jobs.rglob("*")) == before
+    assert (pulled / "extra.bin").stat().st_size == tree + 1
+
+    clock.advance((daemon.cfg.log_retention_days + 1) * 86400)
+    daemon.housekeep()  # old enough that its job files go: the pulled copy still stays
+    assert not daemon.job_dir(job_id).exists()
+    assert (pulled / "checkpoint.pt").stat().st_size == 4096
+    assert (pulled / "extra.bin").exists()
+
+
+@pytest.mark.parametrize("outcome", ["completed", "failed", "cancelled"])
+def test_a_finished_job_is_pulled_whole_and_its_remote_copy_removed(cloud, repo, outcome):
+    daemon, provider = cloud
+    asked = roomy(daemon)
+    job_id = start(daemon, repo)
+    provider.persist(job_id, "checkpoint.pt", b"weights")
+    provider.persist(job_id, "nested/metrics.json", b"{}")
+    handle = handle_of(daemon, job_id)
+    if outcome == "cancelled":
+        daemon.cancel(job_id)
+    provider.finish(handle, 0 if outcome == "completed" else 1)
+    daemon.tick()
+    assert daemon.job(job_id).state == State(outcome)
+
+    dest = daemon.data_dir / "pulls" / str(job_id)
+    assert (dest / "checkpoint.pt").read_bytes() == b"weights"
+    assert (dest / "nested" / "metrics.json").read_bytes() == b"{}"
+    assert provider.deleted_persist == [job_id]
+    [row] = pulls_of(daemon, job_id)
+    assert row["files"] == 2 and row["bytes"] == len(b"weights{}")
+    assert row["dest"] == str(dest) and row["remote_deleted"] and row["error"] is None
+    assert daemon.store.last_pull(job_id) == row
+    assert asked and all(p.exists() for p in asked)
+    assert events_of(daemon, "pulled")
+
+
+def test_the_pull_runs_off_the_tick_not_inside_it(cloud, repo):
+    daemon, provider = cloud
+    roomy(daemon)
+    pending = []
+    daemon.background = pending.append
+    job_id = start(daemon, repo)
+    provider.persist(job_id, "checkpoint.pt", b"weights")
+    provider.finish(handle_of(daemon, job_id), 0)
+    daemon.tick()
+
+    assert daemon.job(job_id).state == State.COMPLETED
+    assert len(pending) == 1  # handed off...
+    assert job_id in provider.persisted and pulls_of(daemon, job_id) == []  # ...not yet run
+    daemon.housekeep()
+    assert len(pending) == 1  # already scheduled: the retry sweep does not queue it twice
+
+    pending.pop()()
+    assert provider.deleted_persist == [job_id]
+    assert pulls_of(daemon, job_id)[0]["files"] == 1
+
+
+def test_a_pull_that_would_leave_too_little_free_pulls_nothing(cloud, repo, tmp_path):
+    daemon, provider = cloud
+    data = b"w" * 1000
+    # 1000 bytes to pull, and 999 bytes short of leaving `pull_min_free` behind afterwards.
+    roomy(daemon, free=daemon.cfg.pull_min_free + 1)
+    job_id = start(daemon, repo)
+    provider.persist(job_id, "checkpoint.pt", data)
+    provider.finish(handle_of(daemon, job_id), 0)
+    daemon.tick()
+
+    job = daemon.job(job_id)
+    assert job.state == State.COMPLETED and job.reason is None and job.summary == ""
+    assert provider.persisted[job_id] == {"checkpoint.pt": data}
+    assert provider.deleted_persist == []
+    assert not (daemon.data_dir / "pulls" / str(job_id)).exists()
+    assert not list((daemon.data_dir / "pulls").glob(".pasar-pull-*"))  # not even a staging dir
+    [row] = pulls_of(daemon, job_id)
+    assert row["files"] is None and not row["remote_deleted"]
+    assert "pull_min_free" in row["error"] and "--to" in row["error"]
+    [event] = events_of(daemon, "pull_skipped")
+    assert str(job_id) in event and "pull_min_free" in event
+
+    # A person can still pull it somewhere they chose: the margin guards the automatic pull.
+    roomy(daemon, free=len(data))
+    result = daemon.pull(job_id, dest=tmp_path / "bigger")
+    assert result["files"] == 1 and provider.deleted_persist == [job_id]
+
+
+def test_a_manual_pull_that_cannot_fit_at_all_is_refused(cloud, repo, tmp_path):
+    daemon, provider = cloud
+    job_id = finish(daemon, provider, repo)
+    provider.persist(job_id, "checkpoint.pt", b"weights")
+    roomy(daemon, free=len(b"weights") - 1)
+
+    with pytest.raises(Conflict, match="free"):
+        daemon.pull(job_id, dest=tmp_path / "out")
+
+    assert provider.persisted[job_id] == {"checkpoint.pt": b"weights"}
+    assert not (tmp_path / "out").exists()
+    assert "free" in daemon.store.last_pull(job_id)["error"]
+
+
+def test_a_provider_error_mid_pull_leaves_the_remote_copy_and_the_jobs_result(cloud, repo):
+    daemon, provider = cloud
+    roomy(daemon)
+    job_id = start(daemon, repo)
+    provider.persist(job_id, "checkpoint.pt", b"weights")
+    provider.fail_download.add(job_id)
+    provider.finish(handle_of(daemon, job_id), 0)
+    daemon.tick()
+
+    job = daemon.job(job_id)
+    assert job.state == State.COMPLETED and job.reason is None and job.summary == ""
+    assert provider.persisted[job_id] == {"checkpoint.pt": b"weights"}
+    assert provider.deleted_persist == []
+    [row] = pulls_of(daemon, job_id)
+    assert row["files"] is None and "pretend network failure" in row["error"]
+    assert any(str(job_id) in e for e in events_of(daemon, "pull_failed"))
+
+
+def test_an_unexpected_provider_error_does_not_break_the_tick(cloud, repo, monkeypatch):
+    daemon, provider = cloud
+    roomy(daemon)
+
+    def broken(job_id):
+        raise RuntimeError("provider fell over")
+
+    monkeypatch.setattr(provider, "persist_usage", broken)
+    job_id = start(daemon, repo)
+    provider.finish(handle_of(daemon, job_id), 0)
+    daemon.tick()
+
+    assert daemon.job(job_id).state == State.COMPLETED
+    assert "provider fell over" in daemon.store.last_pull(job_id)["error"]
+    assert any("provider fell over" in e for e in events_of(daemon, "pull_failed"))
+
+
+@pytest.mark.parametrize("pull_max, pulled", [(0, True), (7, True), (6, False)])
+def test_pull_max_zero_is_no_limit_and_a_nonzero_one_still_caps(cloud, repo, pull_max, pulled):
+    daemon, provider = cloud
+    roomy(daemon)
+    daemon.cfg.pull_max = pull_max
+    job_id = start(daemon, repo)
+    provider.persist(job_id, "checkpoint.pt", b"weights")  # 7 bytes
+    provider.finish(handle_of(daemon, job_id), 0)
+    daemon.tick()
+
+    row = daemon.store.last_pull(job_id)
+    if pulled:
+        assert row["files"] == 1 and provider.deleted_persist == [job_id]
+    else:
+        assert row["files"] is None and "pull_max" in row["error"]
+        assert provider.persisted[job_id] == {"checkpoint.pt": b"weights"}
+        assert provider.deleted_persist == []
+        assert any("pull_max" in e for e in events_of(daemon, "pull_skipped"))
+
+
+def test_housekeep_retries_a_pull_that_did_not_finish(cloud, repo, clock):
+    daemon, provider = cloud
+    roomy(daemon)
+    job_id = start(daemon, repo)
+    provider.persist(job_id, "checkpoint.pt", b"weights")
+    provider.fail_download.add(job_id)
+    provider.finish(handle_of(daemon, job_id), 0)
+    daemon.tick()
+    assert provider.deleted_persist == []
+
+    provider.fail_download.discard(job_id)
+    clock.advance(3600)
+    daemon.housekeep()
+
+    assert provider.deleted_persist == [job_id]
+    assert (daemon.data_dir / "pulls" / str(job_id) / "checkpoint.pt").read_bytes() == b"weights"
+    assert daemon.store.last_pull(job_id)["files"] == 1
+
+
+def test_housekeep_picks_up_a_pull_a_restart_cut_short(cloud, repo):
+    # pasard went down before the scheduled pull ever ran (or while it ran): nothing was
+    # recorded, and the next housekeep, which runs right after startup, has to pick it up.
+    daemon, provider = cloud
+    roomy(daemon)
+    daemon.background = lambda work: None  # the thread died with the process
+    job_id = start(daemon, repo)
+    provider.persist(job_id, "checkpoint.pt", b"weights")
+    provider.finish(handle_of(daemon, job_id), 0)
+    daemon.tick()
+    assert pulls_of(daemon, job_id) == []
+
+    daemon.background = run_now
+    daemon._pull_queued.clear()  # a fresh process remembers nothing it had queued
+    daemon.housekeep()
+
+    assert provider.deleted_persist == [job_id]
+
+
+def test_housekeep_does_not_pull_again_once_a_pull_succeeded(cloud, repo, clock, monkeypatch):
+    daemon, provider = cloud
+    roomy(daemon)
+    job_id = start(daemon, repo)
+    provider.persist(job_id, "checkpoint.pt", b"weights")
+    provider.finish(handle_of(daemon, job_id), 0)
+    daemon.tick()
+    other = end_as(daemon, provider, repo, "completed")  # nothing to pull: also a success
+    assert daemon.store.last_pull(other)["files"] == 0
+
+    calls = []
+    real = provider.persist_usage
+    monkeypatch.setattr(provider, "persist_usage", lambda jid: calls.append(jid) or real(jid))
+    for _ in range(3):
+        clock.advance(3600)
+        daemon.housekeep()
+
+    assert calls == []
+    assert provider.deleted_persist == [job_id]
+
+
+def test_housekeep_leaves_jobs_that_ended_before_the_retry_window(cloud, repo, clock):
+    daemon, provider = cloud
+    roomy(daemon)
+    daemon.background = lambda work: None
+    job_id = start(daemon, repo)
+    provider.persist(job_id, "checkpoint.pt", b"weights")
+    provider.finish(handle_of(daemon, job_id), 0)
+    daemon.tick()
+
+    daemon.background = run_now
+    daemon._pull_queued.clear()
+    clock.advance(PULL_RETRY_WINDOW + 1)
+    daemon.housekeep()
+
+    assert provider.deleted_persist == [] and pulls_of(daemon, job_id) == []
+
+
+def test_a_pull_that_landed_but_could_not_delete_the_remote_copy_is_not_retried(
+        cloud, repo, clock, monkeypatch):
+    daemon, provider = cloud
+    roomy(daemon)
+
+    def cannot_delete(job_id):
+        raise RuntimeError("delete refused")
+
+    monkeypatch.setattr(provider, "delete_persist", cannot_delete)
+    job_id = start(daemon, repo)
+    provider.persist(job_id, "checkpoint.pt", b"weights")
+    provider.finish(handle_of(daemon, job_id), 0)
+    daemon.tick()
+
+    dest = daemon.data_dir / "pulls" / str(job_id)
+    assert (dest / "checkpoint.pt").read_bytes() == b"weights"
+    row = daemon.store.last_pull(job_id)
+    assert row["files"] == 1 and not row["remote_deleted"] and "delete refused" in row["error"]
+    assert job_id in provider.persisted
+
+    clock.advance(3600)
+    daemon.housekeep()  # it landed: another try would only find `dest` taken, every hour
+    assert len(pulls_of(daemon, job_id)) == 1
+
+
+def test_a_manual_pull_records_its_outcome_too(cloud, repo, tmp_path):
+    daemon, provider = cloud
+    job_id = finish(daemon, provider, repo)
+    provider.persist(job_id, "checkpoint.pt", b"weights")
+    taken = tmp_path / "taken"
+    taken.mkdir()
+    (taken / "x").write_text("x")
+
+    with pytest.raises(Conflict):
+        daemon.pull(job_id, dest=taken)
+    refused = daemon.store.last_pull(job_id)
+    assert refused["files"] is None and "not empty" in refused["error"]
+
+    daemon.pull(job_id, dest=tmp_path / "out", keep=True)
+    kept = daemon.store.last_pull(job_id)
+    assert kept["files"] == 1 and not kept["remote_deleted"] and kept["error"] is None
+    assert kept["dest"] == str(tmp_path / "out")
 
 
 # ---- the per-job lifetime cap

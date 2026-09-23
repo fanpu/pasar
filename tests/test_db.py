@@ -131,3 +131,19 @@ def test_cloud_spend_is_empty_for_a_target_with_no_rows(store):
     assert store.cloud_spend("modal") == []
     assert store.cloud_spend_on("modal", "2026-01-01") == []
     assert store.cloud_spend_in_month("modal", "2026-01") == []
+
+
+def test_pulls_round_trip_and_the_latest_is_what_is_read(store):
+    assert store.last_pull(1) is None and store.pulls(1) == []
+    store.add_pull(1, 10.0, "/p/1", None, None, False, "no room")
+    store.add_pull(1, 20.0, "/p/1", 2, 99, True, None)
+    store.add_pull(1, 30.0, "/elsewhere", None, None, False, "not empty")
+    store.add_pull(2, 15.0, None, 0, 0, False, None)
+
+    assert [p["ts"] for p in store.pulls(1)] == [10.0, 20.0, 30.0]
+    assert store.last_pull(1)["error"] == "not empty"
+    # What landed is asked for separately: a later refusal (a bad --to, say) must not hide it.
+    landed = store.last_pull(1, landed=True)
+    assert landed == {"job_id": 1, "ts": 20.0, "dest": "/p/1", "files": 2, "bytes": 99,
+                      "remote_deleted": True, "error": None}
+    assert store.last_pull(2, landed=True)["files"] == 0

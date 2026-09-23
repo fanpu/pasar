@@ -22,6 +22,13 @@ def launch_request(tmp_path, job_id=1, attempt=1, **kw):
                        tags={"pasar_job": str(job_id), "pasar_attempt": str(attempt)}, **kw)
 
 
+def run_now(work) -> None:
+    """The daemon's background seam, run on the caller's thread. A finished cloud job's
+    automatic pull is handed to a thread in production; here it runs before `_finish` returns,
+    so a test sees its whole outcome deterministically and no stray thread outlives the test."""
+    work()
+
+
 @dataclass
 class _Sandbox:
     req: CloudLaunch

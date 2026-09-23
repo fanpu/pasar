@@ -9,7 +9,8 @@ from pasar.units import GiB, parse_duration, parse_size
 
 DEFAULT_ADDRESS = "127.0.0.1:8750"
 
-_SIZE_KEYS = {"system_reserve", "mem_margin_min", "log_retention_size"}
+_SIZE_KEYS = {"system_reserve", "mem_margin_min", "log_retention_size", "pull_min_free",
+              "pull_max"}
 _DURATION_KEYS = {"default_grace", "pressure_sustain"}
 
 
@@ -118,6 +119,12 @@ class Config:
     mascot_dir: str = ""
     data_dir: str = ""
     pull_dir: str = ""
+    # A finished cloud job's results are pulled here whole, however big, so the one guard is the
+    # disk itself: an automatic pull that would leave less than this free on the destination
+    # filesystem pulls nothing, since filling the disk pasard runs on would take it down too.
+    pull_min_free: int = 20 * GiB
+    # An optional ceiling on one automatic pull, for anyone who wants one; 0 means no limit.
+    pull_max: int = 0
     allowed_hosts: list[str] = field(default_factory=list)
     clouds: dict[str, CloudTarget] = field(default_factory=dict)
 

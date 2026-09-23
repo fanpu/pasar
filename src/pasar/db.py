@@ -95,6 +95,17 @@ CREATE TABLE IF NOT EXISTS approvals (
     hourly_rate REAL,
     PRIMARY KEY (job_id, attempt)
 );
+CREATE TABLE IF NOT EXISTS pulls (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    job_id INTEGER NOT NULL,
+    ts REAL NOT NULL,
+    dest TEXT,
+    files INTEGER,
+    bytes INTEGER,
+    remote_deleted INTEGER NOT NULL DEFAULT 0,
+    error TEXT
+);
+CREATE INDEX IF NOT EXISTS pulls_job ON pulls(job_id);
 """
 
 _JOB_UPDATABLE = {"spec", "state", "bid", "queue_time", "retries_used", "reason", "summary",
@@ -368,3 +379,35 @@ class Store:
         job's lifetime cap is measured against."""
         rows = self._q("SELECT * FROM cloud_spend WHERE job_id = ? ORDER BY attempt", (job_id,))
         return [dict(r) for r in rows]
+
+    # pulls
+    def add_pull(self, job_id: int, ts: float, dest: str | None, files: int | None,
+                 size: int | None, remote_deleted: bool, error: str | None) -> None:
+        """One outcome of one pull of a cloud job's persist dir, manual or automatic. `files` and
+        `size` (the `bytes` column) are what landed locally, verified — NULL when nothing did,
+        which is how a refusal or a failure reads; 0 and 0 when the job left nothing to pull.
+        `error` may be set on a row that did land: a verified local copy whose remote one could
+        not then be deleted."""
+        self._x("INSERT INTO pulls (job_id, ts, dest, files, bytes, remote_deleted, error)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (job_id, ts, dest, files, size, int(remote_deleted), error))
+
+    @staticmethod
+    def _pull(row: sqlite3.Row) -> dict:
+        d = dict(row)
+        d.pop("id")
+        d["remote_deleted"] = bool(d["remote_deleted"])
+        return d
+
+    def pulls(self, job_id: int) -> list[dict]:
+        rows = self._q("SELECT * FROM pulls WHERE job_id = ? ORDER BY id", (job_id,))
+        return [self._pull(r) for r in rows]
+
+    def last_pull(self, job_id: int, landed: bool = False) -> dict | None:
+        """The job's latest pull, or with `landed` its latest one that got a verified copy onto
+        local disk (or found nothing to pull). The two differ: a manual pull refused for a bad
+        `--to` after the automatic one succeeded is the latest pull, but not where the data is."""
+        where = " AND files IS NOT NULL" if landed else ""
+        rows = self._q(f"SELECT * FROM pulls WHERE job_id = ?{where} ORDER BY id DESC LIMIT 1",
+                       (job_id,))
+        return self._pull(rows[0]) if rows else None
