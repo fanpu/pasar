@@ -205,22 +205,28 @@ class FakeVolume:
         # Paths whose read_file yields fewer bytes than listdir's reported size, so a test can
         # make the provider's own write-vs-listing check fire without touching the real SDK.
         self.short_reads: set[str] = set()
+        # Directories stay once made, as on a real volume, until something removes them:
+        # emptying one of its files does not make it vanish. Every file's parents are added as
+        # it is listed or removed; a test can also add an empty one here directly.
+        self.dirs: set[str] = set()
+        self.removed: list[tuple[str, bool]] = []  # (path, recursive) of each remove_file
+
+    def _dirs(self) -> set[str]:
+        for p in list(self.files) + list(self.special):
+            parts = p.split("/")[:-1]
+            for i in range(1, len(parts) + 1):
+                self.dirs.add("/".join(parts[:i]))
+        return self.dirs
 
     def listdir(self, path, *, recursive=False):
         prefix = path.rstrip("/") + "/"
         under = sorted(p for p in self.files if p.startswith(prefix))
         specials = sorted(p for p in self.special if p.startswith(prefix))
-        if not under and not specials:
+        if not under and not specials and path.rstrip("/") not in self._dirs():
             # Mirrors the real SDK: listing a path nothing ever wrote to raises, it does not
             # hand back an empty list.
             raise NotFoundError(f"no such path in volume {self.name!r}: {path!r}")
-        dirs = set()
-        for p in under + specials:
-            parts = p[len(prefix):].split("/")[:-1]
-            acc = path.rstrip("/")
-            for part in parts:
-                acc = f"{acc}/{part}"
-                dirs.add(acc)
+        dirs = {d for d in self._dirs() if d.startswith(prefix)}
         entries = [FakeFileEntry(d, FileEntryType.DIRECTORY, 0) for d in sorted(dirs)]
         entries += [FakeFileEntry(p, FileEntryType.FILE, len(self.files[p])) for p in under]
         entries += [FakeFileEntry(p, self.special[p], 0) for p in specials]
@@ -243,15 +249,28 @@ class FakeVolume:
             yield data
 
     def remove_file(self, path, recursive=False):
-        prefix = path.rstrip("/") + "/"
-        doomed_files = [p for p in self.files if p == path or p.startswith(prefix)]
-        doomed_special = [p for p in self.special if p == path or p.startswith(prefix)]
-        if not doomed_files and not doomed_special:
+        """Like the real SDK's: a file, or with `recursive` a directory and everything under it.
+        A directory with anything in it is refused without `recursive` — that refusal is what
+        keeps a manifest delete from taking a file it never listed."""
+        path = path.rstrip("/")
+        prefix = path + "/"
+        dirs = self._dirs()
+        self.removed.append((path, recursive))
+        if path in self.files or path in self.special:
+            self.files.pop(path, None)
+            self.special.pop(path, None)
+            return
+        if path not in dirs:
             raise FileNotFoundError(path)
-        for p in doomed_files:
-            del self.files[p]
-        for p in doomed_special:
-            del self.special[p]
+        under = [p for p in list(self.files) + list(self.special) + list(dirs)
+                 if p.startswith(prefix)]
+        if under and not recursive:
+            raise RuntimeError(f"directory {path!r} is not empty")
+        for p in under:
+            self.files.pop(p, None)
+            self.special.pop(p, None)
+            self.dirs.discard(p)
+        self.dirs.discard(path)
 
 
 class FakeSDK:

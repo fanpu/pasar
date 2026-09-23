@@ -18,7 +18,7 @@ from pasar.cloud.cost import estimate, hourly_rate
 from pasar.cloud.executor import parse_unit
 from pasar.cloud.modal_provider import ModalProvider
 from pasar.config import CloudTarget, Config
-from pasar.daemon import CLOUD_RATE_TTL, PAUSE_LIMIT, Conflict, Daemon
+from pasar.daemon import CLOUD_RATE_TTL, PAUSE_LIMIT, PULL_SETTLE, Conflict, Daemon
 from pasar.db import Store
 from pasar.executor.base import UnitState
 from pasar.models import EndKind, JobSpec, State
@@ -65,6 +65,10 @@ def make_cloud(tmp_path, clock, executor, probe, platform_check):
         daemon = Daemon(cfg, Store(data / "pasar.db"), executor, probe, data, clock=clock,
                         metrics=metrics, providers={"fake": provider},
                         platform_check=platform_check, background=run_now)
+        # A finished job's automatic pull runs as soon as it is due, and here it is due at
+        # once: most tests are about what a pull does, not when. The settle delay has tests of
+        # its own, which put `PULL_SETTLE` back.
+        daemon.pull_settle = 0
         return daemon, provider
 
     return make
@@ -1488,7 +1492,7 @@ def test_an_unexpected_provider_error_does_not_break_the_tick(cloud, repo, monke
     def broken(job_id):
         raise RuntimeError("provider fell over")
 
-    monkeypatch.setattr(provider, "persist_usage", broken)
+    monkeypatch.setattr(provider, "persist_manifest", broken)
     job_id = start(daemon, repo)
     provider.finish(handle_of(daemon, job_id), 0)
     daemon.tick()
@@ -1565,8 +1569,8 @@ def test_housekeep_does_not_pull_again_once_a_pull_succeeded(cloud, repo, clock,
     daemon.tick()
 
     calls = []
-    real = provider.persist_usage
-    monkeypatch.setattr(provider, "persist_usage", lambda jid: calls.append(jid) or real(jid))
+    real = provider.persist_manifest
+    monkeypatch.setattr(provider, "persist_manifest", lambda jid: calls.append(jid) or real(jid))
     for _ in range(3):
         clock.advance(3600)
         daemon.housekeep()
@@ -1604,7 +1608,7 @@ def test_a_pull_that_landed_but_could_not_delete_the_remote_copy_is_not_retried(
     def cannot_delete(job_id):
         raise RuntimeError("delete refused")
 
-    monkeypatch.setattr(provider, "delete_persist", cannot_delete)
+    monkeypatch.setattr(provider, "delete_persist_files", lambda jid, files: cannot_delete(jid))
     job_id = start(daemon, repo)
     provider.persist(job_id, "checkpoint.pt", b"weights")
     provider.finish(handle_of(daemon, job_id), 0)
@@ -1812,8 +1816,8 @@ def test_automatic_pulls_give_up_after_three_tries(cloud, repo, clock, tmp_path,
     assert len(staged) == 3 and all(str(p) in event for p in staged)
 
     calls = []
-    real = provider.persist_usage
-    monkeypatch.setattr(provider, "persist_usage", lambda jid: calls.append(jid) or real(jid))
+    real = provider.persist_manifest
+    monkeypatch.setattr(provider, "persist_manifest", lambda jid: calls.append(jid) or real(jid))
     for _ in range(3):
         clock.advance(3600)
         daemon.housekeep()
@@ -1846,8 +1850,8 @@ def test_a_job_that_really_left_nothing_costs_three_cheap_looks_and_no_alarm(clo
                                                                             monkeypatch):
     daemon, provider = cloud
     calls = []
-    real = provider.persist_usage
-    monkeypatch.setattr(provider, "persist_usage", lambda jid: calls.append(jid) or real(jid))
+    real = provider.persist_manifest
+    monkeypatch.setattr(provider, "persist_manifest", lambda jid: calls.append(jid) or real(jid))
     job_id = end_as(daemon, provider, repo, "completed")
     for _ in range(5):
         clock.advance(3600)
@@ -1855,6 +1859,168 @@ def test_a_job_that_really_left_nothing_costs_three_cheap_looks_and_no_alarm(clo
 
     assert calls == [job_id] * 3
     assert events_of(daemon, "pull_gave_up") == []
+
+
+# ---- a pull deletes only what it verified
+
+def test_a_file_committed_during_the_download_survives_the_pull(cloud, repo):
+    # A mount commits in the background, so a final checkpoint can reach the volume after the
+    # pull listed the dir, while it is still downloading. Deleting "the job's dir" once the
+    # download verified would take that file with it, never having fetched it.
+    daemon, provider = cloud
+    roomy(daemon)
+    job_id = start(daemon, repo)
+    provider.persist(job_id, "ckpt-100.pt", b"early")
+    provider.after_download = lambda jid: provider.persist(jid, "final.pt", b"the last one")
+    provider.finish(handle_of(daemon, job_id), 0)
+    daemon.tick()
+
+    dest = daemon.data_dir / "pulls" / str(job_id)
+    assert sorted(p.name for p in dest.iterdir()) == ["ckpt-100.pt"]
+    assert provider.persisted[job_id]["final.pt"] == b"the last one"
+    assert provider.recursive_deletes == []
+
+
+def test_a_listing_that_grew_while_pulling_leaves_the_remote_copy_whole(cloud, repo, tmp_path):
+    # What is on the volume now is not what was verified: the user has to be able to pull the
+    # whole of it again elsewhere, so nothing at all is deleted, and they are told why.
+    daemon, provider = cloud
+    roomy(daemon)
+    job_id = finish(daemon, provider, repo)
+    provider.persist(job_id, "ckpt-100.pt", b"early")
+    provider.after_download = lambda jid: provider.persist(jid, "final.pt", b"the last one")
+
+    result = daemon.pull(job_id, dest=tmp_path / "out")
+
+    assert result["deleted"] is False and "changed while it was being pulled" in result["note"]
+    assert provider.persisted[job_id] == {"ckpt-100.pt": b"early", "final.pt": b"the last one"}
+    assert provider.deleted_files == [] and provider.deleted_persist == []
+    row = daemon.store.last_pull(job_id)
+    assert row["files"] == 1 and not row["remote_deleted"] and row["error"] is None
+    assert daemon.store.last_pull(job_id, landed=True) == row
+    [event] = events_of(daemon, "pull_changed")
+    assert f"job {job_id}" in event and "left in place" in event and "--to" in event
+
+
+def test_a_file_rewritten_at_the_same_size_while_pulling_blocks_the_delete(cloud, repo, tmp_path):
+    # Same name, same size, different bytes: only the listing's mtime can tell, and the copy
+    # that was verified is not the one now on the volume.
+    daemon, provider = cloud
+    roomy(daemon)
+    job_id = finish(daemon, provider, repo)
+    provider.persist(job_id, "ckpt.pt", b"weights")
+    provider.after_download = lambda jid: provider.persist(jid, "ckpt.pt", b"WEIGHTS")
+
+    result = daemon.pull(job_id, dest=tmp_path / "out")
+
+    assert result["deleted"] is False
+    assert (tmp_path / "out" / "ckpt.pt").read_bytes() == b"weights"
+    assert provider.persisted[job_id] == {"ckpt.pt": b"WEIGHTS"}
+    assert provider.deleted_files == []
+
+
+def test_a_file_that_lands_after_the_last_listing_is_still_not_deleted(cloud, repo, tmp_path,
+                                                                        monkeypatch):
+    # The re-listing narrows the race; it cannot close it. What closes it is deleting by
+    # manifest: one named file at a time, never the directory recursively.
+    daemon, provider = cloud
+    roomy(daemon)
+    job_id = finish(daemon, provider, repo)
+    provider.persist(job_id, "ckpt-100.pt", b"early")
+    real = provider.persist_manifest
+    listings = []
+
+    def listing(jid):
+        seen = real(jid)
+        listings.append(seen)
+        if len(listings) == 2:  # the re-listing just before the delete
+            provider.persist(jid, "final.pt", b"the last one")
+        return seen
+
+    monkeypatch.setattr(provider, "persist_manifest", listing)
+    result = daemon.pull(job_id, dest=tmp_path / "out")
+
+    assert result["deleted"] is True
+    assert sorted(p.name for p in (tmp_path / "out").iterdir()) == ["ckpt-100.pt"]
+    assert provider.persisted[job_id] == {"final.pt": b"the last one"}
+    assert provider.deleted_files == [(job_id, "ckpt-100.pt")]
+    assert provider.recursive_deletes == [] and provider.deleted_persist == []
+
+
+def test_a_pull_deletes_each_verified_file_by_name_not_the_whole_dir(cloud, repo):
+    daemon, provider = cloud
+    roomy(daemon)
+    job_id = start(daemon, repo)
+    provider.persist(job_id, "checkpoint.pt", b"weights")
+    provider.persist(job_id, "nested/metrics.json", b"{}")
+    provider.finish(handle_of(daemon, job_id), 0)
+    daemon.tick()
+
+    assert sorted(provider.deleted_files) == [(job_id, "checkpoint.pt"),
+                                              (job_id, "nested/metrics.json")]
+    assert provider.recursive_deletes == [] and job_id not in provider.persisted
+
+
+def test_an_automatic_pull_waits_for_the_volume_to_settle(cloud, repo, clock):
+    # A sandbox's last background commit can still be on its way when it exits: pulling at once
+    # would list the volume before its final checkpoint is there.
+    daemon, provider = cloud
+    daemon.pull_settle = PULL_SETTLE
+    roomy(daemon)
+    job_id = start(daemon, repo)
+    provider.persist(job_id, "ckpt.pt", b"weights")
+    provider.finish(handle_of(daemon, job_id), 0)
+    daemon.tick()
+    assert daemon.job(job_id).state == State.COMPLETED
+    daemon.housekeep()
+    daemon.auto_pull(job_id)  # nor may the pull itself, if something did queue it early
+    clock.advance(PULL_SETTLE - 1)
+    daemon.tick()
+    assert pulls_of(daemon, job_id) == [] and provider.deleted_files == []
+
+    clock.advance(1)
+    daemon.tick()
+    assert pulls_of(daemon, job_id)[0]["files"] == 1 and job_id not in provider.persisted
+
+
+def test_the_settle_delay_holds_nothing_up_on_the_tick(cloud, repo, clock):
+    # Deferred, not waited out: no tick sleeps, and nothing goes to the worker until it is due.
+    daemon, provider = cloud
+    daemon.pull_settle = PULL_SETTLE
+    roomy(daemon)
+    pending = []
+    daemon.background = pending.append
+    job_id = start(daemon, repo)
+    provider.persist(job_id, "ckpt.pt", b"weights")
+    provider.finish(handle_of(daemon, job_id), 0)
+    daemon.tick()
+    daemon.tick()
+    assert pending == [] and clock.t < daemon.store.cloud_finished_at(job_id) + PULL_SETTLE
+
+    clock.advance(PULL_SETTLE)
+    daemon.tick()
+    assert len(pending) == 1
+    pending.pop()()
+    assert pulls_of(daemon, job_id)[0]["files"] == 1
+
+
+def test_a_restart_inside_the_settle_delay_still_pulls_once_it_is_over(make_cloud, repo, clock):
+    daemon, provider = make_cloud()
+    daemon.pull_settle = PULL_SETTLE
+    roomy(daemon)
+    job_id = start(daemon, repo)
+    provider.persist(job_id, "ckpt.pt", b"weights")
+    provider.finish(handle_of(daemon, job_id), 0)
+    daemon.tick()
+
+    after, _ = make_cloud(provider)  # a fresh process remembers nothing it had deferred
+    after.pull_settle = PULL_SETTLE
+    roomy(after)
+    after.housekeep()  # run at startup: too early yet
+    assert pulls_of(after, job_id) == []
+    clock.advance(PULL_SETTLE)
+    after.tick()
+    assert pulls_of(after, job_id)[0]["files"] == 1
 
 
 # ---- sweeping what nobody pulled
@@ -1891,6 +2057,8 @@ def test_a_finished_job_nobody_pulled_is_swept_once_past_retention(cloud, repo, 
     daemon.housekeep()
 
     assert provider.deleted_persist == [job_id] and job_id not in provider.persisted
+    # Past the window, everything goes: the sweep alone deletes the dir recursively.
+    assert provider.recursive_deletes == [job_id]
     assert daemon.store.cloud_swept(job_id) == {"job_id": job_id, "ts": clock.t, "files": 1,
                                                 "bytes": 4096}
     [event] = events_of(daemon, "swept")

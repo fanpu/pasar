@@ -441,6 +441,21 @@ def test_pull_keep_leaves_the_remote_copy(client, capsys, cloud_daemon, cloud_pr
     assert job_id in cloud_provider.persisted
 
 
+def test_pull_says_why_it_kept_a_remote_copy_that_changed(client, capsys, cloud_daemon,
+                                                          cloud_provider, cloud_cwd, tmp_path,
+                                                          monkeypatch):
+    job_id = _run_cloud_job_to_completion(client, capsys, cloud_daemon, cloud_provider,
+                                          cloud_cwd, monkeypatch)
+    cloud_provider.persist(job_id, "checkpoint.pt", b"weights")
+    cloud_provider.after_download = lambda jid: cloud_provider.persist(jid, "final.pt", b"late")
+
+    code, out = run(client, capsys, "pull", str(job_id), "--to", str(tmp_path / "out"))
+
+    assert code == 0 and "kept the remote copy" in out.out
+    assert "changed while it was being pulled" in out.out
+    assert cloud_provider.deleted_persist == []
+
+
 def test_pull_reports_nothing_to_pull_and_exits_zero(client, capsys, cloud_daemon,
                                                      cloud_provider, cloud_cwd, tmp_path,
                                                      monkeypatch):

@@ -256,9 +256,10 @@ finishes, then deleted at the provider. A pull skipped for disk space, or given 
 there only until `cloud.persist.sweeps_at`, when it is deleted for good. For a job nobody pulled,
 that is the only copy.
 
-`pasar pull <id> [--to DIR] [--keep]` fetches it by hand. It verifies the file count and byte
-total against what the provider reports, and only then deletes the remote copy (`--keep` leaves
-it, for the sweep). It is refused for a job that hasn't finished yet (its checkpoint is still
+`pasar pull <id> [--to DIR] [--keep]` fetches it by hand. It verifies every file against what
+the provider listed, and only then deletes the remote copy, exactly the files it verified
+(`--keep` leaves it, for the sweep). If the job's files changed while it pulled, it keeps the
+remote copy and says so: pull again with a different `--to` for the rest. It is refused for a job that hasn't finished yet (its checkpoint is still
 live and the next attempt may resume from it), a local job (there is nothing on a provider to
 pull), or a destination that already has something in it. A job that never wrote anything
 reports that and exits `0`.

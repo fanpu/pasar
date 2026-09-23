@@ -19,6 +19,17 @@ class GpuRow:
     memory_gb: float | None = None
 
 
+@dataclass(frozen=True)
+class PersistFile:
+    """One file in a job's persist dir as a listing saw it: its path relative to that dir
+    (`/`-separated), its size, and its modification time. A pull's manifest is a list of these,
+    and it is compared whole — a file whose size or mtime moved is a different file — because
+    the manifest is exactly what the pull may delete: see `Provider.delete_persist_files`."""
+    path: str
+    size: int
+    mtime: float
+
+
 def gpu_rows(rates: dict[str, float], names: dict[str, str],
              memory_gb: dict[str, float]) -> list[GpuRow]:
     """Collapse `rates`'s `gpu_hour_cost_*` keys into one row per real GPU, cheapest first.
@@ -165,6 +176,12 @@ class Provider(Protocol):
         has fetched what it left behind — so this must answer without downloading anything.
         """
 
+    def persist_manifest(self, job_id: int) -> list[PersistFile]:
+        """Every file under this job's persist dir as it stands right now; `[]` if there is no
+        dir. What a pull downloads, verifies against and — file by file — deletes, so a file
+        written after this listing is never among what the pull deletes. Lists; never
+        downloads."""
+
     def download_persist(self, job_id: int, dest: Path) -> tuple[int, int]:
         """Copy the job's persist dir into `dest`, returning what was written as (files, bytes).
         Creates `dest`. Raises rather than half-succeeding silently.
@@ -176,8 +193,20 @@ class Provider(Protocol):
         finished pull from one that stopped halfway and would delete the only copy regardless.
         """
 
+    def delete_persist_files(self, job_id: int, files: list[PersistFile]) -> None:
+        """Remove exactly `files` from the job's persist dir, one at a time and never
+        recursively, then each directory they leave empty, the job's own dir last. A file not in
+        `files` stays, and so does every directory above it: this is how a pull deletes only what
+        it verified, whatever was written to the volume in the meantime — a mount's background
+        commit can land a final checkpoint after the pull listed the dir. A file already gone is
+        skipped, not an error.
+        """
+
     def delete_persist(self, job_id: int) -> None:
-        """Remove the job's persist dir at the provider. A no-op if it is already gone.
+        """Remove the job's persist dir at the provider, recursively, whatever is in it. A
+        no-op if it is already gone. Only the retention sweep calls this: past the window,
+        deleting everything is the policy. A pull deletes by manifest instead
+        (`delete_persist_files`).
 
         Reachable only for a job whose checkpoint nothing will ever resume from again — never
         for `awaiting`, see `pasar.models.TERMINAL`. A no-op rather than an error because the

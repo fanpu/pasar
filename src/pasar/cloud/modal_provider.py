@@ -20,7 +20,15 @@ import time
 from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
 
-from pasar.cloud.base import Capabilities, CloudLaunch, CloudStatus, GpuRow, Phase, gpu_rows
+from pasar.cloud.base import (
+    Capabilities,
+    CloudLaunch,
+    CloudStatus,
+    GpuRow,
+    PersistFile,
+    Phase,
+    gpu_rows,
+)
 from pasar.cloud.bundle import EnvSpec
 from pasar.cloud.container import BUNDLE, ENV, LIB, PERSIST, WORK, container_env, entry_script
 from pasar.cloud.modal_profile import credentials
@@ -597,6 +605,12 @@ class ModalProvider:
         files = self._persist_files(job_id)
         return len(files), sum(e.size for e in files)
 
+    def persist_manifest(self, job_id: int) -> list[PersistFile]:
+        _check_job_id(job_id)
+        root = str(job_id)
+        return [PersistFile(str(_relative_persist_path(e.path, root)), e.size, e.mtime)
+                for e in self._persist_files(job_id)]
+
     def download_persist(self, job_id: int, dest: Path) -> tuple[int, int]:
         """See `Provider.download_persist`. Each file is streamed straight to disk, one chunk at
         a time, rather than built up in memory first: a checkpoint can be tens of GiB, and Modal
@@ -632,6 +646,38 @@ class ModalProvider:
                     "trust before deleting the only copy")
             total_bytes += written
         return len(files), total_bytes
+
+    def delete_persist_files(self, job_id: int, files: list[PersistFile]) -> None:
+        """See `Provider.delete_persist_files`. Every `remove_file` here is non-recursive, the
+        directories' included: Modal refuses to remove a directory that still holds something
+        that way, so even a file that lands between the listing below and a directory's removal
+        is kept rather than swept up with it. The listing only spares that refusal for the
+        directories plainly not empty; a directory that could not be removed for any other
+        reason is logged and left, since an empty directory costs nothing to keep."""
+        _check_job_id(job_id)
+        root = str(job_id)
+        paths = [_relative_persist_path(f"{root}/{f.path}", root) for f in files]
+        volume = self._volume(f"pasar-{self.target.name}", create=False)
+        dirs = {root}
+        for rel in paths:
+            try:
+                volume.remove_file(f"{root}/{rel}", recursive=False)
+            except (FileNotFoundError, self.sdk.exception.NotFoundError):
+                pass  # already gone: somebody else's delete got there first
+            dirs.update(f"{root}/{parent}" for parent in rel.parents if str(parent) != ".")
+        left = {entry.path for entry in self._list_persist(job_id)}
+        for d in sorted(dirs, key=lambda d: d.count("/"), reverse=True):
+            if any(p.startswith(d + "/") for p in left):
+                continue
+            try:
+                volume.remove_file(d, recursive=False)
+            except (FileNotFoundError, self.sdk.exception.NotFoundError):
+                pass
+            except Exception:  # see the docstring: a kept empty dir is harmless
+                log.warning("could not remove %s's empty directory %s", self.target.name, d,
+                            exc_info=True)
+                continue
+            left.discard(d)
 
     def delete_persist(self, job_id: int) -> None:
         _check_job_id(job_id)

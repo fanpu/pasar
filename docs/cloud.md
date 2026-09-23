@@ -259,13 +259,19 @@ deleted there, and nothing stays at the provider for good:
 | awaiting (paused, reclaimed, price rose) | the checkpoint its next attempt resumes from | **Never** |
 | completed, failed, cancelled | its results | Pulled automatically; whatever is left is swept `cloud_retention_days` after it finished |
 
-- **Automatic pull.** When a cloud job finishes, however it ends, pasard pulls *all* of its
-  persist dir, whatever its size, into `<pull_dir>/<job id>/` (`pull_dir` defaults to
-  `<data_dir>/pulls`, i.e. `~/.local/share/pasar/pulls`). Pulls run one at a time on a worker
-  thread, never on the scheduling loop. A pull downloads into a staging directory
-  (`.pasar-pull-<id>-*`) next to the destination, checks that the file count and total bytes on
-  disk match what the provider reported, renames it into place, and only then deletes the remote
-  copy. A download that fails or does not match deletes nothing.
+- **Automatic pull.** Two minutes after a cloud job finishes, however it ends, pasard pulls
+  *all* of its persist dir, whatever its size, into `<pull_dir>/<job id>/` (`pull_dir` defaults
+  to `<data_dir>/pulls`, i.e. `~/.local/share/pasar/pulls`). The wait is for the volume: a
+  sandbox's mounts commit in the background, so its last checkpoint can land after it ended.
+  Pulls run one at a time on a worker thread, never on the scheduling loop. A pull lists the
+  job's files first, downloads into a staging directory (`.pasar-pull-<id>-*`) next to the
+  destination, checks that every listed file is on disk at its listed size and nothing else is,
+  and renames it into place. Only then does it touch the remote copy: it lists the job's files
+  again, and if they still match what it verified, it deletes exactly those files, one by one,
+  never the directory as a whole, so a file it never fetched is never deleted. If they changed
+  while it was pulling, it deletes nothing, records the pull as landed with the remote copy kept,
+  and a `pull_changed` machine event says so: pull the job again elsewhere with `--to` for the
+  rest. A download that fails or does not match deletes nothing.
 - **Guards.** Filling the disk pasard runs on would take the local scheduler down with it, so an
   automatic pull that would leave less than `pull_min_free` (default 20 GiB) free on the
   destination filesystem pulls nothing, and so does one of a job that left more than `pull_max`
@@ -277,7 +283,7 @@ deleted there, and nothing stays at the provider for good:
   a `pull_gave_up` machine event, which again names the sweep deadline; three looks that found
   nothing raise no alarm.
 - **Manual pull.** `pasar pull <id> [--to DIR] [--keep]` (or `POST /api/jobs/{id}/pull`) does the
-  same verified pull on a person's say-so. `pull_min_free` and `pull_max` do not apply, since the
+  same verified pull on a person's say-so, straight away. `pull_min_free` and `pull_max` do not apply, since the
   person chose it and `--to` can point somewhere bigger; its only room check refuses files that
   plainly cannot fit. `--keep` leaves the remote copy in place, for the sweep to delete later.
 - **The retention sweep deletes the only copy.** `cloud_retention_days` (default 3) after a job
@@ -505,7 +511,8 @@ way), `extended` (a person raised a running attempt's ceiling, and at what rate)
 (a target was removed from config, for both its running and waiting jobs), and `orphan_unit` (a
 live handle this pasard can no longer follow after a restart — the executor never adopted it back
 — which is terminated on the spot rather than left to bill unwatched). For results: `pulled`,
-`pull_skipped` (an automatic pull the free-space guard or `pull_max` stopped), `pull_failed`,
+`pull_skipped` (an automatic pull the free-space guard or `pull_max` stopped), `pull_changed`
+(a pull landed, but the job's files changed while it ran, so the remote copy was kept), `pull_failed`,
 `pull_gave_up` (three automatic tries failed) and `swept` (the retention sweep deleted what
 nobody pulled); the skipped and gave-up events say when the sweep will delete the remote copy.
 

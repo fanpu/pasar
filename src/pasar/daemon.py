@@ -51,6 +51,12 @@ RECENT = 86400  # matches api.RECENT: usage_history for jobs finished longer ago
 # Automatic pulls of one job before pasard stops trying and leaves it to a person. Each failed
 # try may leave a full-size staging copy behind, so this is also what bounds those.
 AUTO_PULL_TRIES = 3
+# Seconds after a cloud job finished before its automatic pull may start. Its mounts commit in
+# the background, so the last checkpoint an attempt wrote can reach the volume after the sandbox
+# has already ended; listing the volume at once would pull everything but that. A manual pull
+# does not wait: whoever asks for one has chosen when, and deleting by manifest keeps whatever
+# lands late either way (see `Daemon.pull`).
+PULL_SETTLE = 120
 
 
 class NotFound(Exception):
@@ -88,12 +94,13 @@ def _separator(n: int, now: float, prev: Attempt | None) -> str:
     return f"──── attempt {n} · {stamp}{why} ────\n"
 
 
-def _disk_usage(dest: Path) -> tuple[int, int]:
-    """(file count, total bytes) actually sitting under `dest` right now. What `pull` verifies
-    a download against is this, walked fresh, and not the provider's own return value — see
-    `Daemon.pull`."""
-    files = [p for p in dest.rglob("*") if p.is_file()]
-    return len(files), sum(p.stat().st_size for p in files)
+def _disk_manifest(dest: Path) -> dict[str, int]:
+    """Each file actually sitting under `dest` right now, by its `/`-separated path relative to
+    `dest`, with its size. What `pull` verifies a download against is this, walked fresh, and
+    not the provider's own return value — see `Daemon.pull` — and file by file rather than as
+    totals, since the manifest it is checked against is exactly what the pull then deletes."""
+    return {p.relative_to(dest).as_posix(): p.stat().st_size
+            for p in dest.rglob("*") if p.is_file()}
 
 
 def _free_space(dest: Path) -> int:
@@ -173,6 +180,12 @@ class Daemon:
         # a disk is full without filling one.
         self.background = background
         self.disk_free = _free_space
+        # Automatic pulls waiting out `PULL_SETTLE`: job -> when it is due, under `_pull_lock`.
+        # Each tick hands the due ones to the worker (`_release_settled`); memory only, since
+        # the housekeep a restarted pasard runs first defers them again from the database.
+        # An attribute rather than the bare constant so a test can make every pull due at once.
+        self._pull_due: dict[int, float] = {}
+        self.pull_settle = PULL_SETTLE
 
     # ---- helpers
     def job_dir(self, job_id: int) -> Path:
@@ -901,12 +914,21 @@ class Daemon:
         plain file), which pulling into would both corrupt and make the verification below
         meaningless.
 
-        `persist_usage` is read *before* downloading, and is the number the download is checked
-        against — not its own return value, which a provider that quietly wrote less could lie
+        The job's manifest (`persist_manifest`: each file, its size and mtime) is listed
+        *before* downloading, and is what the download is checked against, file by file — not
+        the download's own return value, which a provider that quietly wrote less could lie
         about, but a private staging directory (never `dest` itself — see `_pull`) walked fresh
         on disk after the fact. A mismatch, or the download itself raising, deletes nothing: not
         the remote copy, not the staged local one — the error names where the staged copy is, so
         nothing is lost even when a pull cannot finish.
+
+        The remote delete is of that manifest and nothing else, file by file
+        (`delete_persist_files`), and only if a fresh listing taken after the verified copy is
+        in place still matches it exactly. A mount commits in the background, so a job's last
+        checkpoint can reach the volume while its pull is downloading; a recursive delete of
+        the job's dir would destroy it unfetched. A listing that moved deletes nothing: the pull
+        is recorded as landed with its remote copy kept, and a `pull_changed` event (and the
+        returned `note`) says to pull the rest elsewhere.
 
         Once past the refusals that say the job cannot be pulled at all, every outcome is
         recorded as a `pulls` row — landed, found nothing, skipped, failed — so the job can
@@ -1012,7 +1034,8 @@ class Daemon:
                 raise Conflict(f"{dest} already exists and is not empty; pulling into it would "
                                "merge with whatever is already there and make verification "
                                "meaningless — pick another --to, or clear it out first")
-        files, size = provider.persist_usage(job_id)
+        manifest = provider.persist_manifest(job_id)
+        files, size = len(manifest), sum(f.size for f in manifest)
         landed.update(remote_files=files, remote_bytes=size)
         if files == 0 and size == 0:
             # Not an error: a job that never wrote a checkpoint is common, and there is nothing
@@ -1040,8 +1063,9 @@ class Daemon:
                 f"job {job_id}'s download failed before it could be verified ({e}); nothing was "
                 f"deleted at the provider, and whatever it wrote is kept at {staging} — check it "
                 "by hand, or just try the pull again") from e
-        found_files, found_bytes = _disk_usage(staging)
-        if found_files != files or found_bytes != size:
+        found = _disk_manifest(staging)
+        found_files, found_bytes = len(found), sum(found.values())
+        if found != {f.path: f.size for f in manifest}:
             raise Conflict(
                 f"job {job_id}'s pull does not match what {job.spec.target} reported: expected "
                 f"{files} file(s)/{size} bytes, found {found_files}/{found_bytes} on disk; "
@@ -1060,24 +1084,38 @@ class Daemon:
                 "by hand, or pull again with a different --to") from None
         landed.update(files=files, bytes=size, dest=str(dest))
         deleted = False
+        note = None
         if not keep:
             try:
-                provider.delete_persist(job_id)
+                changed = set(provider.persist_manifest(job_id)) != set(manifest)
+                if not changed:
+                    provider.delete_persist_files(job_id, manifest)
             except Exception as e:
                 raise Conflict(
                     f"job {job_id}'s pull landed at {dest} and was verified, but the remote copy "
                     f"could not be deleted ({e}); it is still at {job.spec.target}, and the "
                     "local copy is complete") from e
-            deleted = True
-            landed["deleted"] = True
+            if changed:
+                note = (f"job {job_id}'s files changed while it was being pulled, so the remote "
+                        f"copy was left in place at {job.spec.target}: {dest} has what was "
+                        "verified, which is not everything there now — pull it again elsewhere "
+                        f"with `pasar pull {job_id} --to <dir>` before the retention sweep "
+                        f"deletes it after {self._sweep_deadline(job_id)}")
+                self.store.add_machine_event(self.clock(), "pull_changed", note)
+            else:
+                deleted = True
+                landed["deleted"] = True
         now = self.clock()
         self.store.add_machine_event(
             now, "pulled",
             f"job {job_id}: pulled {files} file(s), {size} bytes to {dest}"
             + (" and deleted the remote copy" if deleted else "; kept the remote copy"))
         self.changed()
-        return {"job_id": job_id, "files": files, "bytes": size, "dest": str(dest),
-                "deleted": deleted}
+        result = {"job_id": job_id, "files": files, "bytes": size, "dest": str(dest),
+                  "deleted": deleted}
+        if note:
+            result["note"] = note
+        return result
 
     def _cloud_ended(self, job: Job, state: State) -> None:
         """Every path that moves a cloud job into a terminal state calls this: `_finish`, and
@@ -1098,10 +1136,35 @@ class Daemon:
         each pull's room check has to see what the pull before it landed — side by side, a batch
         of jobs finishing together would each find the same free space and all go ahead — and a
         provider is asked for one job's files at a time. Only for a target this pasard has a
-        provider for: without one there is nothing to reach, and `pull` would only refuse."""
+        provider for: without one there is nothing to reach, and `pull` would only refuse.
+        Deferred rather than queued until `PULL_SETTLE` has passed since the job finished: the
+        tick then queues it (`_release_settled`), so nothing ever waits it out on the tick."""
         if not isinstance(self.executors.get(job.spec.target), CloudExecutor):
             return
+        due = self._settles_at(job.id)
+        if due is not None and self.clock() < due:
+            with self._pull_lock:
+                self._pull_due[job.id] = due
+            return
         self._enqueue(job.id, self.auto_pull)
+
+    def _settles_at(self, job_id: int) -> float | None:
+        """When a finished job's automatic pull may start: `pull_settle` after it finished (see
+        `PULL_SETTLE`). `None` for a job not stamped as finished."""
+        ended = self.store.cloud_finished_at(job_id)
+        return None if ended is None else ended + self.pull_settle
+
+    def _release_settled(self, now: float) -> None:
+        """Hand every deferred automatic pull that is now due to the worker. On the tick, and
+        cheap there: a look through a small dict, no provider and no disk."""
+        with self._pull_lock:
+            due = [j for j, at in self._pull_due.items() if at <= now]
+            for job_id in due:
+                del self._pull_due[job_id]
+        for job_id in due:
+            job = self.store.get_job(job_id)
+            if job is not None:
+                self._schedule_pull(job)
 
     def _enqueue(self, job_id: int, work: Callable[[int], None]) -> None:
         """Queue `work(job_id)` for the one worker, unless that job is already queued, being
@@ -1153,6 +1216,13 @@ class Daemon:
         tries = self.store.count_pulls(job_id, auto=True)
         try:
             if tries >= AUTO_PULL_TRIES:
+                return
+            due = self._settles_at(job_id)
+            if due is not None and self.clock() < due:
+                # Queued before the volume settled (nothing does that today, but a pull made
+                # too early is exactly the one that misses the last checkpoint): not a try.
+                with self._pull_lock:
+                    self._pull_due[job_id] = due
                 return
             self.pull(job_id, auto=True)
         except PullSkipped as e:
@@ -1264,6 +1334,7 @@ class Daemon:
         self._sample_machine()
         self._drop_unreachable(now)
         self._expire_awaiting(now)
+        self._release_settled(now)
         for _, ex in self._cloud_executors():
             # Before the statuses are read: an attempt that ended between two ticks left its own
             # account of why on stdout, and that beats whatever the provider says.

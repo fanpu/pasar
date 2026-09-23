@@ -447,6 +447,8 @@ def run(args, client: httpx.Client) -> int:
             where = "deleted the remote copy" if result["deleted"] else "kept the remote copy"
             print(f"#{args.id}: pulled {result['files']} file(s), {fmt_gib(result['bytes'])} "
                   f"to {result['dest']} ({where})")
+            if result.get("note"):
+                print(result["note"])
     elif args.cmd == "logs":
         if args.follow:
             try:

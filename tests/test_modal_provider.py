@@ -7,7 +7,7 @@ import pytest
 
 from pasar.cloud import container as c
 from pasar.cloud import modal_provider
-from pasar.cloud.base import Phase
+from pasar.cloud.base import PersistFile, Phase
 from pasar.cloud.bundle import EnvSpec
 from pasar.cloud.modal_provider import HANDLE_TAG, ModalProvider
 from pasar.config import CloudTarget
@@ -595,6 +595,82 @@ def test_delete_persist_of_an_absent_directory_does_not_raise(provider, tmp_path
     p.delete_persist(1)  # nothing was ever written; no exception
 
 
+def test_persist_manifest_lists_each_file_relative_to_the_job(provider, tmp_path):
+    p, _sdk = provider
+    volume = p._volume("pasar-modal", create=False)
+    volume.files["1/ckpt.txt"] = b"checkpoint bytes"
+    volume.files["1/sub/log.txt"] = b"a log line\n"
+    volume.files["2/other.txt"] = b"not this job's"
+    assert [(f.path, f.size) for f in p.persist_manifest(1)] == [
+        ("ckpt.txt", len(b"checkpoint bytes")), ("sub/log.txt", len(b"a log line\n"))]
+    assert p.persist_manifest(3) == []
+
+
+def test_delete_persist_files_removes_only_what_it_was_given(provider, tmp_path):
+    """A pull deletes what it verified and nothing else: a file written to the volume after the
+    pull listed the dir stays, and so does every directory above it."""
+    p, _sdk = provider
+    volume = p._volume("pasar-modal", create=False)
+    volume.files["1/ckpt-100.pt"] = b"early"
+    volume.files["1/sub/metrics.json"] = b"{}"
+    manifest = p.persist_manifest(1)
+    volume.files["1/final.pt"] = b"the last one"  # committed after the listing
+
+    p.delete_persist_files(1, manifest)
+
+    assert volume.files == {"1/final.pt": b"the last one"}
+    assert all(not recursive for _path, recursive in volume.removed)
+    assert "1" in volume.dirs and "1/sub" not in volume.dirs
+    assert [f.path for f in p.persist_manifest(1)] == ["final.pt"]
+
+
+def test_delete_persist_files_removes_the_dirs_it_emptied_then_the_job_dir(provider, tmp_path):
+    p, _sdk = provider
+    volume = p._volume("pasar-modal", create=False)
+    volume.files["1/a/b/deep.pt"] = b"deep"
+    volume.files["1/top.pt"] = b"top"
+    volume.files["2/other.pt"] = b"job two"
+
+    p.delete_persist_files(1, p.persist_manifest(1))
+
+    assert volume.files == {"2/other.pt": b"job two"}
+    assert not any(d == "1" or d.startswith("1/") for d in volume.dirs)
+    assert all(not recursive for _path, recursive in volume.removed)
+    assert p.persist_usage(1) == (0, 0)
+
+
+def test_delete_persist_files_keeps_a_dir_holding_a_file_it_never_listed(provider, tmp_path):
+    p, _sdk = provider
+    volume = p._volume("pasar-modal", create=False)
+    volume.files["1/ckpts/step-100.pt"] = b"early"
+    manifest = p.persist_manifest(1)
+    volume.files["1/ckpts/step-200.pt"] = b"late"
+
+    p.delete_persist_files(1, manifest)
+
+    assert volume.files == {"1/ckpts/step-200.pt": b"late"}
+    assert {"1", "1/ckpts"} <= volume.dirs
+
+
+def test_delete_persist_files_skips_a_file_already_gone(provider, tmp_path):
+    p, _sdk = provider
+    volume = p._volume("pasar-modal", create=False)
+    volume.files["1/ckpt.pt"] = b"weights"
+    manifest = p.persist_manifest(1)
+    del volume.files["1/ckpt.pt"]  # somebody else's delete got there first
+    p.delete_persist_files(1, manifest)
+    assert p.persist_usage(1) == (0, 0)
+
+
+def test_delete_persist_files_refuses_a_path_outside_the_job_dir(provider, tmp_path):
+    p, _sdk = provider
+    volume = p._volume("pasar-modal", create=False)
+    volume.files["2/other.pt"] = b"job two"
+    with pytest.raises(ValueError):
+        p.delete_persist_files(1, [PersistFile("../2/other.pt", 7, 0)])
+    assert volume.files == {"2/other.pt": b"job two"}
+
+
 def test_download_persist_raises_if_a_file_writes_short(provider, tmp_path):
     """The caller compares this method's return against `persist_usage`'s before deleting the
     only copy; that check is worthless if the return is just the remote listing's sizes copied
@@ -649,6 +725,10 @@ def test_persist_methods_reject_a_bad_job_id(provider, tmp_path, bad):
         p.download_persist(bad, tmp_path / "out")
     with pytest.raises(ValueError):
         p.delete_persist(bad)
+    with pytest.raises(ValueError):
+        p.persist_manifest(bad)
+    with pytest.raises(ValueError):
+        p.delete_persist_files(bad, [])
 
 
 def test_download_persist_rejects_a_path_that_escapes_the_job_dir(provider, tmp_path):

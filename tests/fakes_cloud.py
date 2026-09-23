@@ -3,7 +3,15 @@
 from dataclasses import dataclass
 from pathlib import Path
 
-from pasar.cloud.base import Capabilities, CloudLaunch, CloudStatus, GpuRow, Phase, gpu_rows
+from pasar.cloud.base import (
+    Capabilities,
+    CloudLaunch,
+    CloudStatus,
+    GpuRow,
+    PersistFile,
+    Phase,
+    gpu_rows,
+)
 from pasar.cloud.bundle import Bundle, EnvSpec
 
 
@@ -50,13 +58,25 @@ class FakeProvider:
         self.images: dict[str, str] = {}
         self.uploads: dict[str, list[str]] = {}
         self.persisted: dict[int, dict[str, bytes]] = {}  # job_id -> {relpath: bytes}
+        # A write counter standing in for each file's mtime, bumped by every `persist`, so a
+        # file rewritten at the same size still lists as changed — as a real volume's would.
+        self.mtimes: dict[tuple[int, str], int] = {}
+        self._writes = 0
+        # A job whose persist dir is gone, whichever delete removed it; `recursive_deletes` is
+        # the sweep's `delete_persist` only, and `deleted_files` each file a pull's manifest
+        # delete removed, so a test can tell the two apart.
         self.deleted_persist: list[int] = []
+        self.recursive_deletes: list[int] = []
+        self.deleted_files: list[tuple[int, str]] = []
         self.fail_launch: str | None = None
         self.next_id = 1
         # Pull test hooks: a callback run from inside `download_persist` (to prove a pull made
         # from within it — i.e. one already in flight — is refused) and a way to make it write
         # less than `persist_usage` reported (to prove a mismatch is caught rather than trusted).
         self.on_download = None
+        # Run once the download has written everything it listed, before it returns: a file
+        # this adds is one committed to the volume while the pull was busy downloading.
+        self.after_download = None
         self.short_download: set[int] = set()
         self.fail_download: set[int] = set()
 
@@ -134,10 +154,29 @@ class FakeProvider:
             out = dest.joinpath(*rel.split("/"))
             out.parent.mkdir(parents=True, exist_ok=True)
             out.write_bytes(data)
-        return len(files), sum(len(data) for data in files.values())
+        written = len(files), sum(len(data) for data in files.values())
+        if self.after_download is not None:
+            self.after_download(job_id)
+        return written
+
+    def persist_manifest(self, job_id: int) -> list[PersistFile]:
+        _check_job_id(job_id)
+        return [PersistFile(rel, len(data), self.mtimes.get((job_id, rel), 0))
+                for rel, data in sorted(self.persisted.get(job_id, {}).items())]
+
+    def delete_persist_files(self, job_id: int, files: list[PersistFile]) -> None:
+        _check_job_id(job_id)
+        held = self.persisted.get(job_id, {})
+        for f in files:
+            if held.pop(f.path, None) is not None:
+                self.deleted_files.append((job_id, f.path))
+        if job_id in self.persisted and not held:
+            del self.persisted[job_id]
+            self.deleted_persist.append(job_id)
 
     def delete_persist(self, job_id: int) -> None:
         _check_job_id(job_id)
+        self.recursive_deletes.append(job_id)
         self.deleted_persist.append(job_id)
         self.persisted.pop(job_id, None)
 
@@ -159,6 +198,8 @@ class FakeProvider:
         self.finish(handle, 137, by_provider=True)
 
     def persist(self, job_id: int, rel_path: str, data: bytes) -> None:
+        self._writes += 1
+        self.mtimes[(job_id, rel_path)] = self._writes
         self.persisted.setdefault(job_id, {})[rel_path] = data
 
     def forget(self, handle: str) -> None:
