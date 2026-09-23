@@ -25,7 +25,14 @@ from pasar.mascot import manifest, resolve, resolve_builtin
 from pasar.metrics import Prometheus
 from pasar.models import TERMINAL, JobSpec, State
 from pasar.units import parse_duration, parse_size
-from pasar.views import attempt_view, job_view, schedule_projection, spark_view, status_view
+from pasar.views import (
+    attempt_view,
+    cloud_status_view,
+    job_view,
+    schedule_projection,
+    spark_view,
+    status_view,
+)
 
 RECENT = 86400
 MAX_SPARK_IDS = 200  # more rows than a dashboard ever shows at once
@@ -62,6 +69,11 @@ class SubmitBody(BaseModel):
     tags: list[str] = []
     submitter: str = ""
     env: dict[str, str] | None = None
+    target: str = "local"
+    gpu: str | None = None
+    env_keys: list[str] = []
+    data: list[str] = []
+    max_cost: float | None = Field(default=None, ge=0)
 
     _bounded_mixed = field_validator("time", "mem", "grace")(_bounded)
 
@@ -225,7 +237,8 @@ def create_app(daemon: Daemon, *, prom: Prometheus | None = None, wake=lambda: N
             preempt=body.preempt, preemptible=body.preemptible,
             grace=cfg.default_grace if body.grace is None else parse_duration(body.grace),
             retries=body.retries, name=body.name, note=body.note, tags=body.tags,
-            submitter=body.submitter, env=body.env,
+            submitter=body.submitter, env=body.env, target=body.target, gpu=body.gpu,
+            env_keys=body.env_keys, data=body.data, max_cost=body.max_cost,
         )
         job = daemon.submit(spec)
         wake()
@@ -257,6 +270,20 @@ def create_app(daemon: Daemon, *, prom: Prometheus | None = None, wake=lambda: N
     @app.post("/api/jobs/{job_id}/cancel")
     async def cancel(job_id: int):
         job = daemon.cancel(job_id)
+        wake()
+        return view(job)
+
+    # Deliberately no CLI equivalent: approval is a web-UI-only action, and the agent guide
+    # tells agents never to call this — a person is meant to see the price before it launches.
+    @app.post("/api/jobs/{job_id}/approve")
+    async def approve(job_id: int):
+        job = daemon.approve(job_id)
+        wake()
+        return view(job)
+
+    @app.post("/api/jobs/{job_id}/reject")
+    async def reject(job_id: int):
+        job = daemon.reject(job_id)
         wake()
         return view(job)
 
@@ -326,6 +353,11 @@ def create_app(daemon: Daemon, *, prom: Prometheus | None = None, wake=lambda: N
     async def status():
         now = daemon.clock()
         return status_view(daemon, now, schedule_projection(daemon, now))
+
+    @app.get("/api/cloud")
+    async def cloud():
+        now = daemon.clock()
+        return cloud_status_view(daemon, now, schedule_projection(daemon, now))
 
     @app.get("/api/gpu")
     async def gpu(minutes: int = 30):

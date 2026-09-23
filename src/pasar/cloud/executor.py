@@ -117,7 +117,8 @@ class CloudExecutor:
                 self._terminate(rec)
                 st = self.provider.status(rec.handle)
             if st.phase not in (Phase.EXITED, Phase.GONE):
-                return UnitState(unit, False, st.phase.value, None, None, None)
+                return UnitState(unit, False, st.phase.value, None, None, None,
+                                 st.console_url or None)
         if rec.pump.exit_info is None:
             # The exit line is the last thing the wrapper writes, so an attempt that ended
             # between two ticks still has its own account of why waiting in the provider. A
@@ -296,7 +297,7 @@ class CloudExecutor:
                 result = "reclaimed"
             else:
                 result = "success" if code == 0 else "exit-code"
-        return UnitState(unit, True, result, code, signal, None)
+        return UnitState(unit, True, result, code, signal, None, st.console_url or None)
 
     def _state_path(self, job_id: int, attempt: int) -> Path:
         """One file per attempt, so a relaunch can never read the attempt before it."""

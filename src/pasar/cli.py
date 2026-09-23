@@ -79,7 +79,16 @@ def call(client: httpx.Client, method: str, path: str, **kw):
     return r.json()
 
 
+def _money(n: float | None) -> str:
+    return f"${n:.2f}" if n is not None else "?"
+
+
 def _mem(job: dict) -> str:
+    cloud = job.get("cloud")
+    if cloud is not None:
+        label = cloud["gpu"] or cloud["target"]
+        cost = cloud.get("estimated_cost")
+        return f"{label} (~{_money(cost)})" if cost is not None else label
     if job["mode"] == "whole":
         return "whole GPU"
     if job.get("usage") is not None:
@@ -134,6 +143,7 @@ def _time_line(job: dict) -> str:
 
 def print_job(job: dict) -> None:
     attempts = job["attempts"]
+    cloud = job.get("cloud")
     fields = [
         ("job", f"#{job['id']} {job['name']}"), ("state", _state(job)),
         ("summary", job["summary"]), ("bid", f"{job['bid']} (may preempt lower bids)" if job["preempt"] else job["bid"]),
@@ -143,9 +153,40 @@ def print_job(job: dict) -> None:
         ("command", job["command"]), ("cwd", job["cwd"]),
         ("note", job["note"]), ("by", job["submitter"]), ("git", job["git_commit"] or ""),
     ]
+    if cloud is not None:
+        cost = f"est {_money(cloud['estimated_cost'])}, capped at {_money(cloud['max_cost'])}"
+        fields.append(("cloud", f"{cloud['target']} · {cloud['gpu']} · {cloud['phase']}"))
+        fields.append(("cost", cost))
+        if cloud["console_url"]:
+            fields.append(("console", cloud["console_url"]))
     for k, v in fields:
         if v not in ("", None):
             print(f"{k:>9}  {v}")
+
+
+def print_cloud(body: dict) -> None:
+    targets = body["targets"]
+    if not targets:
+        print("no cloud targets configured")
+    else:
+        rows = [("TARGET", "PROVIDER", "RUNNING", "TODAY", "MONTH", "RATES")]
+        for t in targets:
+            today = f"{_money(t['spent_today'])} / {_money(t['daily_budget'])}"
+            month = f"{_money(t['spent_month'])} / {_money(t['monthly_budget'])}"
+            running = f"{t['running']}/{t['max_running']}"
+            rates = ", ".join(f"{k}={_money(v)}" for k, v in sorted(t["rates"].items())) or "none"
+            name = t["name"] + ("" if t["configured"] else " (no provider)")
+            rows.append((name, t["provider"], running, today, month, rates))
+        widths = [max(len(r[i]) for r in rows) for i in range(len(rows[0]))]
+        for r in rows:
+            print("  ".join(c.ljust(w) for c, w in zip(r, widths)).rstrip())
+    awaiting = body["awaiting"]
+    print()
+    if awaiting:
+        print(f"{len(awaiting)} job(s) awaiting approval:")
+        print_table(awaiting)
+    else:
+        print("nothing awaiting approval")
 
 
 def build_parser() -> Parser:
@@ -172,6 +213,19 @@ def build_parser() -> Parser:
     s.add_argument("--by", default=None, help="who is submitting (default: $USER)")
     s.add_argument("--cwd", default=None)
     s.add_argument("--no-env", action="store_true", help="don't pass your environment")
+    s.add_argument("--on", dest="target", default="local",
+                   help="run on this cloud target instead of the local GPU (e.g. modal); lands "
+                        "awaiting approval instead of running right away")
+    s.add_argument("--gpu", help="cloud only: GPU type, e.g. H100 or H100:4")
+    s.add_argument("--data", action="append", default=[],
+                   help="cloud only: not wired up yet (rejected) — a cloud job's input data "
+                        "has to arrive with the provider work, not through pasar submit")
+    s.add_argument("--env", dest="env_keys", action="append", default=[], metavar="KEY",
+                   help="cloud only: pass this environment variable through by name "
+                        "(repeatable); local jobs already capture the whole environment")
+    s.add_argument("--max-cost", type=float,
+                   help="cloud only: reserved for a future per-job spend cap (accepted, not "
+                        "yet enforced)")
     s.add_argument("command", nargs=argparse.REMAINDER, help="-- command to run")
 
     ls = add("ls", "list jobs")
@@ -205,6 +259,7 @@ def build_parser() -> Parser:
     w.add_argument("--interval", type=float, default=2.0, help=argparse.SUPPRESS)
 
     add("status", "machine and memory pool status")
+    add("cloud", "cloud targets: budgets, spend, rates and jobs awaiting approval")
     sub.add_parser("guide", help="print the agent guide (works without a daemon running)")
     return p
 
@@ -225,9 +280,20 @@ def run(args, client: httpx.Client) -> int:
             "grace": args.grace, "retries": args.retries, "name": args.name, "note": args.note,
             "tags": args.tag, "submitter": args.by or getpass.getuser(),
             "env": None if args.no_env else dict(os.environ),
+            "target": args.target, "gpu": args.gpu, "env_keys": args.env_keys,
+            "data": args.data, "max_cost": args.max_cost,
         }
         job = call(client, "POST", "/api/jobs", json=body)
-        out(job) if out else print(f"submitted #{job['id']} {job['name']} ({_state(job)})")
+        if out:
+            out(job)
+        elif job.get("cloud"):
+            c = job["cloud"]
+            print(f"submitted #{job['id']} {job['name']} ({_state(job)}) on {c['target']}")
+            print(f"  estimated {_money(c['estimated_cost'])}, "
+                  f"capped at {_money(c['max_cost'])} for this run")
+            print("  approve it in the web UI to let it launch")
+        else:
+            print(f"submitted #{job['id']} {job['name']} ({_state(job)})")
     elif args.cmd == "ls":
         params = {"all": args.all}
         if args.state:
@@ -293,6 +359,9 @@ def run(args, client: httpx.Client) -> int:
             print(f"external  {fmt_gib(s['external'])} used outside pasar")
             print(f"memory    {fmt_gib(s['mem_available'])} available, "
                   f"pressure {s['psi_some_avg10']:.1f}%")
+    elif args.cmd == "cloud":
+        body = call(client, "GET", "/api/cloud")
+        out(body) if out else print_cloud(body)
     return 0
 
 

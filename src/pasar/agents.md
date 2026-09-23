@@ -219,6 +219,61 @@ These apply to every `pasar` command, not just `wait`:
 | `launch_error` | pasar couldn't even start the attempt (bad `--cwd`, systemd error). | Fix the command/cwd, then restart. |
 | `cancelled` | Someone ran `pasar cancel <id>`, or the daemon shut it down as part of a cancel. | Nothing to do; resubmit if you still need it. |
 | `preempted` | Stopped to make room for a higher-bid job that asked to preempt. It is requeued automatically — this is not a failure. | Nothing to do. |
+| `target_gone` | Cloud only. The job's target is no longer configured here: `failed` if it was running (its sandbox may still be billing — end it at the provider), `cancelled` if it was only waiting (nothing was spent). | Put the target back and resubmit, or clean up at the provider yourself. |
+| `price_rose` | Cloud only. The job is back to `awaiting`: its price rose past what was approved between approval and launch. `summary` has the old ceiling and the new price. | Approve it again in the web UI if the new price is still fine. |
+
+## Cloud jobs
+
+`pasar submit --on TARGET --gpu TYPE` runs on a configured rented-GPU target instead of the
+local machine. It costs money, so it never launches on its own: it lands **awaiting** a person's
+approval in the web UI, priced at submit time, and only starts once approved there.
+
+    $ pasar submit --time 2h --on modal --gpu H100 --json -- .venv/bin/python train.py
+    submitted #7 train (awaiting) on modal
+      estimated $7.90, capped at $11.85 for this run
+      approve it in the web UI to let it launch
+
+Extra flags, cloud jobs only:
+
+| Flag | Meaning |
+|---|---|
+| `--on TARGET` | Which configured cloud target to run on. Omit for the local GPU. |
+| `--gpu TYPE` | **Required** for a cloud job, e.g. `H100` or `H100:4`. |
+| `--env KEY` | Repeatable. Pass this environment variable through to the sandbox by name (unlike a local job, a cloud job's environment is *not* captured wholesale). |
+| `--data PATH` | Not wired up yet — rejected with an error. A cloud job's input data has to arrive with the provider work (e.g. a volume mount in the target's config), not through `pasar submit`. |
+| `--max-cost` | Reserved for a future per-job spend cap; accepted but not enforced yet. |
+
+`--mem`, `--retries` and `--preempt` are refused for a cloud job, and `pasar restart` on one is
+refused too (it would spend money on whatever is in the working tree now, unseen): the error
+gives the equivalent `pasar submit` command to run instead.
+
+**There is no `pasar approve` command, and agents must never call `POST /api/jobs/{id}/approve`
+or `/reject` directly.** Approval is a web-UI-only action, by design: a person looks at the price
+before it's spent. `pasar cloud [--json]` shows what's waiting:
+
+    $ pasar cloud
+    TARGET  PROVIDER  RUNNING  TODAY          MONTH           RATES
+    modal   modal     1/2      $7.90 / $50.00 $7.90 / $300.00 gpu_hour_cost_h100=$3.95, ...
+
+    1 job(s) awaiting approval:
+    ID  NAME   STATE     BID   MEMORY            TIME  BY
+    7   train  awaiting  1000  H100 (~$7.90)      —    agent-3
+
+A cloud job's `state` field also passes through `awaiting` if its approved run time runs out
+before the job finishes (`reason` `time_limit`), if the provider reclaims the machine (reason
+`cloud_preempted`), or if its price rose past what was approved between approval and launch
+(reason `price_rose`, with the old ceiling and new price in `summary`) — in every case, it needs
+approving again in the web UI, the same as a fresh submission. `pasar wait` keeps waiting through
+all of these (they aren't a terminal state); use `--timeout` if you don't want to wait on a human.
+If the target stops being configured on this pasard, a running cloud job ends `failed` (reason
+`target_gone` — its sandbox may still be running and billing at the provider, since nothing here
+can reach it any more) and a waiting one ends `cancelled` (reason `target_gone`, nothing was
+spent) — both ordinary terminal states with `pasar wait`'s usual exit codes.
+
+`pasar show <id>` and `pasar ls`/`pasar show --json` carry a `cloud` object for cloud jobs:
+`target`, `gpu`, `phase`, `estimated_cost`, `max_cost` (the ceiling actually governing the job
+right now — the approved figure once launched, a live-priced one before approval), and
+`console_url` (only while the daemon is actively watching the attempt).
 
 ## HTTP API quick reference
 
@@ -233,6 +288,8 @@ whatever `PASAR_URL` would be (default `http://127.0.0.1:8750`).
 | `PATCH /api/jobs/{id}` | Change `bid` and/or `preempt` (bool); a field left out keeps its value. |
 | `POST /api/jobs/{id}/cancel` | Cancel a job. |
 | `POST /api/jobs/{id}/restart` | Requeue a finished job, optionally changing `mem`/`whole_gpu`/`time`/`bid`/`retries`; `preempt` (default `false`) is not carried over. |
+| `POST /api/jobs/{id}/approve` / `/reject` | Web-UI-only. **Agents must never call these** — a person approves a cloud job's cost, not code. |
+| `GET /api/cloud` | Cloud targets: budget, spend today/this month, live rates, and jobs awaiting approval. |
 | `GET /api/jobs/{id}/logs` | A chunk of output (`?offset=N`), or an SSE stream with `?follow=true`. |
 | `GET /api/jobs/{id}/events` | The job's raw protocol events (checkpoint/resumed/progress/note). |
 | `GET /api/jobs/{id}/metrics` | Stored per-attempt metric summaries (avg/max/total). |
@@ -258,7 +315,10 @@ Body fields (all but `command`, `time`, `cwd` are optional): `command` (string),
 string or seconds), `cwd` (absolute path), `mem` (size string or bytes; omit for the whole GPU),
 `bid` (int, default 1000), `preempt` (bool, default `false`), `preemptible` (bool, default `true`), `grace` (duration, default
 `120s`), `retries` (int, default 0), `name`, `note`, `tags` (list of strings), `submitter`, `env`
-(a `{string: string}` map to give the job, or omit/`null` to give it none).
+(a `{string: string}` map to give the job, or omit/`null` to give it none), and, for a cloud job,
+`target` (default `"local"`), `gpu` (required once `target` isn't `"local"`), `env_keys` (list of
+names to pass through), `data` (not wired up yet — a non-empty list is rejected), `max_cost`
+(reserved, not yet enforced).
 
 A non-2xx response body is `{"detail": "..."}`: `404` job not found, `409` conflicting state (e.g.
 already cancelled), `422` bad input (e.g. unparsable `time`).

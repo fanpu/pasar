@@ -2,9 +2,9 @@
 
 from dataclasses import asdict
 
-from pasar.daemon import ACTIVE
+from pasar.daemon import ACTIVE, LOCAL
 from pasar.eta import remaining_time, run_time
-from pasar.models import TERMINAL, Attempt, EndKind, Job
+from pasar.models import TERMINAL, Attempt, EndKind, Job, State
 from pasar.projection import project
 
 
@@ -82,6 +82,41 @@ def attempt_view(a: Attempt) -> dict:
     return d
 
 
+def cloud_view(daemon, job: Job) -> dict | None:
+    """The `cloud` object embedded in a cloud job's view; `None` for a job that ran locally.
+
+    `estimated_cost`/`max_cost` show the ceiling that actually governs the job right now: the
+    approved figures once an approval covers the attempt that's queued or running, live-priced
+    numbers otherwise — before the first approval, or once a price rise has sent the job back to
+    `awaiting` (reason `price_rose`) and it needs approving again. In the `price_rose` case the
+    old ceiling that was breached is still in `job.summary`, alongside the new price.
+
+    `console_url` is only ever populated while the daemon is actively polling the attempt (i.e.
+    while it's the current entry in `daemon.cloud_units`); pasar doesn't persist it, so it reads
+    as `None` once an attempt has ended, even if the provider's own console still works."""
+    if job.spec.target == LOCAL:
+        return None
+    attempts = daemon.store.attempts(job.id)
+    cur = attempts[-1] if attempts else None
+    active = cur is not None and cur.end_time is None
+    n = cur.n if active else len(attempts) + 1
+    approved = next((a for a in daemon.store.approvals(job.id) if a["attempt"] == n), None)
+    if approved is not None and job.state != State.AWAITING:
+        estimated_cost, max_cost = approved["estimated_cost"], approved["max_cost"]
+    else:
+        live = daemon.cloud_estimate(job)
+        estimated_cost, max_cost = live if live else (None, None)
+    unit = daemon.cloud_units.get(job.id)
+    return {
+        "target": job.spec.target,
+        "gpu": job.spec.gpu,
+        "phase": unit.result if unit is not None else job.state.value,
+        "estimated_cost": estimated_cost,
+        "max_cost": max_cost,
+        "console_url": unit.console_url if unit is not None else None,
+    }
+
+
 def job_view(daemon, job: Job, now: float, projection: dict) -> dict:
     atts = daemon.store.attempts(job.id)
     cur = atts[-1] if atts else None
@@ -136,6 +171,7 @@ def job_view(daemon, job: Job, now: float, projection: dict) -> dict:
         "projected": [list(s) for s in projection.get(job.id, [])],
         "spans": [[a.start_time, a.end_time, a.end_kind.value if a.end_kind else None]
                   for a in atts],
+        "cloud": cloud_view(daemon, job),
     }
 
 
@@ -159,3 +195,30 @@ def status_view(daemon, now: float, projection: dict) -> dict:
         "hot_temp_c": daemon.cfg.hot_temp_c,
         "grafana_url": daemon.cfg.grafana_url,
     }
+
+
+def cloud_status_view(daemon, now: float, projection: dict) -> dict:
+    """Everything `GET /api/cloud` and `pasar cloud` show: each configured target's budget and
+    spend (`spent_today`/`spent_month` already include what's `committed` from jobs still
+    running, the same total the budget gate in `cloud.lane` checks against), its live rates, and
+    every job currently waiting on a person to approve it, across all targets."""
+    targets = []
+    for name, target in sorted(daemon.cfg.clouds.items()):
+        committed = daemon.ledger.committed(name)
+        running = sum(1 for j in daemon.store.list_jobs(ACTIVE) if j.spec.target == name)
+        targets.append({
+            "name": name,
+            "provider": target.provider,
+            "configured": name in daemon.executors,
+            "daily_budget": target.daily_budget,
+            "monthly_budget": target.monthly_budget,
+            "spent_today": daemon.ledger.settled_day(name) + committed,
+            "spent_month": daemon.ledger.settled_month(name) + committed,
+            "committed": committed,
+            "max_running": target.max_running,
+            "running": running,
+            "rates": daemon.cloud_rates(target),
+        })
+    awaiting = [job_view(daemon, j, now, projection)
+                for j in daemon.store.list_jobs([State.AWAITING])]
+    return {"targets": targets, "awaiting": awaiting}

@@ -43,6 +43,7 @@ class UnitState:
     exit_code: int | None
     signal: str | None
     control_group: str | None
+    console_url: str | None = None  # cloud only: where a person can watch the sandbox
 
 
 class Executor(Protocol):

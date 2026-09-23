@@ -230,3 +230,82 @@ def test_non_preemptible_flag(client, capsys, daemon, tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     run(client, capsys, "submit", "--time", "1h", "--non-preemptible", "--", "python", "a.py")
     assert not daemon.job(1).spec.preemptible and not daemon.job(1).spec.preempt
+
+
+def test_cli_has_no_approve_command(client, capsys):
+    code, out = run(client, capsys, "--help")
+    assert "approve" not in out.out
+    code, out = run(client, capsys, "submit", "--help")
+    assert code == 0 and "approve" not in out.out
+
+
+def test_submit_on_cloud_prints_cost_and_where_to_approve(client, capsys, cloud_daemon,
+                                                           cloud_cwd, monkeypatch):
+    monkeypatch.chdir(cloud_cwd)
+    code, out = run(client, capsys, "submit", "--time", "1h", "--on", "fake", "--gpu", "H100",
+                    "--", "python", "-c", "pass")
+    assert code == 0
+    assert "awaiting" in out.out
+    assert "$" in out.out
+    assert "web UI" in out.out
+    assert cloud_daemon.job(1).state.value == "awaiting"
+
+
+def test_submit_on_cloud_rejects_mem_and_requires_gpu(client, capsys, cloud_daemon, cloud_cwd,
+                                                       monkeypatch):
+    monkeypatch.chdir(cloud_cwd)
+    code, out = run(client, capsys, "submit", "--time", "1h", "--on", "fake", "--mem", "24G",
+                    "--gpu", "H100", "--", "python", "-c", "pass")
+    assert code == 70 and "--mem" in out.err
+    code, out = run(client, capsys, "submit", "--time", "1h", "--on", "fake", "--",
+                    "python", "-c", "pass")
+    assert code == 70 and "gpu" in out.err
+
+
+def test_submit_on_cloud_rejects_data(client, capsys, cloud_daemon, cloud_cwd, monkeypatch):
+    monkeypatch.chdir(cloud_cwd)
+    code, out = run(client, capsys, "submit", "--time", "1h", "--on", "fake", "--gpu", "H100",
+                    "--data", "dataset/", "--", "python", "-c", "pass")
+    assert code == 70 and "provider work" in out.err
+
+
+def test_ls_shows_cloud_cost(client, capsys, cloud_daemon, cloud_cwd, monkeypatch):
+    monkeypatch.chdir(cloud_cwd)
+    run(client, capsys, "submit", "--time", "1h", "--on", "fake", "--gpu", "H100", "--",
+        "python", "-c", "pass")
+    code, out = run(client, capsys, "ls")
+    assert code == 0 and "awaiting" in out.out and "H100" in out.out and "$" in out.out
+
+
+def test_restart_of_a_cloud_job_gives_the_equivalent_submit_command(client, capsys, cloud_daemon,
+                                                                     cloud_cwd, monkeypatch):
+    monkeypatch.chdir(cloud_cwd)
+    run(client, capsys, "submit", "--time", "1h", "--on", "fake", "--gpu", "H100", "--",
+        "python", "-c", "pass")
+    run(client, capsys, "cancel", "1")
+    code, out = run(client, capsys, "restart", "1")
+    assert code == 70
+    assert "pasar submit --on fake --gpu H100" in out.err
+
+
+def test_wait_keeps_waiting_through_awaiting(client, capsys, cloud_daemon, cloud_cwd,
+                                             monkeypatch):
+    monkeypatch.chdir(cloud_cwd)
+    run(client, capsys, "submit", "--time", "1h", "--on", "fake", "--gpu", "H100", "--",
+        "python", "-c", "pass")
+    code, out = run(client, capsys, "wait", "1", "--timeout", "0")
+    assert code == 4  # still waiting on approval when the timeout hits, not treated as done
+    assert "awaiting" in out.out
+
+
+def test_cloud_command_text_and_json(client, capsys, cloud_daemon, cloud_cwd, monkeypatch):
+    monkeypatch.chdir(cloud_cwd)
+    code, out = run(client, capsys, "cloud")
+    assert code == 0 and "fake" in out.out and "nothing awaiting approval" in out.out
+    run(client, capsys, "submit", "--time", "1h", "--on", "fake", "--gpu", "H100", "--",
+        "python", "-c", "pass")
+    code, out = run(client, capsys, "cloud", "--json")
+    assert code == 0
+    body = json.loads(out.out)
+    assert body["targets"][0]["name"] == "fake"
+    assert len(body["awaiting"]) == 1

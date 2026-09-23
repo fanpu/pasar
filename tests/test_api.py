@@ -267,3 +267,120 @@ def test_sparks_rejects_junk_and_oversized_id_lists(client):
     assert client.get("/api/sparks?ids=1,nope").status_code == 422
     too_many = ",".join(str(i) for i in range(api.MAX_SPARK_IDS + 1))
     assert client.get(f"/api/sparks?ids={too_many}").status_code == 422
+
+
+def submit_cloud(client, cloud_cwd, **kw):
+    body = {"command": "python -c 'pass'", "time": "1h", "cwd": cloud_cwd,
+           "target": "fake", "gpu": "H100", **kw}
+    return client.post("/api/jobs", json=body)
+
+
+def test_submit_cloud_job_returns_awaiting_with_costs(client, cloud_daemon, cloud_cwd):
+    r = submit_cloud(client, cloud_cwd)
+    assert r.status_code == 201
+    body = r.json()
+    assert body["state"] == "awaiting"
+    assert body["cloud"]["target"] == "fake" and body["cloud"]["gpu"] == "H100"
+    assert body["cloud"]["estimated_cost"] > 0
+    assert body["cloud"]["max_cost"] >= body["cloud"]["estimated_cost"]
+    assert body["cloud"]["console_url"] is None  # nothing has launched yet
+
+
+def test_local_job_has_no_cloud_object(client, tmp_path):
+    r = submit(client, tmp_path)
+    assert r.json()["cloud"] is None
+
+
+def test_approve_then_reject_endpoints(client, cloud_daemon, cloud_cwd):
+    job_id = submit_cloud(client, cloud_cwd).json()["id"]
+    approved = client.post(f"/api/jobs/{job_id}/approve")
+    assert approved.status_code == 200 and approved.json()["state"] == "queued"
+    assert cloud_daemon.store.approvals(job_id)[0]["attempt"] == 1
+
+    other_id = submit_cloud(client, cloud_cwd).json()["id"]
+    rejected = client.post(f"/api/jobs/{other_id}/reject")
+    assert rejected.status_code == 200
+    assert rejected.json()["state"] == "cancelled" and rejected.json()["reason"] == "rejected"
+
+    # approving something that isn't awaiting any more is a 409, not a silent no-op
+    r = client.post(f"/api/jobs/{other_id}/approve")
+    assert r.status_code == 409
+
+
+def test_submit_rejects_an_unconfigured_target(client, daemon, cloud_cwd):
+    # daemon (not cloud_daemon) has no cloud target at all: submit fails outright, before
+    # anything exists to approve.
+    r = submit_cloud(client, cloud_cwd)
+    assert r.status_code == 422 and "unknown cloud target" in r.json()["detail"]
+
+
+def test_approve_of_a_target_missing_its_provider_reads_differently_from_unconfigured(
+        client, cloud_daemon, cloud_cwd):
+    # A target can be configured (cfg.clouds has it) but wired to no provider on this pasard
+    # (e.g. the operator didn't set the API key here); approving it must say so, not claim the
+    # target itself is unknown.
+    job_id = submit_cloud(client, cloud_cwd).json()["id"]
+    del cloud_daemon.executors["fake"]
+    r = client.post(f"/api/jobs/{job_id}/approve")
+    assert r.status_code == 409
+    assert "no provider" in r.json()["detail"]
+
+
+def test_restart_of_a_cloud_job_is_refused_with_the_submit_command(client, cloud_daemon, cloud_cwd):
+    job_id = submit_cloud(client, cloud_cwd).json()["id"]
+    client.post(f"/api/jobs/{job_id}/reject")  # a terminal cloud job, restart is otherwise plausible
+    r = client.post(f"/api/jobs/{job_id}/restart", json={})
+    assert r.status_code == 409
+    detail = r.json()["detail"]
+    assert "pasar submit --on fake --gpu H100" in detail
+
+
+def test_cloud_endpoint_reports_budget_and_spend(client, cloud_daemon, cloud_cwd):
+    body = client.get("/api/cloud").json()
+    target = next(t for t in body["targets"] if t["name"] == "fake")
+    assert target["daily_budget"] == 50.0 and target["monthly_budget"] == 300.0
+    assert target["configured"] is True
+    assert target["rates"]["gpu_hour_cost_h100"] == 3.95
+    assert target["spent_today"] == 0 and target["committed"] == 0
+    assert body["awaiting"] == []
+
+    submit_cloud(client, cloud_cwd)
+    body2 = client.get("/api/cloud").json()
+    assert len(body2["awaiting"]) == 1
+    assert body2["awaiting"][0]["cloud"]["target"] == "fake"
+
+
+def test_submit_without_gpu_is_a_400(client, cloud_daemon, cloud_cwd):
+    r = client.post("/api/jobs", json={"command": "python -c 'pass'", "time": "1h",
+                                       "cwd": cloud_cwd, "target": "fake"})
+    assert r.status_code == 422 and "gpu" in r.json()["detail"]
+
+
+def test_submit_rejects_mem_and_retries_for_a_cloud_job(client, cloud_daemon, cloud_cwd):
+    assert submit_cloud(client, cloud_cwd, mem="24G").status_code == 422
+    assert submit_cloud(client, cloud_cwd, retries=2).status_code == 422
+
+
+def test_submit_rejects_data_with_a_clear_message(client, cloud_daemon, cloud_cwd):
+    r = submit_cloud(client, cloud_cwd, data=["dataset/"])
+    assert r.status_code == 422
+    assert "provider work" in r.json()["detail"]
+
+
+def test_price_rise_leaves_the_old_ceiling_visible_while_awaiting(client, cloud_daemon,
+                                                                   cloud_provider, cloud_cwd,
+                                                                   monkeypatch, clock):
+    job_id = submit_cloud(client, cloud_cwd).json()["id"]
+    client.post(f"/api/jobs/{job_id}/approve")
+    ceiling = cloud_daemon.store.approvals(job_id)[0]["max_cost"]
+    monkeypatch.setattr(cloud_provider, "rates", lambda: {
+        "gpu_hour_cost_h100": 7.90, "cpu_hour_cost_sandbox": 0.14,
+        "mem_gib_hour_cost_sandbox": 0.024,
+    })
+    clock.advance(60)
+    cloud_daemon.tick()
+    job = client.get(f"/api/jobs/{job_id}").json()
+    assert job["state"] == "awaiting" and job["reason"] == "price_rose"
+    assert f"{ceiling:.2f}" in job["summary"]
+    # re-approving now prices at the new, higher rate
+    assert job["cloud"]["max_cost"] > ceiling

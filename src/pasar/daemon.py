@@ -161,8 +161,9 @@ class Daemon:
                                  "omit the memory request to take the whole GPU")
 
     # ---- cloud helpers
-    def _rates(self, target: CloudTarget) -> dict:
-        """Live prices, with anything the operator pinned in the config on top."""
+    def cloud_rates(self, target: CloudTarget) -> dict:
+        """Live prices, with anything the operator pinned in the config on top. Public: the API
+        and CLI read it too (`GET /api/cloud`), not just pricing done here."""
         ex = self.executors.get(target.name)
         rates: dict = {}
         if ex is not None:
@@ -175,7 +176,23 @@ class Daemon:
 
     def _cost(self, target: CloudTarget, gpu: str, seconds: float) -> float:
         kind, count = parse_gpu(gpu)
-        return estimate(hourly_rate(self._rates(target), kind, count), seconds)
+        return estimate(hourly_rate(self.cloud_rates(target), kind, count), seconds)
+
+    def cloud_estimate(self, job: Job) -> tuple[float, float] | None:
+        """(estimated, max) dollars for `job`'s next cloud attempt at today's rates, or `None`
+        if it cannot be priced right now (an unconfigured target, or a rate the provider or
+        config is missing). Public so views can show a price before a job has ever been
+        approved, and keep showing one after — `approve()` prices the same way at the moment it
+        writes the approvals row, this just does it again, live, on demand."""
+        target = self.cfg.clouds.get(job.spec.target)
+        if target is None or not job.spec.gpu:
+            return None
+        try:
+            est = self._cost(target, job.spec.gpu, job.spec.est_runtime)
+            top = self._cost(target, job.spec.gpu, self._approved_seconds(job.spec, target))
+        except (KeyError, ValueError):
+            return None
+        return est, top
 
     @staticmethod
     def _approved_seconds(spec: JobSpec, target: CloudTarget) -> int:
@@ -243,6 +260,10 @@ class Daemon:
                              "new submit, priced and approved again")
         if spec.preempt:
             raise ValueError("--preempt is for the local GPU; cloud jobs never stop one another")
+        if spec.data:
+            raise ValueError("--data is not wired up yet: a cloud job's input data has to "
+                             "arrive with the provider work (e.g. a volume mount in the target's "
+                             "config), not through pasar submit; leave it out for now")
         self._validate_spec(spec)
         try:
             self._cost(target, spec.gpu, spec.est_runtime)
