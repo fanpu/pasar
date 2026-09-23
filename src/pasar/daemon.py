@@ -40,6 +40,7 @@ LOCAL = "local"
 _BASE_ENV_KEYS = ("PATH", "HOME", "USER", "LANG", "SHELL")
 PAUSE_LIMIT = 5  # times a cloud job may run out of its approved time before it must be resubmitted
 PRICE_TOLERANCE = 1e-6  # dollars of float noise, which is not a price rise
+CLOUD_RATE_TTL = 10  # seconds a target's price list is reused before the provider is asked again
 EXTENSION_MARGIN = 1.1  # buffer added to a projected overrun so one extension does not get
                         # immediately re-flagged by ordinary noise in the next progress report
 USAGE_HISTORY = 1800  # samples per job (an hour at the default 2s tick), current attempt only
@@ -100,6 +101,7 @@ class Daemon:
         self.decision = Decision()
         self.cloud_decisions: dict[str, CloudDecision] = {}
         self.ledger = Ledger(store, clock)
+        self._rates: dict[str, tuple[float, dict]] = {}
         # Injectable because it shells out to uv: tests hand in a stub rather than pay for a
         # real resolve on every cloud submit.
         self.platform_check = platform_check
@@ -171,14 +173,31 @@ class Daemon:
     # ---- cloud helpers
     def cloud_rates(self, target: CloudTarget) -> dict:
         """Live prices, with anything the operator pinned in the config on top. Public: the API
-        and CLI read it too (`GET /api/cloud`), not just pricing done here."""
-        ex = self.executors.get(target.name)
-        rates: dict = {}
-        if ex is not None:
-            try:
-                rates = dict(ex.provider.rates())
-            except Exception:
-                log.exception("%s could not report its rates", target.name)
+        and CLI read it too (`GET /api/cloud`), not just pricing done here.
+
+        Memoised per target for `CLOUD_RATE_TTL` seconds, because almost everything about a cloud
+        job is priced on demand rather than stored: a job view prices a capped job twice and every
+        tick prices each running capped job again, so `pasar ls` over twenty of them was forty
+        provider round-trips inside one two-second tick. A provider's price list moves on the
+        order of days, so a few seconds of staleness costs nothing, and holding one answer for a
+        few ticks also stops a momentary blip in a rate from moving a running attempt's
+        enforcement deadline for exactly one tick and back.
+
+        A failure is cached too, so a provider that is down is asked once every few seconds
+        rather than once per job per tick."""
+        now = self.clock()
+        cached = self._rates.get(target.name)
+        if cached is not None and now - cached[0] < CLOUD_RATE_TTL:
+            rates = dict(cached[1])
+        else:
+            ex = self.executors.get(target.name)
+            rates = {}
+            if ex is not None:
+                try:
+                    rates = dict(ex.provider.rates())
+                except Exception:
+                    log.exception("%s could not report its rates", target.name)
+            self._rates[target.name] = (now, dict(rates))
         rates.update(target.rates)
         return rates
 

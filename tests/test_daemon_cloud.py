@@ -15,7 +15,7 @@ import pytest
 from pasar.cloud.cost import estimate, hourly_rate
 from pasar.cloud.executor import parse_unit
 from pasar.config import CloudTarget, Config
-from pasar.daemon import PAUSE_LIMIT, Conflict, Daemon
+from pasar.daemon import CLOUD_RATE_TTL, PAUSE_LIMIT, Conflict, Daemon
 from pasar.db import Store
 from pasar.models import EndKind, JobSpec, State
 from pasar.units import GiB
@@ -195,6 +195,28 @@ def test_the_platform_gate_is_asked_once_per_environment(make_cloud, repo, platf
     daemon.submit(cloud_spec(repo))
     assert len(platform_check.calls) == 1
     assert Path(platform_check.calls[0]).resolve() == repo.resolve()
+
+
+def test_the_provider_is_not_asked_for_its_rates_once_per_price(make_cloud, repo, clock,
+                                                                monkeypatch):
+    # Almost nothing about a cloud job's price is stored, so a job view prices a capped job
+    # twice and every tick prices each running capped job again: `pasar ls` over twenty of them
+    # was forty provider round-trips inside one two-second tick.
+    daemon, provider = make_cloud()
+    calls = []
+    real = FakeProvider.rates
+    monkeypatch.setattr(provider, "rates", lambda: (calls.append(None), real(provider))[1])
+
+    job_id = start(daemon, repo, max_cost=6.0)  # submit, approve and launch all price the job
+    assert len(calls) == 1
+    for _ in range(3):
+        daemon.tick()
+        daemon.cloud_estimate(daemon.job(job_id))
+    assert len(calls) == 1  # still the one answer, within its lifetime
+
+    clock.advance(CLOUD_RATE_TTL + 1)
+    daemon.cloud_estimate(daemon.job(job_id))
+    assert len(calls) == 2  # and asked again once it is stale
 
 
 def test_a_local_submit_never_shells_out_to_uv(cloud, tmp_path, platform_check):
