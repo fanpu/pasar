@@ -293,9 +293,11 @@ def cloud_status_view(daemon, now: float, projection: dict) -> dict:
     """Everything `GET /api/cloud` and `pasar cloud` show: each configured target's budget, the
     most one job may spend on it over its whole life (`max_job_cost`), and its spend
     (`spent_today`/`spent_month` already include what's `committed` from jobs still running, the
-    same total the budget gate in `cloud.lane` checks against), its live rates,
-    every job currently waiting on a person to approve it, and every *running* job whose own pace
-    projects it past its approved run time (`needs_time`) — a different tray from `awaiting`,
+    same total the budget gate in `cloud.lane` checks against), its live rates, its GPUs as clean
+    rows (`gpus`: name as `--gpu` accepts it, live $/hour, memory in GB, cheapest first — see
+    `Daemon.cloud_gpus`), every job currently waiting on a person to approve it, and every
+    *running* job whose own pace projects it past its approved run time (`needs_time`) — a
+    different tray from `awaiting`,
     because these jobs are not paused and do not need to be: they keep running on the time they
     already have unless a person extends them (`POST /api/jobs/{id}/approve?extend=1`).
 
@@ -328,6 +330,8 @@ def cloud_status_view(daemon, now: float, projection: dict) -> dict:
             "rates": daemon.cloud_rates(target),
             "known_stored_bytes": sum(held.get(name, [])),
             "known_stored_jobs": len(held.get(name, [])),
+            "gpus": [{"name": g.name, "hourly_rate": g.hourly_rate, "memory_gb": g.memory_gb}
+                     for g in daemon.cloud_gpus(target)],
         })
     awaiting = [job_view(daemon, j, now, projection)
                 for j in daemon.store.list_jobs([State.AWAITING])]

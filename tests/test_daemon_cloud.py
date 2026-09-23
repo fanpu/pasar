@@ -2237,6 +2237,17 @@ def test_submit_is_refused_when_the_estimate_is_past_the_jobs_cap(make_cloud, re
     assert daemon.store.list_jobs() == []
 
 
+def test_the_job_cap_refusal_suggests_each_gpu_once_even_under_two_spellings(make_cloud, repo):
+    # The rate map carries this GPU under both spellings (see modal_provider._aliased); it must
+    # be suggested once, by one name, not twice under two names for the same physical card.
+    daemon, _ = make_cloud(rates={"gpu_hour_cost_a100_80gb": 0.80, "gpu_hour_cost_a100-80gb": 0.80})
+    with pytest.raises(ValueError) as excinfo:
+        daemon.submit(cloud_spec(repo, est_runtime=3 * 3600))
+    msg = str(excinfo.value)
+    assert msg.count("A100") == 1  # not "A100_80GB (...), A100-80GB (...)" -- the actual old bug
+    assert "A100-80GB ($6.38)" in msg
+
+
 def test_the_padded_ceiling_is_not_what_submit_refuses(cloud, repo):
     # 1h30m estimates $7.92, under the cap; the 1.5x window around it would cost $11.88, over it.
     # That is not a reason to refuse: the cap turns into a shorter window, like --max-cost does.

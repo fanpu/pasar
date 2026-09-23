@@ -8,6 +8,49 @@ from typing import Protocol
 from pasar.cloud.bundle import Bundle, EnvSpec
 
 
+@dataclass(frozen=True)
+class GpuRow:
+    """One GPU a target can be asked for: the name `--gpu` accepts, its live price, and its
+    memory in GB. `memory_gb` is `None` when the provider's memory table has never heard of this
+    GPU — it still lists, priced, rather than vanishing; a person or agent reading `pasar cloud`
+    sees it exists even though nobody has looked up how much memory it carries yet."""
+    name: str
+    hourly_rate: float
+    memory_gb: float | None = None
+
+
+def gpu_rows(rates: dict[str, float], names: dict[str, str],
+             memory_gb: dict[str, float]) -> list[GpuRow]:
+    """Collapse `rates`'s `gpu_hour_cost_*` keys into one row per real GPU, cheapest first.
+
+    `rates` is a provider's whole price list: `gpu_hour_cost_*` keys aliased both ways between
+    dashes and underscores (see `modal_provider._aliased`), plus CPU/memory/volume/endpoint keys
+    that are not GPUs at all and are skipped by their prefix alone. Two aliases of the same GPU
+    — `a100_80gb` and `a100-80gb` — must not become two rows: everything not given an explicit
+    name in `names` is folded onto Modal's own dash style (`replace("_", "-").upper()`), so both
+    spellings land on the same key and the second write just overwrites the first with the same
+    price. `names` exists only for the GPUs whose rate-key spelling does not already match that
+    style — `a10g` -> `A10`, `rtx6000` -> `RTX-PRO-6000` — so the row's name is always one Modal's
+    own `gpu=` accepts, not a guess built from the rate table's own habits.
+
+    Every row's name must also round-trip back through `hourly_rate`'s `.lower()` to a key still
+    present in `rates`; that only holds if every alias this produces was itself written into
+    `rates` first, which is exactly what `_aliased` (extended with the same `names` exceptions)
+    guarantees.
+
+    `memory_gb` is keyed by the row's display name, not the rate key's spelling, and is a static,
+    hand-checked table — a GPU missing from it still gets a row, with `memory_gb=None`.
+    """
+    best: dict[str, GpuRow] = {}
+    for key, rate in rates.items():
+        if not key.startswith("gpu_hour_cost_"):
+            continue
+        basename = key[len("gpu_hour_cost_"):]
+        display = names.get(basename, basename.replace("_", "-").upper())
+        best[display] = GpuRow(display, rate, memory_gb.get(display))
+    return sorted(best.values(), key=lambda r: r.hourly_rate)
+
+
 def parse_gpu(spec: str) -> tuple[str, int]:
     """'H100' or 'A100-80GB:4' -> (type, count)."""
     kind, _, count = spec.partition(":")
@@ -103,6 +146,10 @@ class Provider(Protocol):
 
     def rates(self) -> dict[str, float]:
         """Return this provider's current price list, keyed by billing dimension."""
+
+    def gpus(self) -> list[GpuRow]:
+        """This target's GPUs as clean rows, from `rates()`: name as `--gpu` accepts it, live
+        $/hour, and memory in GB (`None` if unknown). See `gpu_rows`."""
 
     def upload(self, paths: list[str], key: str) -> str:
         """Store data under key for later use as a launch volume; return a location to reference it."""

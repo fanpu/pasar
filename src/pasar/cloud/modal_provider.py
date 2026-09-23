@@ -20,7 +20,7 @@ import time
 from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
 
-from pasar.cloud.base import Capabilities, CloudLaunch, CloudStatus, Phase
+from pasar.cloud.base import Capabilities, CloudLaunch, CloudStatus, GpuRow, Phase, gpu_rows
 from pasar.cloud.bundle import EnvSpec
 from pasar.cloud.container import BUNDLE, ENV, LIB, PERSIST, WORK, container_env, entry_script
 from pasar.cloud.modal_profile import credentials
@@ -38,6 +38,31 @@ MAX_DEAD_BOXES = 64     # finished attempts kept around before the oldest are dr
 DEFAULT_PYTHON = "3.12"  # only the interpreter uv runs under; the job's own comes from its lock
 POLL_INTERVAL = 0.05    # seconds a watcher sleeps between checks it cannot block on
 TERMINAL = (Phase.EXITED, Phase.GONE)
+
+# A rate key's basename -> the name Modal's own `gpu=` accepts, for the GPUs whose rate-key
+# spelling does not already fold onto that name the plain way `gpu_rows` does for everything
+# else (`replace("_", "-").upper()`). Modal's billing calls the A10 card `a10g` (AWS's product
+# name for the same die, not Modal's own) and calls the RTX PRO 6000 `rtx6000` (no "pro", no
+# generation) — both would otherwise list under a name Modal's `Sandbox.create(gpu=...)` refuses.
+GPU_NAMES = {
+    "a10g": "A10",
+    "rtx6000": "RTX-PRO-6000",
+}
+
+# Memory in GB, keyed by the name in GPU_NAMES.values() / gpu_rows' own fallback spelling —
+# i.e. the name a row is shown under, not the rate key's. Every figure here is checked against
+# Modal's published GPU list (see .superpowers/sdd/2026-09-23-cloud-guidance/gpu-specs.md): T4
+# 16GB GDDR6, L4 24GB GDDR6, A10 24GB GDDR6 (Modal states 96GB across 4 GPUs, i.e. 24GB each),
+# L40S 48GB (Modal states this directly), A100-40GB/A100-80GB in their own names, RTX-PRO-6000
+# 96GB (Modal's own blog post), H100 80GB and H200 141GB (Modal confirms both are the SXM
+# variant; H200's 141GB is stated directly), B200 180GB and B300 270GB (neither stated by Modal;
+# the NVIDIA HGX board datasheet figures are used, per-GPU, for the board Modal is inferred to
+# rack — gpu-specs.md flags a conflict with Modal's own multi-GPU memory math for B300, which
+# implies ~288GB/GPU; the NVIDIA datasheet figure is used here as the more directly sourced one).
+GPU_MEMORY_GB = {
+    "T4": 16, "L4": 24, "A10": 24, "L40S": 48, "A100-40GB": 40, "A100-80GB": 80,
+    "RTX-PRO-6000": 96, "H100": 80, "H200": 141, "B200": 180, "B300": 270,
+}
 
 
 @dataclass
@@ -555,6 +580,10 @@ class ModalProvider:
             # refusing to price a job at all, which is what an empty table does.
             log.exception("could not refresh %s's rates", self.target.name)
 
+    def gpus(self) -> list[GpuRow]:
+        """This target's GPUs as clean rows, from the live rates. See `gpu_rows`."""
+        return gpu_rows(self.rates(), GPU_NAMES, GPU_MEMORY_GB)
+
     # ---- not built yet
     def upload(self, paths: list[str], key: str) -> str:
         raise NotImplementedError(
@@ -680,13 +709,22 @@ class ModalProvider:
 def _aliased(rates: dict[str, float]) -> dict[str, float]:
     """Also price each GPU under the spelling a person types. `hourly_rate` looks up
     `gpu_hour_cost_<--gpu lowercased>`, so `--gpu A100-80GB` asks for `…a100-80gb` while Modal
-    lists `…a100_80gb`; an unpriced GPU refuses to estimate, which means the job never starts."""
+    lists `…a100_80gb`; an unpriced GPU refuses to estimate, which means the job never starts.
+
+    `GPU_NAMES` covers the GPUs whose Modal-accepted name is not just its rate key's own dashes
+    and underscores swapped — `a10g`'s billing key vs `A10`'s `gpu=` string, `rtx6000`'s vs
+    `RTX-PRO-6000`'s — so `--gpu A10` and `--gpu RTX-PRO-6000` need a rate key of their own, not
+    just the two this loop would otherwise produce."""
     out = dict(rates)
     for key, value in rates.items():
         if not key.startswith("gpu_hour_cost_"):
             continue
         name = key[len("gpu_hour_cost_"):]
-        for alias in {name.replace("_", "-"), name.replace("-", "_")}:
+        aliases = {name.replace("_", "-"), name.replace("-", "_")}
+        if name in GPU_NAMES:
+            display = GPU_NAMES[name].lower()
+            aliases |= {display, display.replace("-", "_")}
+        for alias in aliases:
             out.setdefault(f"gpu_hour_cost_{alias}", value)
     return out
 

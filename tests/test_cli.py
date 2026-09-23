@@ -351,6 +351,18 @@ def test_cloud_command_text_and_json(client, capsys, cloud_daemon, cloud_cwd, mo
     assert body["needs_time"] == []
 
 
+def test_cloud_command_lists_gpus_as_clean_rows(client, capsys, cloud_daemon, cloud_cwd,
+                                                monkeypatch):
+    monkeypatch.chdir(cloud_cwd)
+    code, out = run(client, capsys, "cloud")
+    assert code == 0
+    assert "fake GPUs" in out.out and "H100" in out.out and "$3.95" in out.out
+    code, out = run(client, capsys, "cloud", "--json")
+    assert code == 0
+    gpus = json.loads(out.out)["targets"][0]["gpus"]
+    assert gpus == [{"name": "H100", "hourly_rate": 3.95, "memory_gb": None}]
+
+
 def test_show_and_cloud_surface_a_job_that_needs_more_time(client, capsys, cloud_daemon,
                                                             cloud_cwd, monkeypatch):
     monkeypatch.chdir(cloud_cwd)

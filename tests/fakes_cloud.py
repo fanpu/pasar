@@ -3,7 +3,7 @@
 from dataclasses import dataclass
 from pathlib import Path
 
-from pasar.cloud.base import Capabilities, CloudLaunch, CloudStatus, Phase
+from pasar.cloud.base import Capabilities, CloudLaunch, CloudStatus, GpuRow, Phase, gpu_rows
 from pasar.cloud.bundle import Bundle, EnvSpec
 
 
@@ -101,6 +101,11 @@ class FakeProvider:
     def rates(self) -> dict[str, float]:
         return {"gpu_hour_cost_h100": 3.95, "cpu_hour_cost_sandbox": 0.14,
                 "mem_gib_hour_cost_sandbox": 0.024}
+
+    def gpus(self) -> list[GpuRow]:
+        # No memory table of its own: this fake stands in for a provider pasar has never taught
+        # about a given GPU, which is exactly the "unknown GPU still lists, memory blank" case.
+        return gpu_rows(self.rates(), {}, {})
 
     def upload(self, paths: list[str], key: str) -> str:
         self.uploads[key] = list(paths)

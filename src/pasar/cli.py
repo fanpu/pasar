@@ -239,6 +239,10 @@ def print_job(job: dict) -> None:
             print(f"{k:>9}  {v}")
 
 
+def _gpu_mem(memory_gb: float | None) -> str:
+    return f"{memory_gb:g}GB" if memory_gb is not None else "?"
+
+
 def print_cloud(body: dict) -> None:
     targets = body["targets"]
     if not targets:
@@ -261,6 +265,17 @@ def print_cloud(body: dict) -> None:
         print("STORED is at least what finished jobs left at the provider, as a pull last "
               "measured it;\nrunning and paused jobs' checkpoints are not counted. Storage is "
               "billed even when nothing runs.")
+        for t in targets:
+            gpus = t.get("gpus") or []
+            if not gpus:
+                continue
+            print(f"\n{t['name']} GPUs (what --gpu accepts):")
+            grows = [("GPU", "$/HOUR", "MEMORY")]
+            for g in gpus:
+                grows.append((g["name"], _money(g["hourly_rate"]), _gpu_mem(g["memory_gb"])))
+            gwidths = [max(len(r[i]) for r in grows) for i in range(len(grows[0]))]
+            for r in grows:
+                print("  " + "  ".join(c.ljust(w) for c, w in zip(r, gwidths)).rstrip())
     awaiting = body["awaiting"]
     print()
     if awaiting:

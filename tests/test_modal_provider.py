@@ -414,6 +414,67 @@ def test_rates_are_aliased_so_a_gpu_spelt_with_a_dash_is_priced(provider, tmp_pa
     assert rates["gpu_hour_cost_a100_80gb"] == 2.5
 
 
+def test_a10_and_rtx_pro_6000_are_aliased_to_modals_own_billing_spelling(provider, tmp_path):
+    """Modal's billing calls these `a10g` and `rtx6000`, but `Sandbox.create(gpu=...)` wants `A10`
+    and `RTX-PRO-6000`; `--gpu A10` and `--gpu RTX-PRO-6000` must both find a rate, or the job
+    would price fine and then fail to launch."""
+    p, sdk = provider
+    sdk.rates_value = {**sdk.rates_value, "gpu_hour_cost_a10g": 1.1,
+                       "gpu_hour_cost_rtx6000": 6.0}
+    rates = p.rates()
+    assert rates["gpu_hour_cost_a10"] == 1.1
+    assert rates["gpu_hour_cost_rtx-pro-6000"] == 6.0
+
+
+# ---- gpus(): one clean row per real GPU
+def test_gpus_collapses_aliases_to_one_row_named_as_gpu_accepts_it(provider, tmp_path):
+    p, sdk = provider
+    sdk.rates_value = {"gpu_hour_cost_a100_80gb": 2.5, "gpu_hour_cost_a100-80gb": 2.5}
+    rows = {r.name: r for r in p.gpus()}
+    assert list(rows) == ["A100-80GB"]
+    assert rows["A100-80GB"].hourly_rate == 2.5
+    assert rows["A100-80GB"].memory_gb == 80
+
+
+def test_gpus_uses_modals_own_name_for_a10_and_rtx_pro_6000(provider, tmp_path):
+    p, sdk = provider
+    sdk.rates_value = {"gpu_hour_cost_a10g": 1.1, "gpu_hour_cost_rtx6000": 6.0}
+    rows = {r.name: r for r in p.gpus()}
+    assert set(rows) == {"A10", "RTX-PRO-6000"}
+    assert rows["A10"].memory_gb == 24
+    assert rows["RTX-PRO-6000"].memory_gb == 96
+
+
+def test_gpus_excludes_endpoint_and_cpu_memory_rates(provider, tmp_path):
+    p, sdk = provider
+    sdk.rates_value = {
+        "gpu_hour_cost_h100": 3.95, "cpu_hour_cost_sandbox": 0.1419,
+        "mem_gib_hour_cost_sandbox": 0.024, "volume_storage_gib_month_cost": 0.05,
+        "endpoints_llama_3_1_8b_instruct": 0.1,
+    }
+    names = {r.name for r in p.gpus()}
+    assert names == {"H100"}
+
+
+def test_gpus_lists_an_unknown_gpu_with_its_memory_blank(provider, tmp_path):
+    """A GPU Modal adds tomorrow, not yet in the memory table, still lists — priced — rather than
+    vanishing from `pasar cloud`."""
+    p, sdk = provider
+    sdk.rates_value = {"gpu_hour_cost_b400": 9.0}
+    rows = {r.name: r for r in p.gpus()}
+    assert rows["B400"].hourly_rate == 9.0
+    assert rows["B400"].memory_gb is None
+
+
+def test_gpus_sort_by_price(provider, tmp_path):
+    p, sdk = provider
+    sdk.rates_value = {"gpu_hour_cost_h100": 3.95, "gpu_hour_cost_t4": 0.59,
+                       "gpu_hour_cost_h200": 4.5}
+    rows = p.gpus()
+    assert [r.name for r in rows] == ["T4", "H100", "H200"]
+    assert [r.hourly_rate for r in rows] == sorted(r.hourly_rate for r in rows)
+
+
 # ---- one client per account
 def test_the_provider_passes_its_own_client_to_every_call(tmp_path, monkeypatch):
     """Four accounts in one process: a call that forgets the client runs on whichever profile

@@ -14,7 +14,7 @@ from dataclasses import replace
 from pathlib import Path
 
 from pasar import gitinfo
-from pasar.cloud.base import parse_gpu
+from pasar.cloud.base import GpuRow, gpu_rows, parse_gpu
 from pasar.cloud.bundle import Bundle, BundleError, EnvSpec, build_bundle, check_platform
 from pasar.cloud.cost import Ledger, estimate, hourly_rate
 from pasar.cloud.executor import CloudExecutor
@@ -265,6 +265,24 @@ class Daemon:
         kind, count = parse_gpu(gpu)
         return hourly_rate(self.cloud_rates(target), kind, count)
 
+    def cloud_gpus(self, target: CloudTarget) -> list[GpuRow]:
+        """This target's GPUs as clean rows — name as `--gpu` accepts it, live $/hour, memory in
+        GB — one per real GPU, cheapest first. Public for the same reason `cloud_rates` is: the
+        API and CLI read it too (`GET /api/cloud`, `pasar cloud`).
+
+        Unlike `cloud_rates`, this is the provider's own rows (`Provider.gpus()`), not `rates()`
+        merged with a target's config-pinned overrides: the provider is what names and prices a
+        GPU correctly enough for `--gpu` to both price it and hand it to the provider's own
+        launch call, and a pinned override is not guaranteed to round-trip through that."""
+        ex = self.executors.get(target.name)
+        if ex is None:
+            return []
+        try:
+            return ex.provider.gpus()
+        except Exception:
+            log.exception("%s could not list its GPUs", target.name)
+            return []
+
     def _cost(self, target: CloudTarget, gpu: str, seconds: float) -> float:
         return estimate(self._hourly(target, gpu), seconds)
 
@@ -321,21 +339,25 @@ class Daemon:
         GPUs on the same target whose estimate for the same run would fit (from the live rates,
         priciest first, since that is usually the nearest to what was asked for), and who may
         raise the limit. A shorter `--time` is deliberately not offered: the estimate is meant to
-        be honest, and the cap covers every later attempt anyway."""
+        be honest, and the cap covers every later attempt anyway.
+
+        Walks `gpu_rows`, not the raw rate keys: the rate map aliases one GPU under several
+        spellings (dashes and underscores, and a couple that don't match at all — see
+        `modal_provider.GPU_NAMES`), and suggesting the same physical GPU twice under two names
+        would waste the one line a person or agent actually reads."""
         cap = target.max_job_cost
         kind, count = parse_gpu(spec.gpu)
         rates = self.cloud_rates(target)
         fits = []
-        for key in rates:
-            other = key.removeprefix("gpu_hour_cost_")
-            if other == key or other == kind.lower():
+        for row in gpu_rows(rates, {}, {}):
+            if row.name.lower() == kind.lower():
                 continue
             try:
-                cost = estimate(hourly_rate(rates, other, count), spec.est_runtime)
+                cost = estimate(hourly_rate(rates, row.name, count), spec.est_runtime)
             except KeyError:
                 continue
             if cost <= cap + PRICE_TOLERANCE:
-                fits.append((cost, other.upper() + (f":{count}" if count > 1 else "")))
+                fits.append((cost, row.name + (f":{count}" if count > 1 else "")))
         fits.sort(reverse=True)
         msg = (f"estimated cost ${est:.2f} ({fmt_duration(spec.est_runtime)} of {spec.gpu} at "
                f"${rate:.2f}/hour) is above the ${cap:.2f} one job may spend on {target.name} "
