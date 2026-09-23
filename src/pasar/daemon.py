@@ -37,7 +37,7 @@ LOG_TAIL_LINES = 50
 ACTIVE = (State.RUNNING, State.STOPPING)
 LOCAL = "local"
 _BASE_ENV_KEYS = ("PATH", "HOME", "USER", "LANG", "SHELL")
-PAUSE_LIMIT = 5  # attempts a cloud job may end `paused` before it has to be submitted afresh
+PAUSE_LIMIT = 5  # times a cloud job may run out of its approved time before it must be resubmitted
 PRICE_TOLERANCE = 1e-6  # dollars of float noise, which is not a price rise
 USAGE_HISTORY = 1800  # samples per job (an hour at the default 2s tick), current attempt only
 RECENT = 86400  # matches api.RECENT: usage_history for jobs finished longer ago than this is dropped
@@ -562,14 +562,19 @@ class Daemon:
             state, retries_used = State.QUEUED, job.retries_used
         elif kind == EndKind.PAUSED:
             state, retries_used = State.AWAITING, job.retries_used
-            paused = sum(1 for a in self.store.attempts(job_id) if a.end_kind == EndKind.PAUSED)
+            # Only the job's own pauses: a provider reclaim is not its fault, which is why it
+            # costs no retry either, and a well-behaved job on a spot-style provider must not
+            # spend its budget of pauses on the provider's behalf.
+            paused = sum(1 for a in self.store.attempts(job_id)
+                         if a.end_kind == EndKind.PAUSED and a.reason == "time_limit")
             if paused >= PAUSE_LIMIT:
                 # A pause costs no retry, so nothing else bounds this: a job that never
                 # checkpoints would pause, resume from the start and pause again forever, on
                 # hardware billed by the second.
                 state, reason = State.FAILED, "pause_limit"
-                summary = (f"paused {paused} times without finishing; submit it again with a "
-                           "longer --time, or make sure it checkpoints and resumes")
+                summary = (f"ran out of its approved time {paused} times without finishing; "
+                           "submit it again with a longer --time, or make sure it checkpoints "
+                           "and resumes")
         else:
             state, retries_used = self._retry_state(job)
         extra = {}

@@ -308,19 +308,53 @@ def test_approving_a_paused_job_resumes_it_as_a_new_attempt(cloud, repo):
     assert env["PASAR_ATTEMPT"] == "2" and env["PASAR_RESUMING"] == "1"
 
 
+def out_of_time(daemon, provider, job_id, attempt):
+    """The wrapper's exit line for an attempt that ran out of its approved time."""
+    provider.emit(handle_of(daemon, job_id),
+                  ctl(daemon, job_id, {"t": "exit", "code": None, "signal": "SIGTERM",
+                                       "reason": "time_limit"}, attempt=attempt))
+
+
 def test_pausing_does_not_loop_forever(cloud, repo):
     daemon, provider = cloud
     job_id = start(daemon, repo)
-    for _ in range(PAUSE_LIMIT - 1):
+    for n in range(1, PAUSE_LIMIT):
+        out_of_time(daemon, provider, job_id, n)
+        daemon.tick()
+        assert daemon.job(job_id).state == State.AWAITING
+        daemon.approve(job_id)
+        daemon.tick()
+    out_of_time(daemon, provider, job_id, PAUSE_LIMIT)
+    daemon.tick()
+    job = daemon.job(job_id)
+    assert job.state == State.FAILED and job.reason == "pause_limit"
+
+
+def test_a_provider_reclaim_does_not_count_toward_the_pause_limit(make_cloud, repo):
+    # A reclaim is not the job's fault — that is why it consumes no retry — so a checkpointing
+    # job on a spot-style provider must not burn its pause budget on the provider's behalf.
+    # The budget is raised so that only the pause limit is under test here.
+    daemon, provider = make_cloud(daily_budget=1000.0, monthly_budget=5000.0)
+    job_id = start(daemon, repo)
+    for _ in range(PAUSE_LIMIT + 2):
         provider.reclaim(handle_of(daemon, job_id))
         daemon.tick()
         assert daemon.job(job_id).state == State.AWAITING
         daemon.approve(job_id)
         daemon.tick()
-    provider.reclaim(handle_of(daemon, job_id))
+    assert daemon.job(job_id).state == State.RUNNING
+    # and the pauses that are the job's own still count, over its whole life
+    attempt = PAUSE_LIMIT + 3  # the one running now, after PAUSE_LIMIT + 2 reclaims
+    for _ in range(PAUSE_LIMIT - 1):
+        out_of_time(daemon, provider, job_id, attempt)
+        daemon.tick()
+        assert daemon.job(job_id).state == State.AWAITING
+        daemon.approve(job_id)
+        daemon.tick()
+        attempt += 1
+    out_of_time(daemon, provider, job_id, attempt)
     daemon.tick()
-    job = daemon.job(job_id)
-    assert job.state == State.FAILED and job.reason == "pause_limit"
+    assert daemon.job(job_id).reason == "pause_limit"
 
 
 def test_the_daemon_stops_a_cloud_job_at_its_approved_run_time(make_cloud, repo, clock):
