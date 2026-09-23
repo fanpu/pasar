@@ -2,6 +2,7 @@ from pathlib import Path
 
 import pytest
 
+from pasar.cloud.bundle import BundleError
 from pasar.cloud.executor import CloudExecutor
 from pasar.config import CloudTarget, Config
 from pasar.daemon import Daemon
@@ -32,10 +33,29 @@ def probe():
 
 
 @pytest.fixture
-def daemon(tmp_path, clock, executor, probe):
+def platform_check():
+    """Stands in for the submit-time `uv sync --dry-run` gate, which shells out to uv. Records
+    the project directories it was asked about; `check_platform` itself is tested for real in
+    test_cloud_bundle.py."""
+    class Recorder:
+        def __init__(self):
+            self.calls: list[str] = []
+            self.error: str | None = None
+
+        def __call__(self, project_dir: str) -> None:
+            self.calls.append(project_dir)
+            if self.error:
+                raise BundleError(self.error)
+
+    return Recorder()
+
+
+@pytest.fixture
+def daemon(tmp_path, clock, executor, probe, platform_check):
     data = tmp_path / "data"
     data.mkdir()
-    return Daemon(Config(), Store(data / "pasar.db"), executor, probe, data, clock=clock)
+    return Daemon(Config(), Store(data / "pasar.db"), executor, probe, data, clock=clock,
+                  platform_check=platform_check)
 
 
 @pytest.fixture

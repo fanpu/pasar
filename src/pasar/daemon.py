@@ -13,7 +13,7 @@ from pathlib import Path
 
 from pasar import gitinfo
 from pasar.cloud.base import parse_gpu
-from pasar.cloud.bundle import Bundle, BundleError, EnvSpec, build_bundle
+from pasar.cloud.bundle import Bundle, BundleError, EnvSpec, build_bundle, check_platform
 from pasar.cloud.cost import Ledger, estimate, hourly_rate
 from pasar.cloud.executor import CloudExecutor
 from pasar.cloud.lane import CloudDecision, CloudQueued, decide_cloud
@@ -78,7 +78,8 @@ def _separator(n: int, now: float, prev: Attempt | None) -> str:
 
 class Daemon:
     def __init__(self, cfg: Config, store: Store, executor: Executor, probe, data_dir: Path,
-                 clock=time.time, metrics=None, providers: dict | None = None):
+                 clock=time.time, metrics=None, providers: dict | None = None,
+                 platform_check=check_platform):
         self.cfg = cfg
         self.store = store
         self.executor = executor
@@ -99,6 +100,10 @@ class Daemon:
         self.decision = Decision()
         self.cloud_decisions: dict[str, CloudDecision] = {}
         self.ledger = Ledger(store, clock)
+        # Injectable because it shells out to uv: tests hand in a stub rather than pay for a
+        # real resolve on every cloud submit.
+        self.platform_check = platform_check
+        self._platform_checked: set[str] = set()
         self.executors: dict[str, Executor] = {LOCAL: executor}
         for name, target in cfg.clouds.items():
             provider = (providers or {}).get(name)
@@ -430,6 +435,19 @@ class Daemon:
                     "extended that far — raise the budget, or let it pause at its approved time "
                     "and approve it again once there is room")
 
+    def _check_platform(self, bundle: Bundle) -> None:
+        """Refuse a submit whose lockfile cannot resolve for the cloud's architecture, before a
+        GPU is rented for a job that could only ever have failed to build.
+
+        Remembered per environment, because this shells out to uv and submit has to stay quick:
+        the key is the hash of `pyproject.toml`, `uv.lock` and `.python-version`, so a sweep of
+        twenty jobs over one lockfile pays for one resolve, and editing any of the three is a
+        different key and gets checked again."""
+        if bundle.env.key in self._platform_checked:
+            return
+        self.platform_check(bundle.root)
+        self._platform_checked.add(bundle.env.key)
+
     def _write_bundle(self, d: Path, bundle: Bundle) -> None:
         (d / "bundle.json").write_text(json.dumps({
             "root": bundle.root, "rel_cwd": bundle.rel_cwd, "size": bundle.size,
@@ -509,6 +527,7 @@ class Daemon:
         try:
             try:
                 bundle = build_bundle(spec.cwd, tmp / "bundle.tar", target.bundle_max)
+                self._check_platform(bundle)
             except BundleError as e:
                 # A job that cannot be packaged is the submitter's mistake and nothing exists
                 # yet; as a ValueError it reaches them as a 4xx instead of a server error.

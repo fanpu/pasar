@@ -8,6 +8,7 @@ saying so, and never leaves a sandbox running that nothing owns.
 import json
 import subprocess
 from dataclasses import replace
+from pathlib import Path
 
 import pytest
 
@@ -45,7 +46,7 @@ def repo(tmp_path):
 
 
 @pytest.fixture
-def make_cloud(tmp_path, clock, executor, probe):
+def make_cloud(tmp_path, clock, executor, probe, platform_check):
     data = tmp_path / "data"
     data.mkdir()
 
@@ -56,7 +57,8 @@ def make_cloud(tmp_path, clock, executor, probe):
                 "env_passthrough": ["WANDB_API_KEY"]}
         cfg = Config(clouds={"fake": CloudTarget(**{**base, **target_kw})})
         daemon = Daemon(cfg, Store(data / "pasar.db"), executor, probe, data, clock=clock,
-                        metrics=metrics, providers={"fake": provider})
+                        metrics=metrics, providers={"fake": provider},
+                        platform_check=platform_check)
         return daemon, provider
 
     return make
@@ -170,6 +172,35 @@ def test_submit_rejects_a_gpu_the_target_has_no_price_for(cloud, repo):
     daemon, _ = cloud
     with pytest.raises(ValueError, match="price"):
         daemon.submit(cloud_spec(repo, gpu="B200"))
+
+
+def test_a_lockfile_that_cannot_resolve_for_the_cloud_is_refused_at_submit(make_cloud, repo,
+                                                                           platform_check):
+    # The gate costs a second of uv and saves renting a GPU for an image that could only ever
+    # have failed to build.
+    daemon, provider = make_cloud()
+    platform_check.error = "this project's uv.lock does not resolve for x86_64-manylinux_2_28"
+    with pytest.raises(ValueError, match="does not resolve"):
+        daemon.submit(cloud_spec(repo))
+    assert daemon.store.list_jobs() == []
+    daemon.tick()
+    assert provider.boxes == {}
+
+
+def test_the_platform_gate_is_asked_once_per_environment(make_cloud, repo, platform_check):
+    # It shells out to uv, and a sweep is one submit per configuration: the answer only changes
+    # when the lockfile does, which is exactly what the environment key hashes.
+    daemon, _ = make_cloud()
+    daemon.submit(cloud_spec(repo))
+    daemon.submit(cloud_spec(repo))
+    assert len(platform_check.calls) == 1
+    assert Path(platform_check.calls[0]).resolve() == repo.resolve()
+
+
+def test_a_local_submit_never_shells_out_to_uv(cloud, tmp_path, platform_check):
+    daemon, _ = cloud
+    daemon.submit(JobSpec(command="python train.py", est_runtime=60, cwd=str(tmp_path)))
+    assert platform_check.calls == []
 
 
 def test_an_unpackageable_job_is_refused_as_a_bad_request(cloud, tmp_path):
