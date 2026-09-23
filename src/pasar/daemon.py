@@ -9,6 +9,7 @@ import tempfile
 import threading
 import time
 from collections import deque
+from collections.abc import Callable
 from dataclasses import replace
 from pathlib import Path
 
@@ -47,10 +48,6 @@ EXTENSION_MARGIN = 1.1  # buffer added to a projected overrun so one extension d
                         # immediately re-flagged by ordinary noise in the next progress report
 USAGE_HISTORY = 1800  # samples per job (an hour at the default 2s tick), current attempt only
 RECENT = 86400  # matches api.RECENT: usage_history for jobs finished longer ago than this is dropped
-# How far back housekeep looks for a finished cloud job whose automatic pull never landed (a
-# failed download, a full disk, pasard restarted mid-pull). Stands in for the cloud retention
-# period until that is configurable: past it, a job's results are left for a manual `pasar pull`.
-PULL_RETRY_WINDOW = 3 * 86400
 # Automatic pulls of one job before pasard stops trying and leaves it to a person. Each failed
 # try may leave a full-size staging copy behind, so this is also what bounds those.
 AUTO_PULL_TRIES = 3
@@ -112,7 +109,7 @@ def _in_thread(work) -> None:
     """Run `work` on its own daemon thread: the default background seam. A daemon thread dies
     with pasard rather than holding up its exit, which leaves a pull cut short exactly as one
     that failed — nothing deleted at the provider — for housekeep's retry to pick up. Only
-    ever one at a time for pulls: see `_schedule_pull`."""
+    ever one at a time, for pulls and sweeps alike: see `_enqueue`."""
     threading.Thread(target=work, name="pasar-pull", daemon=True).start()
 
 
@@ -160,12 +157,16 @@ class Daemon:
         # of one `pull()` call, never across a tick.
         self._pulling: set[int] = set()
         self._pull_lock = threading.Lock()
-        # Automatic pulls waiting or running, under the same lock: `_pull_order` is the queue
-        # the one worker drains, `_pull_queued` every job in it or being pulled by it (what
-        # keeps housekeep from queueing a job twice), `_pull_worker` whether that worker is up.
-        self._pull_order: deque[int] = deque()
+        # Automatic pulls and retention sweeps waiting or running, under the same lock:
+        # `_pull_order` is the queue the one worker drains (each entry a job and what to do with
+        # it), `_pull_queued` every job in it or being worked on by it (what keeps housekeep from
+        # queueing a job twice), `_pull_worker` whether that worker is up. `_sweeping` is a job
+        # whose persist dir the sweep is deleting right now, which a manual pull must not start
+        # on, as `_pulling` is one a sweep must not.
+        self._pull_order: deque[tuple[int, Callable[[int], None]]] = deque()
         self._pull_queued: set[int] = set()
         self._pull_worker = False
+        self._sweeping: set[int] = set()
         # Where slow work goes so it never runs on the tick: a multi-GiB fetch inline in
         # `_finish` would stall the loop that serves the web UI. Injectable so tests run it on
         # their own thread, deterministically. So is the free-space probe, so a test can pretend
@@ -908,6 +909,10 @@ class Daemon:
         with self._pull_lock:
             if job_id in self._pulling:
                 raise Conflict(f"job {job_id} is already being pulled")
+            if job_id in self._sweeping:
+                raise Conflict(f"job {job_id}'s results are being swept from {job.spec.target}: "
+                               f"nobody pulled them within cloud_retention_days "
+                               f"({self.cfg.cloud_retention_days}), so they are being deleted")
             self._pulling.add(job_id)
         landed: dict = {}
         try:
@@ -1050,11 +1055,19 @@ class Daemon:
         provider for: without one there is nothing to reach, and `pull` would only refuse."""
         if not isinstance(self.executors.get(job.spec.target), CloudExecutor):
             return
+        self._enqueue(job.id, self.auto_pull)
+
+    def _enqueue(self, job_id: int, work: Callable[[int], None]) -> None:
+        """Queue `work(job_id)` for the one worker, unless that job is already queued, being
+        pulled or being swept, and start the worker if it is not running. Pulls and retention
+        sweeps share it, so the two can never run side by side on the same job: a sweep that
+        deleted a persist dir out from under a pull still downloading it would destroy the
+        work outright."""
         with self._pull_lock:
-            if job.id in self._pulling or job.id in self._pull_queued:
+            if job_id in self._pulling or job_id in self._sweeping or job_id in self._pull_queued:
                 return
-            self._pull_queued.add(job.id)
-            self._pull_order.append(job.id)
+            self._pull_queued.add(job_id)
+            self._pull_order.append((job_id, work))
             if self._pull_worker:
                 return
             self._pull_worker = True
@@ -1065,24 +1078,24 @@ class Daemon:
             # nothing is, and the next housekeep will queue it again.
             with self._pull_lock:
                 self._pull_worker = False
-                self._pull_queued.difference_update(self._pull_order)
+                self._pull_queued.difference_update(j for j, _ in self._pull_order)
                 self._pull_order.clear()
             log.exception("could not start the automatic pull worker")
 
     def _drain_pulls(self) -> None:
-        """The worker: pull queued jobs one after another until the queue is empty, then stop.
-        Deciding to stop happens under the lock, so a job queued at that moment either is seen
-        here or finds no worker and starts one."""
+        """The worker: run queued pulls and sweeps one after another until the queue is empty,
+        then stop. Deciding to stop happens under the lock, so a job queued at that moment
+        either is seen here or finds no worker and starts one."""
         while True:
             with self._pull_lock:
                 if not self._pull_order:
                     self._pull_worker = False
                     return
-                job_id = self._pull_order.popleft()
+                job_id, work = self._pull_order.popleft()
             try:
-                self.auto_pull(job_id)
+                work(job_id)
             except Exception:
-                log.exception("job %s's automatic pull failed", job_id)
+                log.exception("job %s's queued pull or sweep failed", job_id)
 
     def auto_pull(self, job_id: int) -> None:
         """The automatic pull of a finished cloud job into `<pull_dir>/<job_id>`, as the
@@ -1127,6 +1140,76 @@ class Daemon:
             f"{job_id} --to <dir>`"
             + (f". Partial downloads left from those tries, safe to delete once it is pulled: "
                f"{', '.join(staged)}" if staged else ""))
+
+    def _retention(self) -> float:
+        """`cloud_retention_days` in seconds: how long after a cloud job finished its automatic
+        pull is retried, and after which whatever it left at the provider is swept."""
+        return self.cfg.cloud_retention_days * 86400
+
+    def sweep(self, job_id: int) -> None:
+        """Delete what a finished cloud job left on its provider's volume once it has been there
+        `cloud_retention_days`, which a provider goes on billing for by the day. Most jobs have
+        been pulled by then, and the pull deleted the remote copy itself; this is for the rest —
+        a pull that kept failing, a disk too full to take it, a `--keep`. Run by the worker,
+        never on the tick: housekeep only decides and queues (see `_sweep_unpulled`).
+
+        This deletes the only copy of whatever the job left, so everything housekeep decided is
+        checked again here — time passes in the queue — and any doubt deletes nothing: a job
+        that is not `TERMINAL` (above all `AWAITING`, whose checkpoint is what its next attempt
+        resumes from, however long it waits), not a cloud job, not yet stamped as finished or
+        not yet old enough, already swept, being pulled right now, or on a target this pasard
+        has no provider for. Only ever the job's persist dir at the provider: nothing local,
+        and nothing under `pull_dir`, is touched.
+
+        A persist dir that is already empty is recorded as swept without a delete; one that is
+        not is deleted, then recorded with what it held, next to a machine event saying so. A
+        provider error records nothing, so the next housekeep tries again."""
+        try:
+            self._sweep(job_id)
+        except Exception:
+            log.exception("job %s's persist dir could not be swept; it is left at its provider "
+                          "for the next housekeep to try again", job_id)
+        finally:
+            with self._pull_lock:
+                self._pull_queued.discard(job_id)
+
+    def _sweep(self, job_id: int) -> None:
+        job = self.store.get_job(job_id)
+        if job is None or job.state not in TERMINAL or not self._is_cloud(job):
+            return
+        if self.store.cloud_swept(job_id) is not None:
+            return
+        ended = self.store.cloud_finished_at(job_id)
+        if ended is None or self.clock() - ended < self._retention():
+            return
+        target = job.spec.target
+        ex = self.executors.get(target)
+        if not isinstance(ex, CloudExecutor):
+            log.warning("job %s's results at %s are past cloud_retention_days, but %s has no "
+                        "provider on this pasard, so they cannot be swept yet", job_id, target,
+                        target)
+            return
+        with self._pull_lock:
+            if job_id in self._pulling or job_id in self._sweeping:
+                log.info("job %s is being pulled; its sweep is left to a later housekeep", job_id)
+                return
+            self._sweeping.add(job_id)
+        try:
+            files, size = ex.provider.persist_usage(job_id)
+            empty = files == 0 and size == 0
+            if not empty:
+                ex.provider.delete_persist(job_id)
+            self.store.mark_cloud_swept(job_id, self.clock(), files, size)
+        finally:
+            with self._pull_lock:
+                self._sweeping.discard(job_id)
+        if not empty:
+            self.store.add_machine_event(
+                self.clock(), "swept",
+                f"job {job_id}: nobody pulled its results within cloud_retention_days "
+                f"({self.cfg.cloud_retention_days}), so deleted {files} file(s), "
+                f"{fmt_gib(size)} ({size} bytes), from {target}")
+        self.changed()
 
     # ---- the loop
     def tick(self) -> None:
@@ -1764,6 +1847,7 @@ class Daemon:
             finished.append(((att.end_time if att and att.end_time else job.queue_time), job.id))
         finished.sort()
         self._retry_pulls(now, terminal)
+        self._sweep_unpulled(now, terminal)
         for ended, job_id in finished:
             if now - ended >= RECENT:
                 self.usage_history.pop(job_id, None)
@@ -1789,7 +1873,8 @@ class Daemon:
         pull, a volume that listed empty too soon. Going by a landed `pulls` row, not by the
         last outcome, is what stops this looping: a job pulled once is never asked about again,
         even though its remote dir now reads as empty. Bounded twice over: `AUTO_PULL_TRIES`
-        automatic tries per job, and only within `PULL_RETRY_WINDOW` of the job finishing.
+        automatic tries per job, and only within `cloud_retention_days` of the job finishing —
+        the same window the sweep waits out before deleting what is left (`_sweep_unpulled`).
 
         Also the backstop for `_cloud_ended`: a finished cloud job with no stamp (one that
         finished before stamps existed, or down a path that missed one) is stamped now, which
@@ -1802,7 +1887,31 @@ class Daemon:
             if ended is None:
                 self.store.mark_cloud_finished(job.id, now)
                 ended = now
-            if (now - ended <= PULL_RETRY_WINDOW
+            if (now - ended <= self._retention()
                     and self.store.last_pull(job.id, landed=True) is None
                     and self.store.count_pulls(job.id, auto=True) < AUTO_PULL_TRIES):
                 self._schedule_pull(job)
+
+    def _sweep_unpulled(self, now: float, terminal: list[Job]) -> None:
+        """Queue a sweep (see `sweep`) for each finished cloud job whose results have been at
+        the provider for `cloud_retention_days`, going by when it finished (`cloud_finished`,
+        which `_retry_pulls` has just stamped for any job missing one — a fresh stamp, so a
+        full window before any sweep) and not by its last attempt. Only `terminal` jobs, never
+        one already swept, and — through `_enqueue` — never one queued or being pulled. A job
+        whose target has no provider on this pasard is logged and left for a later housekeep,
+        should its provider come back. Queued, not run: this is called from the tick."""
+        stamped = self.store.cloud_finished()
+        swept = self.store.swept_jobs()
+        window = self._retention()
+        for job in terminal:
+            if job.state not in TERMINAL or not self._is_cloud(job) or job.id in swept:
+                continue
+            ended = stamped.get(job.id)
+            if ended is None or now - ended < window:
+                continue
+            if not isinstance(self.executors.get(job.spec.target), CloudExecutor):
+                log.warning("job %s's results at %s are past cloud_retention_days, but %s has "
+                            "no provider on this pasard, so they cannot be swept yet", job.id,
+                            job.spec.target, job.spec.target)
+                continue
+            self._enqueue(job.id, self.sweep)

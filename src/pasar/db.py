@@ -111,6 +111,12 @@ CREATE TABLE IF NOT EXISTS cloud_finished (
     job_id INTEGER PRIMARY KEY,
     ts REAL NOT NULL
 );
+CREATE TABLE IF NOT EXISTS cloud_swept (
+    job_id INTEGER PRIMARY KEY,
+    ts REAL NOT NULL,
+    files INTEGER NOT NULL,
+    bytes INTEGER NOT NULL
+);
 """
 
 _JOB_UPDATABLE = {"spec", "state", "bid", "queue_time", "retries_used", "reason", "summary",
@@ -442,3 +448,18 @@ class Store:
         """Every stamped cloud job and when it finished: what a job's results are aged by, both
         for retrying its pull and for how long a provider keeps them."""
         return {r["job_id"]: r["ts"] for r in self._q("SELECT job_id, ts FROM cloud_finished")}
+
+    # what the retention sweep deleted at a provider
+    def mark_cloud_swept(self, job_id: int, ts: float, files: int, size: int) -> None:
+        """Record that a finished cloud job's persist dir was swept: `files` and `size` (the
+        `bytes` column) are what was deleted, 0 and 0 when there was nothing left to delete. The
+        first record wins, like `mark_cloud_finished`: a job is swept once and never again."""
+        self._x("INSERT OR IGNORE INTO cloud_swept (job_id, ts, files, bytes) VALUES (?, ?, ?, ?)",
+                (job_id, ts, files, size))
+
+    def cloud_swept(self, job_id: int) -> dict | None:
+        rows = self._q("SELECT * FROM cloud_swept WHERE job_id = ?", (job_id,))
+        return dict(rows[0]) if rows else None
+
+    def swept_jobs(self) -> set[int]:
+        return {r["job_id"] for r in self._q("SELECT job_id FROM cloud_swept")}

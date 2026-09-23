@@ -125,6 +125,10 @@ class Config:
     pull_min_free: int = 20 * GiB
     # An optional ceiling on one automatic pull, for anyone who wants one; 0 means no limit.
     pull_max: int = 0
+    # How long a finished cloud job's results are left on the provider's volume for a pull to
+    # fetch: automatic pulls are retried for this long, and past it whatever nobody pulled is
+    # deleted there, since a provider bills for storage by the day. Whole days, at least one.
+    cloud_retention_days: int = 3
     allowed_hosts: list[str] = field(default_factory=list)
     clouds: dict[str, CloudTarget] = field(default_factory=dict)
 
@@ -178,6 +182,12 @@ def load_config(path: Path | None = None) -> Config:
             value = float(parse_duration(value)) if isinstance(value, str) else float(value)
         kwargs[key] = value
     cfg = Config(**kwargs)
+    days = cfg.cloud_retention_days
+    if type(days) is not int or days <= 0:
+        # Checked strictly: a 0 here would delete every finished job's results at the provider
+        # before its pull had even been tried.
+        raise ValueError(f"cloud_retention_days must be a whole number of days, at least 1, "
+                         f"got {days!r}")
     cfg.mascot_dir = cfg.mascot_dir or str(config_dir() / "mascot")
     cfg.data_dir = cfg.data_dir or str(default_data_dir())
     cfg.pull_dir = cfg.pull_dir or str(Path(cfg.data_dir) / "pulls")

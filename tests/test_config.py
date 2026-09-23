@@ -42,6 +42,14 @@ def test_pull_guards_default_to_a_20gib_margin_and_no_cap_and_parse_as_sizes(tmp
     assert cfg.pull_max == 100 * GiB
 
 
+def test_cloud_retention_defaults_to_three_days_and_must_be_a_positive_whole_number(tmp_path):
+    assert _write(tmp_path, "").cloud_retention_days == 3
+    assert _write(tmp_path, "cloud_retention_days = 7\n").cloud_retention_days == 7
+    for bad in ("0", "-1", "1.5", '"3d"', "true"):
+        with pytest.raises(ValueError, match="cloud_retention_days"):
+            _write(tmp_path, f"cloud_retention_days = {bad}\n")
+
+
 def test_parses_sizes_and_durations(tmp_path):
     p = tmp_path / "config.toml"
     p.write_text(

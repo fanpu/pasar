@@ -6,6 +6,7 @@ saying so, and never leaves a sandbox running that nothing owns.
 """
 
 import json
+import logging
 import subprocess
 from dataclasses import replace
 from pathlib import Path
@@ -15,7 +16,7 @@ import pytest
 from pasar.cloud.cost import estimate, hourly_rate
 from pasar.cloud.executor import parse_unit
 from pasar.config import CloudTarget, Config
-from pasar.daemon import CLOUD_RATE_TTL, PAUSE_LIMIT, PULL_RETRY_WINDOW, Conflict, Daemon
+from pasar.daemon import CLOUD_RATE_TTL, PAUSE_LIMIT, Conflict, Daemon
 from pasar.db import Store
 from pasar.executor.base import UnitState
 from pasar.models import EndKind, JobSpec, State
@@ -1556,10 +1557,13 @@ def test_housekeep_leaves_jobs_that_ended_before_the_retry_window(make_cloud, re
 
     after, _ = make_cloud(provider)
     roomy(after)
-    clock.advance(PULL_RETRY_WINDOW + 1)
+    clock.advance(after.cfg.cloud_retention_days * 86400 + 1)
     after.housekeep()
 
-    assert provider.deleted_persist == [] and pulls_of(after, job_id) == []
+    # Not pulled: what happens to the remote copy past the window is the sweep's business (see
+    # the tests of it below), and it never brings anything to local disk.
+    assert pulls_of(after, job_id) == []
+    assert not (after.data_dir / "pulls" / str(job_id)).exists()
 
 
 def test_a_pull_that_landed_but_could_not_delete_the_remote_copy_is_not_retried(
@@ -1821,6 +1825,270 @@ def test_a_job_that_really_left_nothing_costs_three_cheap_looks_and_no_alarm(clo
 
     assert calls == [job_id] * 3
     assert events_of(daemon, "pull_gave_up") == []
+
+
+# ---- sweeping what nobody pulled
+
+def retention(daemon):
+    return daemon.cfg.cloud_retention_days * 86400
+
+
+def left_unpulled(daemon, provider, repo, data=b"weights"):
+    """One finished cloud job whose results nobody pulled: its automatic pull found no room, so
+    the copy on the provider's volume is the only one. Returns its id."""
+    roomy(daemon, free=0)
+    job_id = start(daemon, repo)
+    provider.persist(job_id, "checkpoint.pt", data)
+    provider.finish(handle_of(daemon, job_id), 0)
+    daemon.tick()
+    assert daemon.job(job_id).state == State.COMPLETED
+    assert provider.persisted[job_id] and pulls_of(daemon, job_id)[-1]["files"] is None
+    return job_id
+
+
+def test_cloud_retention_defaults_to_three_days():
+    assert Config().cloud_retention_days == 3
+
+
+def test_a_finished_job_nobody_pulled_is_swept_once_past_retention(cloud, repo, clock):
+    daemon, provider = cloud
+    job_id = left_unpulled(daemon, provider, repo, b"w" * 4096)
+    # Whatever is on local disk under the pull dir is the user's, and never the sweep's to touch.
+    local = daemon.data_dir / "pulls" / str(job_id) / "notes.txt"
+    local.parent.mkdir(parents=True)
+    local.write_text("mine")
+    clock.advance(retention(daemon))
+    daemon.housekeep()
+
+    assert provider.deleted_persist == [job_id] and job_id not in provider.persisted
+    assert daemon.store.cloud_swept(job_id) == {"job_id": job_id, "ts": clock.t, "files": 1,
+                                                "bytes": 4096}
+    [event] = events_of(daemon, "swept")
+    assert f"job {job_id}" in event and "4096 bytes" in event
+    assert local.read_text() == "mine"
+    assert daemon.job(job_id).state == State.COMPLETED
+
+
+def test_a_job_inside_the_retention_window_is_left_alone(cloud, repo, clock):
+    daemon, provider = cloud
+    job_id = left_unpulled(daemon, provider, repo)
+    clock.advance(retention(daemon) - 1)
+    daemon.housekeep()
+    daemon.sweep(job_id)  # the sweep checks the age again itself: time passes in the queue
+
+    assert provider.persisted[job_id] == {"checkpoint.pt": b"weights"}
+    assert provider.deleted_persist == []
+    assert daemon.store.cloud_swept(job_id) is None and events_of(daemon, "swept") == []
+
+
+def test_retention_runs_from_when_the_job_finished_not_from_its_last_attempt(cloud, repo, clock):
+    # Paused for days and then cancelled: its results are as old as the cancel, not the pause.
+    daemon, provider = cloud
+    job_id = pause_with_a_checkpoint(daemon, provider, repo)
+    clock.advance(retention(daemon) + 86400)
+    roomy(daemon, free=0)
+    daemon.cancel(job_id)
+    clock.advance(3600)
+    daemon.housekeep()
+
+    assert provider.deleted_persist == [] and daemon.store.cloud_swept(job_id) is None
+    clock.advance(retention(daemon))
+    daemon.housekeep()
+    assert provider.deleted_persist == [job_id]
+
+
+@pytest.mark.parametrize("how", ["paused", "running"])
+def test_a_live_checkpoint_is_never_swept_however_old(cloud, repo, clock, how):
+    # A paused job is waiting for a person to approve its next attempt, which resumes from
+    # exactly this directory: sweeping it would make that attempt silently redo everything the
+    # first one was paid for. Not even a stray "finished" stamp may change that.
+    daemon, provider = cloud
+    roomy(daemon)
+    if how == "paused":
+        job_id = pause_with_a_checkpoint(daemon, provider, repo)
+        state = State.AWAITING
+    else:
+        job_id = start(daemon, repo)
+        provider.persist(job_id, "checkpoint.pt", b"weights")
+        state = State.RUNNING
+    daemon.store.mark_cloud_finished(job_id, 0.0)
+    for _ in range(3):
+        clock.advance(365 * 86400)
+        daemon.housekeep()
+    daemon.sweep(job_id)  # nor may the sweep itself, even if something did queue it
+
+    assert daemon.job(job_id).state == state
+    assert provider.persisted[job_id] == {"checkpoint.pt": b"weights"}
+    assert provider.deleted_persist == []
+    assert daemon.store.cloud_swept(job_id) is None and events_of(daemon, "swept") == []
+
+
+def test_a_job_whose_provider_is_gone_is_skipped_with_a_log_line(cloud, repo, clock, caplog):
+    daemon, provider = cloud
+    job_id = left_unpulled(daemon, provider, repo)
+    executor = daemon.executors.pop("fake")
+    clock.advance(retention(daemon))
+    with caplog.at_level(logging.WARNING, logger="pasar.daemon"):
+        daemon.housekeep()
+        daemon.sweep(job_id)
+
+    assert f"job {job_id}" in caplog.text and "fake" in caplog.text
+    assert provider.deleted_persist == [] and daemon.store.cloud_swept(job_id) is None
+
+    daemon.executors["fake"] = executor  # the provider comes back: the next housekeep sweeps it
+    clock.advance(3600)
+    daemon.housekeep()
+    assert provider.deleted_persist == [job_id]
+
+
+def test_a_job_already_pulled_is_marked_swept_without_deleting_again(cloud, repo, clock):
+    daemon, provider = cloud
+    roomy(daemon)
+    job_id = start(daemon, repo)
+    provider.persist(job_id, "checkpoint.pt", b"weights")
+    provider.finish(handle_of(daemon, job_id), 0)
+    daemon.tick()
+    assert provider.deleted_persist == [job_id]  # the pull's own delete, after verifying
+
+    clock.advance(retention(daemon))
+    daemon.housekeep()
+
+    assert provider.deleted_persist == [job_id]
+    assert daemon.store.cloud_swept(job_id)["bytes"] == 0
+    assert events_of(daemon, "swept") == []
+    assert (daemon.data_dir / "pulls" / str(job_id) / "checkpoint.pt").read_bytes() == b"weights"
+
+
+def test_a_swept_job_is_never_looked_at_again(cloud, repo, clock, monkeypatch):
+    daemon, provider = cloud
+    job_id = left_unpulled(daemon, provider, repo)
+    clock.advance(retention(daemon))
+    daemon.housekeep()
+    assert provider.deleted_persist == [job_id]
+
+    calls = []
+    real = provider.persist_usage
+    monkeypatch.setattr(provider, "persist_usage", lambda jid: calls.append(jid) or real(jid))
+    for _ in range(3):
+        clock.advance(86400)
+        daemon.housekeep()
+
+    assert calls == [] and provider.deleted_persist == [job_id]
+
+
+def test_a_provider_error_on_one_job_does_not_stop_the_others(cloud, repo, clock, monkeypatch,
+                                                              caplog):
+    daemon, provider = cloud
+    first = left_unpulled(daemon, provider, repo)
+    second = left_unpulled(daemon, provider, repo, b"seven!!")
+    real = provider.delete_persist
+
+    def flaky(job_id):
+        if job_id == first:
+            raise RuntimeError("pretend the volume API is down")
+        real(job_id)
+
+    monkeypatch.setattr(provider, "delete_persist", flaky)
+    clock.advance(retention(daemon))
+    with caplog.at_level(logging.WARNING, logger="pasar.daemon"):
+        daemon.housekeep()
+
+    assert provider.deleted_persist == [second]
+    assert daemon.store.cloud_swept(second)["bytes"] == 7
+    assert daemon.store.cloud_swept(first) is None and first in provider.persisted
+    assert "pretend the volume API is down" in caplog.text
+
+    monkeypatch.setattr(provider, "delete_persist", real)
+    clock.advance(3600)
+    daemon.housekeep()
+    assert provider.deleted_persist == [second, first]
+
+
+def test_the_sweep_runs_off_the_tick_through_the_one_worker(cloud, repo, clock):
+    daemon, provider = cloud
+    job_id = left_unpulled(daemon, provider, repo)
+    pending = []
+    daemon.background = pending.append
+    clock.advance(retention(daemon) + 1)
+    daemon.housekeep()
+
+    assert len(pending) == 1 and provider.deleted_persist == []  # decided, not yet done
+    daemon.housekeep()
+    assert len(pending) == 1  # and not queued twice
+
+    pending.pop()()
+    assert provider.deleted_persist == [job_id]
+    assert daemon._pull_queued == set()
+
+
+def test_a_job_whose_pull_is_still_queued_is_not_swept_under_it(cloud, repo, clock):
+    # On the last second of the window the retry queues one more pull; the sweep waits for it.
+    daemon, provider = cloud
+    job_id = left_unpulled(daemon, provider, repo)
+    pending = []
+    daemon.background = pending.append
+    roomy(daemon)
+    clock.advance(retention(daemon))
+    daemon.housekeep()
+
+    pending.pop()()
+    assert pending == []
+    assert daemon.store.last_pull(job_id, landed=True)["files"] == 1
+    assert daemon.store.cloud_swept(job_id) is None
+
+    clock.advance(1)
+    daemon.housekeep()
+    pending.pop()()
+    assert provider.deleted_persist == [job_id]  # the pull's, and nothing more
+    assert daemon.store.cloud_swept(job_id)["bytes"] == 0
+
+
+def test_a_sweep_waits_out_a_pull_already_in_flight(cloud, repo, clock, tmp_path):
+    daemon, provider = cloud
+    job_id = left_unpulled(daemon, provider, repo)
+    roomy(daemon)
+    clock.advance(retention(daemon) + 1)
+    # A person pulls it by hand at the very moment the sweep comes round to it.
+    provider.on_download = daemon.sweep
+    daemon.pull(job_id, tmp_path / "out")
+
+    assert (tmp_path / "out" / "checkpoint.pt").read_bytes() == b"weights"
+    assert provider.deleted_persist == [job_id]  # once, by the pull that verified it
+    assert daemon.store.cloud_swept(job_id) is None
+
+
+def test_a_manual_pull_is_refused_while_the_sweep_has_the_job(cloud, repo, clock, tmp_path,
+                                                             monkeypatch):
+    daemon, provider = cloud
+    job_id = left_unpulled(daemon, provider, repo)
+    clock.advance(retention(daemon) + 1)
+    refused = []
+    real = provider.persist_usage
+
+    def usage(jid):
+        with pytest.raises(Conflict) as e:
+            daemon.pull(jid, tmp_path / "out")
+        refused.append(str(e.value))
+        return real(jid)
+
+    monkeypatch.setattr(provider, "persist_usage", usage)
+    daemon.housekeep()
+
+    assert len(refused) == 1 and "swe" in refused[0]
+    assert provider.deleted_persist == [job_id]
+    assert not (tmp_path / "out").exists()
+
+
+def test_the_pull_retry_window_is_cloud_retention_days(make_cloud, repo, clock):
+    daemon, provider = make_cloud()
+    daemon.cfg.cloud_retention_days = 10
+    job_id = left_unpulled(daemon, provider, repo)
+    roomy(daemon)  # room again
+    clock.advance(5 * 86400)
+    daemon.housekeep()
+
+    assert provider.deleted_persist == [job_id]
+    assert daemon.store.last_pull(job_id, landed=True)["files"] == 1
 
 
 # ---- the per-job lifetime cap
