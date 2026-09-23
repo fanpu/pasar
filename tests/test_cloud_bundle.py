@@ -1,3 +1,4 @@
+import os
 import shutil
 import subprocess
 import tarfile
@@ -181,3 +182,90 @@ def test_missing_workspace_member_fails_at_submit(tmp_path):
     subprocess.run(["git", "-C", str(repo), "add", "-A"], check=True)
     with pytest.raises(BundleError, match="packages/gone"):
         build_bundle(str(repo), tmp_path / "b.tar", 1 << 20)
+
+
+def test_workspace_member_without_pyproject_fails_at_submit(tmp_path):
+    repo = git_repo(tmp_path / "repo")
+    (repo / "pyproject.toml").write_text(
+        '[project]\nname = "x"\nversion = "0"\n\n'
+        '[tool.uv.workspace]\nmembers = ["packages/*"]\n')
+    empty_member = repo / "packages" / "empty"
+    empty_member.mkdir(parents=True)
+    (empty_member / "keep.txt").write_text("nothing to see\n")
+    subprocess.run(["git", "-C", str(repo), "add", "-A"], check=True)
+    with pytest.raises(BundleError, match="packages/empty"):
+        build_bundle(str(repo), tmp_path / "b.tar", 1 << 20)
+
+
+def test_absolute_readme_path_is_rejected(tmp_path):
+    """EnvSpec.files is uploaded to a third-party cloud; an absolute path in the readme field
+    must not be able to smuggle an arbitrary local file into it."""
+    repo = git_repo(tmp_path / "repo")
+    (repo / "pyproject.toml").write_text(
+        '[project]\nname = "x"\nversion = "0"\nreadme = "/etc/hostname"\n')
+    subprocess.run(["git", "-C", str(repo), "add", "-A"], check=True)
+    with pytest.raises(BundleError, match="/etc/hostname"):
+        build_bundle(str(repo), tmp_path / "b.tar", 1 << 20)
+
+
+def test_symlinked_readme_escaping_the_repo_is_rejected(tmp_path):
+    repo = git_repo(tmp_path / "repo")
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "secret.txt").write_text("outside-secret\n")
+    (repo / "pyproject.toml").write_text(
+        '[project]\nname = "x"\nversion = "0"\nreadme = "docs/INTRO.md"\n')
+    (repo / "docs").mkdir()
+    (repo / "docs" / "INTRO.md").symlink_to(outside / "secret.txt")
+    subprocess.run(["git", "-C", str(repo), "add", "-A"], check=True)
+    with pytest.raises(BundleError, match="docs/INTRO.md"):
+        build_bundle(str(repo), tmp_path / "b.tar", 1 << 20)
+
+
+def test_symlinked_workspace_member_escaping_the_repo_is_rejected(tmp_path):
+    repo = git_repo(tmp_path / "repo")
+    outside = tmp_path / "outside_member"
+    outside.mkdir()
+    (outside / "pyproject.toml").write_text('[project]\nname = "evil"\nversion = "0"\n')
+    (repo / "pyproject.toml").write_text(
+        '[project]\nname = "x"\nversion = "0"\n\n'
+        '[tool.uv.workspace]\nmembers = ["packages/*"]\n')
+    (repo / "packages").mkdir()
+    (repo / "packages" / "evil").symlink_to(outside)
+    subprocess.run(["git", "-C", str(repo), "add", "-A"], check=True)
+    with pytest.raises(BundleError, match="packages/evil"):
+        build_bundle(str(repo), tmp_path / "b.tar", 1 << 20)
+
+
+def test_absolute_workspace_glob_is_rejected(tmp_path):
+    repo = git_repo(tmp_path / "repo")
+    (repo / "pyproject.toml").write_text(
+        '[project]\nname = "x"\nversion = "0"\n\n'
+        '[tool.uv.workspace]\nmembers = ["/etc/*"]\n')
+    subprocess.run(["git", "-C", str(repo), "add", "-A"], check=True)
+    with pytest.raises(BundleError, match="/etc/"):
+        build_bundle(str(repo), tmp_path / "b.tar", 1 << 20)
+
+
+def test_unreadable_referenced_file_fails_at_submit(tmp_path):
+    repo = git_repo(tmp_path / "repo")
+    (repo / "pyproject.toml").write_text(
+        '[project]\nname = "x"\nversion = "0"\nreadme = "README.md"\n')
+    readme = repo / "README.md"
+    readme.write_text("hi\n")
+    subprocess.run(["git", "-C", str(repo), "add", "-A"], check=True)
+    os.chmod(readme, 0o000)
+    try:
+        with pytest.raises(BundleError, match="README.md"):
+            build_bundle(str(repo), tmp_path / "b.tar", 1 << 20)
+    finally:
+        os.chmod(readme, 0o644)
+
+
+def test_env_key_uses_an_unambiguous_separator(tmp_path):
+    """Two distinct file sets that would collide under plain name+content concatenation (once
+    keys can contain "/") must still produce different keys."""
+    from pasar.cloud.bundle import _env_key
+    key_a = _env_key({"ab": b"c"})
+    key_b = _env_key({"a": b"bc"})
+    assert key_a != key_b

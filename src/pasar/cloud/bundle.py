@@ -58,10 +58,44 @@ def _list_files(cwd: str) -> list[str]:
     return names
 
 
+def _contained(root: Path, path: Path) -> Path | None:
+    """`path` with symlinks resolved, if that lands on root or inside it; otherwise None. Mirrors
+    the check build_bundle's own code-snapshot loop already applies to a tracked symlink — a
+    normalized path can climb out of the repository via "..", and a path can also lead outside
+    through a symlink even when it never spells "..", so both are checked the same way: resolve,
+    then compare."""
+    real = Path(os.path.realpath(path))
+    if real == root or real.is_relative_to(root):
+        return real
+    return None
+
+
+def _glob(root: Path, pattern: str) -> list[Path]:
+    """root.glob(pattern), turned into a BundleError for a pattern uv's own resolver would also
+    reject: an absolute pattern makes pathlib raise NotImplementedError."""
+    try:
+        return list(root.glob(pattern))
+    except NotImplementedError:
+        raise BundleError(f"this project's uv workspace uses {pattern!r}, an absolute glob "
+                          "pattern, which can't be resolved for a cloud job") from None
+
+
+def _read(root: Path, rel: str) -> bytes:
+    """Read a file this module has already decided belongs in the environment spec, turning a
+    permissions problem into a submit-time BundleError instead of an unhandled exception."""
+    try:
+        return (root / rel).read_bytes()
+    except OSError as e:
+        raise BundleError(f"can't read {rel}, needed to build the cloud environment: {e}") from None
+
+
 def _referenced(root: Path, rel: str, data: bytes) -> list[str]:
     """Paths a pyproject names that uv reads while it resolves: the readme (uv builds the root
     project's metadata even under --no-install-project) and a license file. Anything unparsable
-    contributes nothing — a broken pyproject is uv's error to report, with uv's message."""
+    contributes nothing — a broken pyproject is uv's error to report, with uv's message. A named
+    path that escapes the repository — an absolute path, or a relative one that resolves outside
+    it, symlink or not — is a BundleError: EnvSpec.files is uploaded to a third-party cloud, so a
+    file smuggled out this way would be exfiltrated to it, not just misfiled."""
     try:
         table = tomllib.loads(data.decode("utf-8"))
     except (ValueError, UnicodeDecodeError):
@@ -79,20 +113,28 @@ def _referenced(root: Path, rel: str, data: bytes) -> list[str]:
     base = PurePosixPath(rel).parent
     out = []
     for name in named:
-        # A license can be an SPDX expression ("MIT") rather than a path; only keep the ones
-        # that are really files, and never one that points outside the repository.
-        path = (base / name) if str(base) != "." else PurePosixPath(name)
-        if ".." in path.parts:
-            continue
-        if (root / path).is_file():
+        # A license can be an SPDX expression ("MIT") rather than a path; those simply aren't
+        # files, so is_file() below drops them without anything having to tell the two apart.
+        candidate = PurePosixPath(name)
+        if candidate.is_absolute():
+            raise BundleError(f"{rel} names {name!r}, an absolute path, but a cloud job can only "
+                              "reference files inside the repository")
+        path = (base / candidate) if str(base) != "." else candidate
+        real = _contained(root, root / path)
+        if real is None:
+            raise BundleError(f"{rel} names {name!r}, which resolves outside the repository, so "
+                              "it can't be sent to the cloud")
+        if real.is_file():
             out.append(str(path))
     return out
 
 
 def _members(root: Path, data: bytes) -> list[str]:
     """Every workspace member's pyproject, resolved from the globs uv itself resolves. A member
-    glob that matches a directory without a pyproject.toml is uv's own error case, so it is
-    raised here rather than left for a paid image build to discover."""
+    glob that matches nothing, a member directory with no pyproject.toml, or a member that
+    resolves outside the repository (nominally via "..", or through a symlink) is uv's own error
+    case — or worse, in the last case, a way to smuggle an outside file into the cloud image — so
+    it is raised here rather than left for a paid image build to discover."""
     try:
         table = tomllib.loads(data.decode("utf-8"))
     except (ValueError, UnicodeDecodeError):
@@ -100,18 +142,26 @@ def _members(root: Path, data: bytes) -> list[str]:
     workspace = (table.get("tool") or {}).get("uv", {}).get("workspace") or {}
     excluded = set()
     for pattern in workspace.get("exclude") or []:
-        excluded.update(str(p.relative_to(root)) for p in root.glob(pattern))
+        excluded.update(str(p.relative_to(root)) for p in _glob(root, pattern) if p.is_relative_to(root))
     found = []
     for pattern in workspace.get("members") or []:
-        matches = sorted(p for p in root.glob(pattern) if p.is_dir())
+        matches = sorted(p for p in _glob(root, pattern) if p.is_dir())
         if not matches:
             raise BundleError(f"this project's uv workspace lists {pattern!r}, which matches "
                               "nothing, so its lockfile cannot be used in the cloud")
         for path in matches:
+            if not path.is_relative_to(root):
+                raise BundleError(f"this project's uv workspace lists {pattern!r}, which matches "
+                                  f"{path}, outside the repository, so it can't be sent to the "
+                                  "cloud")
             rel = str(path.relative_to(root))
             if rel in excluded:
                 continue
-            if not (path / "pyproject.toml").is_file():
+            real = _contained(root, path)
+            if real is None:
+                raise BundleError(f"uv workspace member {rel} resolves outside the repository, "
+                                  "so it can't be sent to the cloud")
+            if not (real / "pyproject.toml").is_file():
                 raise BundleError(f"uv workspace member {rel} has no pyproject.toml, so this "
                                   "project's lockfile cannot be used in the cloud")
             found.append(f"{rel}/pyproject.toml")
@@ -127,18 +177,34 @@ def _env_files(root: Path) -> dict[str, bytes]:
     for name in LOCK_FILES:
         path = root / name
         if path.is_file():
-            files[name] = path.read_bytes()
+            files[name] = _read(root, name)
     if "uv.lock" not in files:
         raise BundleError(f"cloud jobs need a uv.lock next to pyproject.toml in {root}")
     pending = [name for name in files if name.endswith("pyproject.toml")]
     for rel in _members(root, files["pyproject.toml"]) if "pyproject.toml" in files else []:
-        files[rel] = (root / rel).read_bytes()
+        files[rel] = _read(root, rel)
         pending.append(rel)
     for rel in pending:
         for extra in _referenced(root, rel, files[rel]):
             if extra not in files:
-                files[extra] = (root / extra).read_bytes()
+                files[extra] = _read(root, extra)
     return files
+
+
+def _env_key(files: dict[str, bytes]) -> str:
+    """The image cache key: a digest of every environment file's name and content, in a form
+    that can't collide across a name/content boundary. Each field is length-prefixed, so
+    ("ab", b"c") and ("a", b"bc") — indistinguishable under plain concatenation once names can
+    contain "/" — hash differently."""
+    digest = hashlib.sha256()
+    for name in sorted(files):
+        encoded = name.encode()
+        content = files[name]
+        digest.update(len(encoded).to_bytes(8, "big"))
+        digest.update(encoded)
+        digest.update(len(content).to_bytes(8, "big"))
+        digest.update(content)
+    return digest.hexdigest()[:16]
 
 
 def build_bundle(cwd: str, dest: Path, max_bytes: int) -> Bundle:
@@ -173,11 +239,7 @@ def build_bundle(cwd: str, dest: Path, max_bytes: int) -> Bundle:
                 tar.add(root_path / name, arcname=name)
             except FileNotFoundError:
                 raise BundleError(f"{name} disappeared while the bundle was being built") from None
-    digest = hashlib.sha256()
-    for name in sorted(env_files):
-        digest.update(name.encode())
-        digest.update(env_files[name])
-    return Bundle(dest, root, rel_cwd, EnvSpec(env_files, digest.hexdigest()[:16]), total)
+    return Bundle(dest, root, rel_cwd, EnvSpec(env_files, _env_key(env_files)), total)
 
 
 def check_platform(project_dir: str, platform: str = "x86_64-manylinux_2_28") -> None:
