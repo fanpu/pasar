@@ -1210,8 +1210,18 @@ class Daemon:
                     now, "orphan_unit", f"job {job.id}'s attempt {att.unit} could not be picked "
                     "back up; " + ("ended it" if ended else "it could not be ended"))
         for name, ex in self.executors.items():
+            try:
+                units = ex.list_units()
+            except Exception:
+                # This runs once, before the loop starts, and a cloud executor's list reaches
+                # out to the provider: an outage there must not take pasard down with it, local
+                # jobs and all. The sweep is a tidy-up, so skipping this target costs a stray
+                # nobody noticed until the next restart; the attempts this pasard does own were
+                # picked back up above.
+                log.exception("%s could not be swept for stray units", name)
+                continue
             owned = live.get(name, set())
-            for unit in ex.list_units():
+            for unit in units:
                 if unit in owned:
                     continue
                 if isinstance(ex, CloudExecutor):

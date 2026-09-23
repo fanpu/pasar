@@ -17,6 +17,7 @@ from pasar.cloud.executor import parse_unit
 from pasar.config import CloudTarget, Config
 from pasar.daemon import CLOUD_RATE_TTL, PAUSE_LIMIT, Conflict, Daemon
 from pasar.db import Store
+from pasar.executor.base import UnitState
 from pasar.models import EndKind, JobSpec, State
 from pasar.units import GiB
 from tests.fakes_cloud import FakeProvider, launch_request
@@ -739,6 +740,26 @@ def test_reconcile_terminates_a_stray_cloud_handle(make_cloud, tmp_path):
     assert provider.terminated == [handle]
     events = [e for e in daemon.store.machine_events() if e["kind"] == "stray_unit"]
     assert len(events) == 1 and handle in events[0]["text"]
+
+
+def test_a_provider_outage_at_startup_does_not_take_pasard_down(make_cloud, repo, executor,
+                                                                 monkeypatch):
+    # reconcile() runs once, before the loop starts, and a cloud sweep reaches the provider.
+    # Letting that throw would stop pasard starting at all, local jobs included.
+    daemon, provider = make_cloud()
+    job_id = start(daemon, repo)
+    executor.units["pasar-job-99-1"] = UnitState("pasar-job-99-1", False, None, None, None, None)
+    restarted, _ = make_cloud(provider=provider)
+
+    def boom():
+        raise RuntimeError("the provider is not answering")
+
+    monkeypatch.setattr(provider, "list", boom)
+    restarted.reconcile()  # must not raise
+    strays = [e for e in restarted.store.machine_events() if e["kind"] == "stray_unit"]
+    assert len(strays) == 1 and "pasar-job-99-1" in strays[0]["text"]  # the local sweep still ran
+    restarted.tick()
+    assert restarted.job(job_id).state == State.RUNNING  # its own attempt was still picked up
 
 
 def test_an_attempt_that_cannot_be_adopted_is_ended_rather_than_left_billing(make_cloud, repo):
