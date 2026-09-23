@@ -856,3 +856,8 @@ def test_a_sandbox_whose_attempt_cannot_be_recorded_is_ended(cloud, repo, monkey
     daemon.tick()
     assert provider.terminated == ["sb-1"]
     assert daemon.job(job.id).state == State.FAILED
+    # And nothing is left on the budget: a spend row with no attempt beside it is closed the
+    # moment it is written, and would take the day's budget at the full ceiling for a job that
+    # never ran a second.
+    assert daemon.store.cloud_spend("fake") == []
+    assert daemon.ledger.spent_day("fake") == 0.0

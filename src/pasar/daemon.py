@@ -1188,8 +1188,11 @@ class Daemon:
         try:
             if unit is None:
                 raise LaunchError("the attempt started but the executor lost track of it")
-            self.ledger.record(target.name, job.id, n, price)
             self.store.insert_attempt(Attempt(job.id, n, unit, now))
+            # Only once the attempt exists to hang it on: a spend row with no open attempt beside
+            # it reads as settled the moment it is written, and would take this day's budget at
+            # the full ceiling for a job that never ran.
+            self.ledger.record(target.name, job.id, n, price)
         except Exception as e:
             # Something is running and nothing would own it: end it rather than leave a sandbox
             # billing for a job that has no record of it.
