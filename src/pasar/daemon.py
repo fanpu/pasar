@@ -901,6 +901,8 @@ class Daemon:
             exit_code=st.exit_code if st else None, signal=st.signal if st else None,
             reason=reason, summary=summary, log_tail=tail, wasted_work=wasted,
         )
+        if self._is_cloud(job):
+            self._settle_spend(job, att, now)
         if st is not None:
             # Never after a status() of None: for a cloud attempt that is already terminal, and
             # the executor has ended and forgotten the sandbox itself.
@@ -941,6 +943,24 @@ class Daemon:
             # The metrics recorder summarises this machine's GPU over the attempt's window,
             # which has nothing to do with a job that ran somewhere else.
             self.metrics.record(job_id, att.n, att.start_time, now)
+
+    def _settle_spend(self, job: Job, att, now: float) -> None:
+        """Write what a cloud attempt really cost, now that its run time is known.
+
+        Until here the ledger holds the ceiling from launch — the most the attempt could bill —
+        because before it runs that is the only figure there is. Leaving it there charges the
+        month for time nobody used: a job approved for fifteen minutes that finishes in ninety
+        seconds would spend a tenth of a small allowance on its own. The rate somebody approved,
+        times the seconds actually run, is not the provider's invoice, but it is within rounding
+        of it and it exists now, which the invoice does not — Modal's own figures arrive hours
+        later. A provider that can report real billing later writes over this same column.
+        """
+        rate = next((a["hourly_rate"] for a in self.store.approvals(job.id)
+                     if a["attempt"] == att.n), None)
+        if not rate or att.start_time is None:
+            # Nothing ever priced this attempt, so there is nothing truer than its estimate.
+            return
+        self.ledger.settle(job.spec.target, job.id, att.n, estimate(rate, now - att.start_time))
 
     def _measure(self, now: float) -> None:
         self.usage = {}

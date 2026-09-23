@@ -317,6 +317,16 @@ class Store:
             (target, job_id, attempt, day, estimated, billed),
         )
 
+    def settle_cloud_spend(self, target: str, job_id: int, attempt: int, billed: float) -> None:
+        """Record what an attempt really cost, leaving its estimate where it is so the two can
+        still be compared. Does nothing if the attempt has no row: an attempt that never got as
+        far as being priced never spent anything either."""
+        self._x(
+            "UPDATE cloud_spend SET billed = ?"
+            " WHERE target = ? AND job_id = ? AND attempt = ?",
+            (billed, target, job_id, attempt),
+        )
+
     # approvals
     def add_approval(self, job_id: int, attempt: int, ts: float, estimated_cost: float | None,
                      max_cost: float | None, hourly_rate: float | None = None) -> None:

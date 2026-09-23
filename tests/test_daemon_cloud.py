@@ -875,3 +875,70 @@ def test_a_sandbox_whose_attempt_cannot_be_recorded_is_ended(cloud, repo, monkey
     # never ran a second.
     assert daemon.store.cloud_spend("fake") == []
     assert daemon.ledger.spent_day("fake") == 0.0
+
+
+# ---- settling what an attempt really cost
+
+def test_a_short_attempt_is_billed_for_what_it_ran_not_its_ceiling(cloud, repo, clock):
+    # The ledger holds the ceiling from launch, because before an attempt runs that is the only
+    # figure there is. Left there it charges the month for time nobody used: a job approved for a
+    # long window that finishes quickly would eat a small allowance a handful of jobs at a time.
+    daemon, provider = cloud
+    job_id = start(daemon, repo)
+    ceiling = daemon.store.cloud_spend("fake")[0]["estimated"]
+    rate = daemon.store.approvals(job_id)[0]["hourly_rate"]
+    clock.advance(90)
+    provider.finish(handle_of(daemon, job_id), 0)
+    daemon.tick()
+
+    assert daemon.job(job_id).state == State.COMPLETED
+    row = daemon.store.cloud_spend("fake")[0]
+    assert row["billed"] == pytest.approx(estimate(rate, 90), abs=1e-6)
+    assert row["billed"] < ceiling / 5
+    assert row["estimated"] == pytest.approx(ceiling)  # the estimate stays, for comparison
+
+
+def test_settling_counts_the_attempt_once_and_frees_the_budget(cloud, repo, clock):
+    # committed() prices an attempt while it runs and settled_day() once it stops; settling is
+    # what moves it between them, so the two must never both count it.
+    daemon, provider = cloud
+    job_id = start(daemon, repo)
+    assert daemon.ledger.committed("fake") > 0
+    assert daemon.ledger.settled_day("fake") == 0
+    clock.advance(90)
+    provider.finish(handle_of(daemon, job_id), 0)
+    daemon.tick()
+
+    rate = daemon.store.approvals(job_id)[0]["hourly_rate"]
+    assert daemon.ledger.committed("fake") == 0
+    assert daemon.ledger.settled_day("fake") == pytest.approx(estimate(rate, 90), abs=1e-6)
+
+
+def test_a_paused_attempt_is_settled_too(cloud, repo, clock):
+    # A pause is not a refund: the attempt ran, and the next one is a fresh charge on top.
+    daemon, provider = cloud
+    job_id = start(daemon, repo)
+    clock.advance(120)
+    provider.emit(handle_of(daemon, job_id),
+                  ctl(daemon, job_id, {"t": "exit", "code": 143, "reason": "time_limit"}) + "\n")
+    provider.finish(handle_of(daemon, job_id), 143)
+    daemon.tick()
+
+    assert daemon.job(job_id).state == State.AWAITING
+    row = daemon.store.cloud_spend("fake")[0]
+    rate = daemon.store.approvals(job_id)[0]["hourly_rate"]
+    assert row["billed"] == pytest.approx(estimate(rate, 120), abs=1e-6)
+
+
+def test_a_settled_figure_is_never_replaced_by_a_later_estimate(cloud, repo, clock):
+    # record() is called again whenever launch-time bookkeeping re-runs; it must not push a real
+    # figure back up to a guess.
+    daemon, provider = cloud
+    job_id = start(daemon, repo)
+    clock.advance(90)
+    provider.finish(handle_of(daemon, job_id), 0)
+    daemon.tick()
+    billed = daemon.store.cloud_spend("fake")[0]["billed"]
+
+    daemon.ledger.record("fake", job_id, 1, estimated=99.0)
+    assert daemon.store.cloud_spend("fake")[0]["billed"] == pytest.approx(billed)

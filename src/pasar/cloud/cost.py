@@ -131,6 +131,18 @@ class Ledger:
         self.store.record_cloud_spend(target, job_id, attempt, self._day(self.clock()),
                                       estimated, billed)
 
+    def settle(self, target: str, job_id: int, attempt: int, billed: float) -> None:
+        """Replace an attempt's estimate with what it really cost, once it has stopped running.
+
+        The row was written at launch holding the most the attempt could possibly bill, because
+        before it runs that is the only figure there is. Left that way it never comes down: a job
+        that finishes in a tenth of the time it was approved for charges the month for the whole
+        window, and a small allowance reads as spent after a handful of short jobs. Settling also
+        closes the row, so `committed()` stops pricing the attempt and `settled_day()` starts —
+        each attempt counted exactly once, at the moment it stops costing anything.
+        """
+        self.store.settle_cloud_spend(target, job_id, attempt, billed)
+
     @staticmethod
     def _effective(row: dict) -> float:
         return row["billed"] if row["billed"] is not None else row["estimated"]
