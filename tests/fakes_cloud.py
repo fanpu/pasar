@@ -7,6 +7,13 @@ from pasar.cloud.base import Capabilities, CloudLaunch, CloudStatus, Phase
 from pasar.cloud.bundle import Bundle, EnvSpec
 
 
+def _check_job_id(job_id) -> None:
+    """Mirrors `ModalProvider`'s guard (see modal_provider.py) so a caller cannot rely on this
+    fake being any more permissive than the real provider about what a persist method accepts."""
+    if type(job_id) is not int or job_id <= 0:
+        raise ValueError(f"not a job id: {job_id!r}")
+
+
 def launch_request(tmp_path, job_id=1, attempt=1, **kw):
     bundle = Bundle(tmp_path / "b.tar", str(tmp_path), ".", EnvSpec({}, "envkey"), 0)
     return CloudLaunch(job_id=job_id, attempt=attempt, bundle=bundle, image_key="img",
@@ -93,10 +100,12 @@ class FakeProvider:
         return f"/data/{key}"
 
     def persist_usage(self, job_id: int) -> tuple[int, int]:
+        _check_job_id(job_id)
         files = self.persisted.get(job_id, {})
         return len(files), sum(len(data) for data in files.values())
 
     def download_persist(self, job_id: int, dest) -> tuple[int, int]:
+        _check_job_id(job_id)
         if self.on_download is not None:
             self.on_download(job_id)
         if job_id in self.fail_download:
@@ -116,6 +125,7 @@ class FakeProvider:
         return len(files), sum(len(data) for data in files.values())
 
     def delete_persist(self, job_id: int) -> None:
+        _check_job_id(job_id)
         self.deleted_persist.append(job_id)
         self.persisted.pop(job_id, None)
 

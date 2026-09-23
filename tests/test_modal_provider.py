@@ -12,7 +12,7 @@ from pasar.cloud.bundle import EnvSpec
 from pasar.cloud.modal_provider import HANDLE_TAG, ModalProvider
 from pasar.config import CloudTarget
 from tests.fakes_cloud import launch_request
-from tests.fakes_modal import FakeSDK
+from tests.fakes_modal import FakeSDK, FileEntryType
 
 
 def _target(**kw):
@@ -480,6 +480,72 @@ def test_delete_persist_removes_only_that_jobs_directory(provider, tmp_path):
 def test_delete_persist_of_an_absent_directory_does_not_raise(provider, tmp_path):
     p, _sdk = provider
     p.delete_persist(1)  # nothing was ever written; no exception
+
+
+def test_download_persist_raises_if_a_file_writes_short(provider, tmp_path):
+    """The caller compares this method's return against `persist_usage`'s before deleting the
+    only copy; that check is worthless if the return is just the remote listing's sizes copied
+    back, rather than a count of what was actually written to disk."""
+    p, _sdk = provider
+    volume = p._volume("pasar-modal", create=False)
+    volume.files["1/ckpt.txt"] = b"checkpoint bytes"
+    volume.short_reads.add("1/ckpt.txt")  # read_file yields one byte fewer than listdir reported
+    with pytest.raises(RuntimeError):
+        p.download_persist(1, tmp_path / "out")
+
+
+def test_persist_usage_raises_on_an_entry_it_does_not_understand(provider, tmp_path):
+    """A symlink (e.g. a `latest -> step_1000` checkpoint pointer) silently dropped from the
+    count would still be destroyed, unnoticed, by a later recursive delete."""
+    p, _sdk = provider
+    volume = p._volume("pasar-modal", create=False)
+    volume.files["1/ckpt.txt"] = b"checkpoint bytes"
+    volume.special["1/latest"] = FileEntryType.SYMLINK
+    with pytest.raises(RuntimeError):
+        p.persist_usage(1)
+
+
+def test_download_persist_raises_on_an_entry_it_does_not_understand(provider, tmp_path):
+    p, _sdk = provider
+    volume = p._volume("pasar-modal", create=False)
+    volume.files["1/ckpt.txt"] = b"checkpoint bytes"
+    volume.special["1/latest"] = FileEntryType.SYMLINK
+    with pytest.raises(RuntimeError):
+        p.download_persist(1, tmp_path / "out")
+
+
+def test_volume_cache_keys_on_the_create_flag(provider, tmp_path):
+    """A non-creating handle fetched for persist_usage must not be handed back to launch(),
+    which needs a creating one — see `_volume`."""
+    p, sdk = provider
+    p.persist_usage(1)  # caches a non-creating handle for "pasar-modal"
+    p.prepare_image(EnvSpec({}, "img"))
+    p.launch(launch_request(tmp_path))
+    box = sdk.wait_for_sandbox()
+    assert box.kwargs["volumes"][c.PERSIST].create_if_missing is True
+
+
+@pytest.mark.parametrize("bad", [0, -1, "1", True, 1.5])
+def test_persist_methods_reject_a_bad_job_id(provider, tmp_path, bad):
+    """Stringified into a recursive delete, an empty, negative or otherwise wrong job_id could
+    land on or above the volume root; `bool` is an `int` subclass, so it must be rejected too."""
+    p, _sdk = provider
+    with pytest.raises(ValueError):
+        p.persist_usage(bad)
+    with pytest.raises(ValueError):
+        p.download_persist(bad, tmp_path / "out")
+    with pytest.raises(ValueError):
+        p.delete_persist(bad)
+
+
+def test_download_persist_rejects_a_path_that_escapes_the_job_dir(provider, tmp_path):
+    """`PurePosixPath.relative_to` does not normalise `..`, so a server-supplied entry path
+    like `1/../../escape.txt` must be rejected rather than written outside `dest`."""
+    p, _sdk = provider
+    volume = p._volume("pasar-modal", create=False)
+    volume.files["1/../../escape.txt"] = b"nope"
+    with pytest.raises(ValueError):
+        p.download_persist(1, tmp_path / "out")
 
 
 # ---- shutting down

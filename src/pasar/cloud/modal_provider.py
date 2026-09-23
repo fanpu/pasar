@@ -100,7 +100,10 @@ class ModalProvider:
         self.sleep = sleep
         self._boxes: dict[str, _Box] = {}
         self._images: dict[str, object] = {}
-        self._volumes: dict[str, object] = {}
+        # Keyed on (name, create), not just name: a non-creating handle fetched for
+        # persist_usage/delete_persist must never be handed back to launch(), which needs a
+        # creating one and would otherwise fail against a volume that does not exist yet.
+        self._volumes: dict[tuple[str, bool], object] = {}
         self._app = None
         self._lock = threading.Lock()
         self._rates: dict[str, float] = {}
@@ -264,12 +267,13 @@ class ModalProvider:
         return self._app
 
     def _volume(self, name: str, create: bool):
+        key = (name, create)
         with self._lock:
-            if name in self._volumes:
-                return self._volumes[name]
+            if key in self._volumes:
+                return self._volumes[key]
         volume = self.sdk.Volume.from_name(name, create_if_missing=create)
         with self._lock:
-            return self._volumes.setdefault(name, volume)
+            return self._volumes.setdefault(key, volume)
 
     def _find(self, handle: str):
         """The sandbox carrying this handle in its tags, or None if Modal has forgotten it."""
@@ -548,30 +552,48 @@ class ModalProvider:
 
     # ---- the Provider protocol: a job's persist dir
     def persist_usage(self, job_id: int) -> tuple[int, int]:
-        files = [e for e in self._list_persist(job_id) if self._is_file(e)]
+        _check_job_id(job_id)
+        files = self._persist_files(job_id)
         return len(files), sum(e.size for e in files)
 
     def download_persist(self, job_id: int, dest: Path) -> tuple[int, int]:
         """See `Provider.download_persist`. Each file is streamed straight to disk, one chunk at
         a time, rather than built up in memory first: a checkpoint can be tens of GiB, and Modal
-        hands `read_file` back as an iterator precisely so this never has to hold a whole one."""
-        files = [e for e in self._list_persist(job_id) if self._is_file(e)]
+        hands `read_file` back as an iterator precisely so this never has to hold a whole one.
+
+        What lands on disk is counted as it is written, not copied from the remote listing:
+        `persist_usage`'s counts and this method's return are compared by the caller before it
+        deletes the only copy, and that comparison proves nothing if both numbers trace back to
+        the same listing rather than to what actually arrived. A file that writes fewer bytes
+        than the volume reported for it raises, rather than being reported as if it landed whole.
+        """
+        _check_job_id(job_id)
+        files = self._persist_files(job_id)
         if not files:
             return 0, 0
         volume = self._volume(f"pasar-{self.target.name}", create=False)
         dest = Path(dest)
         dest.mkdir(parents=True, exist_ok=True)
         root = str(job_id)
+        total_bytes = 0
         for entry in files:
-            rel = PurePosixPath(entry.path).relative_to(root)
+            rel = _relative_persist_path(entry.path, root)
             out = dest.joinpath(*rel.parts)
             out.parent.mkdir(parents=True, exist_ok=True)
+            written = 0
             with out.open("wb") as f:
                 for chunk in volume.read_file(entry.path):
-                    f.write(chunk)
-        return len(files), sum(e.size for e in files)
+                    written += f.write(chunk)
+            if written != entry.size:
+                raise RuntimeError(
+                    f"job {job_id}'s {entry.path!r} wrote {written} byte(s) but the volume "
+                    f"reported {entry.size}; refusing to hand back a count the caller would "
+                    "trust before deleting the only copy")
+            total_bytes += written
+        return len(files), total_bytes
 
     def delete_persist(self, job_id: int) -> None:
+        _check_job_id(job_id)
         volume = self._volume(f"pasar-{self.target.name}", create=False)
         try:
             volume.remove_file(str(job_id), recursive=True)
@@ -586,8 +608,22 @@ class ModalProvider:
         except self.sdk.exception.NotFoundError:
             return []
 
-    def _is_file(self, entry) -> bool:
-        return entry.type == self.sdk.types.FileEntryType.FILE
+    def _persist_files(self, job_id: int) -> list:
+        """The FILE entries under a job's persist dir, directories skipped. Raises on anything
+        that is neither — a symlink, fifo or socket, which real Modal's `FileEntryType` also
+        allows — rather than silently dropping it: dropped here, it would still be destroyed by
+        a later `delete_persist`, unnoticed, because the counts on both sides of the caller's
+        check would still agree with each other."""
+        files = []
+        for entry in self._list_persist(job_id):
+            if entry.type == self.sdk.types.FileEntryType.DIRECTORY:
+                continue
+            if entry.type != self.sdk.types.FileEntryType.FILE:
+                raise RuntimeError(
+                    f"job {job_id}'s persist dir has {entry.path!r}, an entry of a kind pasar "
+                    f"does not know how to handle ({entry.type!r})")
+            files.append(entry)
+        return files
 
     def billed_cost(self, handles: list[str], since: float) -> dict[str, float] | None:
         """Modal's billing report arrives hours late and is not wired up; the live estimate from
@@ -652,6 +688,25 @@ def _pasar_job_source() -> str:
         raise RuntimeError("pasar_job is not importable, so no cloud attempt could report its "
                            "own exit status; install it alongside pasar")
     return str(Path(spec.origin).parent)
+
+
+def _check_job_id(job_id: object) -> None:
+    """A job_id that is not a positive int must never reach a recursive delete: stringified,
+    an empty, negative or otherwise wrong value could land on or above the volume root, or on
+    someone else's job. `bool` is an `int` subclass, so it is rejected by type, not just range."""
+    if type(job_id) is not int or job_id <= 0:
+        raise ValueError(f"not a job id: {job_id!r}")
+
+
+def _relative_persist_path(path: str, root: str) -> PurePosixPath:
+    """`path`, made relative to `root`, refusing anything that would land outside a caller's
+    `dest` once joined onto it. `PurePosixPath.relative_to` only checks that `path` starts with
+    `root`'s components; it does not normalise `..`, so a listing entry like `1/../../x` would
+    otherwise pass straight through and write outside the destination directory."""
+    rel = PurePosixPath(path).relative_to(root)
+    if rel.is_absolute() or ".." in rel.parts:
+        raise ValueError(f"refusing to write {path!r}: outside its job's persist directory")
+    return rel
 
 
 def _object_id(sb) -> str:

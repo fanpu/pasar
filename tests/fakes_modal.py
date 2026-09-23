@@ -160,9 +160,15 @@ class FakeApp:
 
 
 class FileEntryType:
-    """Stands in for `modal.types.FileEntryType`; only the two kinds a persist dir ever holds."""
+    """Stands in for `modal.types.FileEntryType`. `FILE` and `DIRECTORY` are the two kinds a
+    persist dir is meant to hold; the rest mirror real Modal's other members (checked against
+    modal/types.py) so a test can exercise the provider refusing to handle one of them."""
     FILE = "file"
     DIRECTORY = "directory"
+    SYMLINK = "symlink"
+    FIFO = "fifo"
+    SOCKET = "socket"
+    UNSPECIFIED = "unspecified"
 
 
 class FakeFileEntry:
@@ -183,16 +189,24 @@ class FakeVolume:
         self.name = name
         self.create_if_missing = create_if_missing
         self.files: dict[str, bytes] = {}
+        # Entries with no backing bytes, for a test to exercise a listing that includes a kind
+        # pasar does not know how to handle (a symlink, fifo, ...) without pretending to store
+        # its contents. path -> one of the FileEntryType members above, other than FILE/DIRECTORY.
+        self.special: dict[str, str] = {}
+        # Paths whose read_file yields fewer bytes than listdir's reported size, so a test can
+        # make the provider's own write-vs-listing check fire without touching the real SDK.
+        self.short_reads: set[str] = set()
 
     def listdir(self, path, *, recursive=False):
         prefix = path.rstrip("/") + "/"
         under = sorted(p for p in self.files if p.startswith(prefix))
-        if not under:
+        specials = sorted(p for p in self.special if p.startswith(prefix))
+        if not under and not specials:
             # Mirrors the real SDK: listing a path nothing ever wrote to raises, it does not
             # hand back an empty list.
             raise NotFoundError(f"no such path in volume {self.name!r}: {path!r}")
         dirs = set()
-        for p in under:
+        for p in under + specials:
             parts = p[len(prefix):].split("/")[:-1]
             acc = path.rstrip("/")
             for part in parts:
@@ -200,12 +214,15 @@ class FakeVolume:
                 dirs.add(acc)
         entries = [FakeFileEntry(d, FileEntryType.DIRECTORY, 0) for d in sorted(dirs)]
         entries += [FakeFileEntry(p, FileEntryType.FILE, len(self.files[p])) for p in under]
+        entries += [FakeFileEntry(p, self.special[p], 0) for p in specials]
         return entries
 
     def read_file(self, path):
         if path not in self.files:
             raise FileNotFoundError(path)
         data = self.files[path]
+        if path in self.short_reads and data:
+            data = data[:-1]
         # Handed back in more than one piece, like the real SDK's block iterator, so a caller
         # that read the whole thing into memory before writing it would still pass a test that
         # only checked one small file.
@@ -218,11 +235,14 @@ class FakeVolume:
 
     def remove_file(self, path, recursive=False):
         prefix = path.rstrip("/") + "/"
-        doomed = [p for p in self.files if p == path or p.startswith(prefix)]
-        if not doomed:
+        doomed_files = [p for p in self.files if p == path or p.startswith(prefix)]
+        doomed_special = [p for p in self.special if p == path or p.startswith(prefix)]
+        if not doomed_files and not doomed_special:
             raise FileNotFoundError(path)
-        for p in doomed:
+        for p in doomed_files:
             del self.files[p]
+        for p in doomed_special:
+            del self.special[p]
 
 
 class FakeSDK:

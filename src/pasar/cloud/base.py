@@ -129,7 +129,7 @@ class Provider(Protocol):
         """Remove the job's persist dir at the provider. A no-op if it is already gone.
 
         Reachable only for a job whose checkpoint nothing will ever resume from again — never
-        for `awaiting`, see `pasar.states.TERMINAL`. A no-op rather than an error because the
+        for `awaiting`, see `pasar.models.TERMINAL`. A no-op rather than an error because the
         sweep that calls this can race a person's own manual pull or delete.
         """
 
