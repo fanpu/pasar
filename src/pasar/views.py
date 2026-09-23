@@ -97,12 +97,18 @@ def cloud_view(daemon, job: Job, pace=_UNKNOWN) -> dict | None:
     old ceiling that was breached is still in `job.summary`, alongside the new price. `max_cost`
     is the *effective* ceiling: when the submitter's own `--max-cost` is lower than the ceiling
     the target's rates would otherwise buy, `max_cost` is that lower figure and `user_capped` is
-    `True`.
+    `True`; when what is left of the job's lifetime cap is lower still, `max_cost` is that.
+
+    `job_cap` is the most this job may spend over its whole life (the target's `max_job_cost`,
+    raised only in pasard's config), and `job_spent` what its attempts have spent so far: settled
+    figures for attempts that ended, and the full reservation of one still running, since it may
+    yet bill all of it. `job_cap` is `None` for a job whose target is no longer configured.
 
     `approved_seconds`/`full_seconds` are how long one approval buys and how long it would buy
-    without `--max-cost`: a dollar cap is enforced as a shorter run (the daemon pauses the attempt
-    when the cap's dollars are spent), so a capped job gets less time, and these two say how much
-    less. They are priced live, like `max_cost`, so they say what the daemon would do now.
+    without its dollar caps (`--max-cost`, the job cap): a dollar cap is enforced as a shorter run
+    (the daemon pauses the attempt when the cap's dollars are spent), so a capped job gets less
+    time, and these two say how much less. They are priced live, like `max_cost`, so they say
+    what the daemon would do now.
 
     A price rise is *not* measured against `max_cost` — the approvals row keeps the hourly rate
     for that, so that a cap (which never moves) cannot hide a rate that did. See
@@ -136,6 +142,7 @@ def cloud_view(daemon, job: Job, pace=_UNKNOWN) -> dict | None:
                   and abs(max_cost - job.spec.max_cost) < 1e-6)
     window = daemon.cloud_window(job)
     approved_seconds, full_seconds = window if window else (None, None)
+    target = daemon.cfg.clouds.get(job.spec.target)
     unit = daemon.cloud_units.get(job.id)
     return {
         "target": job.spec.target,
@@ -146,6 +153,8 @@ def cloud_view(daemon, job: Job, pace=_UNKNOWN) -> dict | None:
         "user_capped": user_capped,
         "approved_seconds": approved_seconds,
         "full_seconds": full_seconds,
+        "job_cap": target.max_job_cost if target is not None else None,
+        "job_spent": daemon.ledger.job_spent(job.id),
         "console_url": unit.console_url if unit is not None else None,
         # Extra seconds this attempt's own pace (see `pasar.cloud.pace.needs_more_time`) projects
         # past what was approved; `None` while running on pace or before enough of it has been
@@ -238,9 +247,10 @@ def status_view(daemon, now: float, projection: dict) -> dict:
 
 
 def cloud_status_view(daemon, now: float, projection: dict) -> dict:
-    """Everything `GET /api/cloud` and `pasar cloud` show: each configured target's budget and
-    spend (`spent_today`/`spent_month` already include what's `committed` from jobs still
-    running, the same total the budget gate in `cloud.lane` checks against), its live rates,
+    """Everything `GET /api/cloud` and `pasar cloud` show: each configured target's budget, the
+    most one job may spend on it over its whole life (`max_job_cost`), and its spend
+    (`spent_today`/`spent_month` already include what's `committed` from jobs still running, the
+    same total the budget gate in `cloud.lane` checks against), its live rates,
     every job currently waiting on a person to approve it, and every *running* job whose own pace
     projects it past its approved run time (`needs_time`) — a different tray from `awaiting`,
     because these jobs are not paused and do not need to be: they keep running on the time they
@@ -259,6 +269,7 @@ def cloud_status_view(daemon, now: float, projection: dict) -> dict:
             "spent_month": daemon.ledger.settled_month(name) + committed,
             "committed": committed,
             "max_running": target.max_running,
+            "max_job_cost": target.max_job_cost,
             "running": running,
             "rates": daemon.cloud_rates(target),
         })

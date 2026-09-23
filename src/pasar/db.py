@@ -362,3 +362,9 @@ class Store:
         rows = self._q("SELECT * FROM cloud_spend WHERE target = ? AND day LIKE ?",
                        (target, month + "-%"))
         return [dict(r) for r in rows]
+
+    def cloud_spend_of_job(self, job_id: int) -> list[dict]:
+        """Every attempt's cost row for one job, whichever target and day it fell on: what a
+        job's lifetime cap is measured against."""
+        rows = self._q("SELECT * FROM cloud_spend WHERE job_id = ? ORDER BY attempt", (job_id,))
+        return [dict(r) for r in rows]

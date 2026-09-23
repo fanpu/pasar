@@ -20,6 +20,7 @@ from pasar.db import Store
 from pasar.executor.base import UnitState
 from pasar.models import EndKind, JobSpec, State
 from pasar.units import GiB
+from pasar.views import cloud_view
 from tests.fakes_cloud import FakeProvider, launch_request
 
 
@@ -1245,3 +1246,132 @@ def test_pull_of_two_different_jobs_racing_the_same_dest_deletes_at_most_one_rem
     staging_a = _staging_dir(tmp_path, job_a)
     assert (staging_a / "checkpoint.pt").read_bytes() == b"AAAAAAA"
     assert str(staging_a) in str(exc.value)
+
+
+# ---- the per-job lifetime cap
+
+H100_RATE = hourly_rate(FakeProvider().rates(), "h100", 1)  # $5.278/hour
+
+
+def spend(daemon, provider, clock, job_id, dollars, attempt=1):
+    """Run the job's live attempt for exactly `dollars` of H100 time, then let it pause."""
+    clock.advance(dollars / H100_RATE * 3600)
+    out_of_time(daemon, provider, job_id, attempt)
+    daemon.tick()
+    assert daemon.job(job_id).state == State.AWAITING
+
+
+def test_submit_is_refused_when_the_estimate_is_past_the_jobs_cap(make_cloud, repo):
+    # 3h of H100 at $5.28/hour is $15.83, past the $10 one job may spend. Pinned rates add an L4
+    # ($2.13/hour with the sandbox, $6.38 for 3h, which fits) and an A100 ($3.83/hour, $11.48,
+    # which does not); the refusal has to point at the one that fits.
+    daemon, _ = make_cloud(rates={"gpu_hour_cost_l4": 0.80, "gpu_hour_cost_a100": 2.50})
+    with pytest.raises(ValueError) as excinfo:
+        daemon.submit(cloud_spec(repo, est_runtime=3 * 3600))
+    msg = str(excinfo.value)
+    assert "$15.83" in msg and "$10.00" in msg
+    assert "L4 ($6.38)" in msg and "A100" not in msg
+    assert "max_job_cost" in msg and "config" in msg and "not by an agent" in msg
+    assert daemon.store.list_jobs() == []
+
+
+def test_the_padded_ceiling_is_not_what_submit_refuses(cloud, repo):
+    # 1h30m estimates $7.92, under the cap; the 1.5x window around it would cost $11.88, over it.
+    # That is not a reason to refuse: the cap turns into a shorter window, like --max-cost does.
+    daemon, _ = cloud
+    job = daemon.submit(cloud_spec(repo, est_runtime=5400))
+    assert job.state == State.AWAITING
+    est, top = daemon.cloud_estimate(job)
+    assert est == pytest.approx(7.917, abs=1e-3) and top == pytest.approx(10.0)
+    approved, full = daemon.cloud_window(job)
+    assert full == 8100 and approved == int(10.0 / H100_RATE * 3600)
+
+
+def test_a_second_attempt_may_only_spend_what_the_first_left_under_the_cap(cloud, repo, clock):
+    daemon, provider = cloud
+    job_id = start(daemon, repo)
+    spend(daemon, provider, clock, job_id, 7.0)
+    assert daemon.ledger.job_spent(job_id) == pytest.approx(7.0)
+
+    job = daemon.approve(job_id)
+    assert daemon.store.approvals(job_id)[1]["max_cost"] == pytest.approx(3.0)
+    approved, full = daemon.cloud_window(job)
+    assert full == 5400 and approved == int(3.0 / H100_RATE * 3600)  # 2046s, not 5400s
+    daemon.tick()
+    assert daemon.job(job_id).state == State.RUNNING
+    row = next(r for r in daemon.store.cloud_spend("fake") if r["attempt"] == 2)
+    assert row["estimated"] == pytest.approx(3.0)  # the ledger holds the capped figure too
+
+    started = daemon.store.current_attempt(job_id).start_time
+    clock.t = started + 3.0 / H100_RATE * 3600 - 1
+    daemon.tick()
+    assert daemon.job(job_id).state == State.RUNNING
+    clock.advance(2)
+    daemon.tick()
+    assert daemon.job(job_id).state == State.STOPPING
+    events = [e for e in daemon.store.machine_events() if e["kind"] == "job_cap"]
+    assert len(events) == 1 and "$10.00" in events[0]["text"]
+    assert not [e for e in daemon.store.machine_events() if e["kind"] == "max_cost"]
+
+
+def test_a_job_that_has_spent_its_cap_stays_awaiting_until_the_cap_is_raised(cloud, repo, clock):
+    daemon, provider = cloud
+    job_id = start(daemon, repo)
+    spend(daemon, provider, clock, job_id, 7.0)
+    daemon.approve(job_id)
+    daemon.tick()
+    clock.advance(3.0 / H100_RATE * 3600 + 1)
+    daemon.tick()  # paused at the cap
+    provider.emit(handle_of(daemon, job_id),
+                  ctl(daemon, job_id, {"t": "exit", "code": 143, "signal": None,
+                                       "reason": "stopped"}, attempt=2))
+    daemon.tick()
+
+    job = daemon.job(job_id)
+    assert job.state == State.AWAITING and job.reason == "job_cap"
+    assert "$10.00" in job.summary and "max_job_cost" in job.summary
+    with pytest.raises(Conflict, match="max_job_cost"):
+        daemon.approve(job_id)
+    job = daemon.job(job_id)
+    assert job.state == State.AWAITING  # not failed: a raised cap lets it carry on
+    assert len(daemon.store.approvals(job_id)) == 2  # and the refusal wrote nothing
+
+    daemon.cfg.clouds["fake"].max_job_cost = 20.0
+    assert daemon.approve(job_id).state == State.QUEUED
+    assert daemon.store.approvals(job_id)[2]["max_cost"] == pytest.approx(
+        estimate(H100_RATE, 5400))  # $10 left now, so the window's own $7.92 binds again
+
+
+def test_a_queued_job_whose_cap_was_lowered_is_sent_back_rather_than_launched(cloud, repo, clock):
+    daemon, provider = cloud
+    job_id = start(daemon, repo)
+    spend(daemon, provider, clock, job_id, 7.0)
+    daemon.approve(job_id)
+    daemon.cfg.clouds["fake"].max_job_cost = 5.0  # below the $7 it has already spent
+    daemon.tick()
+    job = daemon.job(job_id)
+    assert job.state == State.AWAITING and job.reason == "job_cap"
+    assert len(provider.boxes) == 1  # only the first attempt ever launched
+
+
+def test_max_cost_below_what_is_left_under_the_cap_still_wins(cloud, repo, clock):
+    daemon, provider = cloud
+    job_id = start(daemon, repo, max_cost=6.0)
+    spend(daemon, provider, clock, job_id, 3.0)
+    job = daemon.approve(job_id)  # $7 left under the cap, but --max-cost says $6
+    assert daemon.store.approvals(job_id)[1]["max_cost"] == pytest.approx(6.0)
+    assert daemon.cloud_window(job)[0] == int(6.0 / H100_RATE * 3600)
+
+
+def test_the_job_view_carries_the_cap_and_what_the_job_has_spent(cloud, repo, clock):
+    daemon, provider = cloud
+    job = daemon.submit(cloud_spec(repo))
+    view = cloud_view(daemon, job)
+    assert view["job_cap"] == 10.0 and view["job_spent"] == 0.0
+    daemon.approve(job.id)
+    daemon.tick()
+    # a live attempt counts at what it holds, since that is what it may still bill
+    assert cloud_view(daemon, daemon.job(job.id))["job_spent"] == pytest.approx(
+        estimate(H100_RATE, 5400))
+    spend(daemon, provider, clock, job.id, 2.0)
+    assert cloud_view(daemon, daemon.job(job.id))["job_spent"] == pytest.approx(2.0)

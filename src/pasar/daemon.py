@@ -41,6 +41,7 @@ LOCAL = "local"
 _BASE_ENV_KEYS = ("PATH", "HOME", "USER", "LANG", "SHELL")
 PAUSE_LIMIT = 5  # times a cloud job may run out of its approved time before it must be resubmitted
 PRICE_TOLERANCE = 1e-6  # dollars of float noise, which is not a price rise
+JOB_CAP_FLOOR = 0.01  # dollars: less than a cent left under a job's lifetime cap is nothing left
 CLOUD_RATE_TTL = 10  # seconds a target's price list is reused before the provider is asked again
 EXTENSION_MARGIN = 1.1  # buffer added to a projected overrun so one extension does not get
                         # immediately re-flagged by ordinary noise in the next progress report
@@ -225,16 +226,97 @@ class Daemon:
     def _cost(self, target: CloudTarget, gpu: str, seconds: float) -> float:
         return estimate(self._hourly(target, gpu), seconds)
 
+    def _pricing_attempt(self, job: Job) -> int:
+        """The attempt a price for `job` is about: the one running now, if there is one, and
+        otherwise the next one an approval would buy."""
+        att = self.store.current_attempt(job.id)
+        if att is None:
+            return 1
+        return att.n if att.end_time is None else att.n + 1
+
+    def _job_left(self, job: Job, target: CloudTarget, attempt: int | None = None) -> float:
+        """Dollars `job` may still spend under its target's `max_job_cost`, from the point of view
+        of `attempt` (by default the running or next one): the cap less what every *other*
+        attempt has spent or still holds (`Ledger.job_spent`), never below zero. An attempt's own
+        reservation is left out because it is the thing being sized, not a prior claim on it."""
+        n = self._pricing_attempt(job) if attempt is None else attempt
+        return max(0.0, target.max_job_cost - self.ledger.job_spent(job.id, excluding=n))
+
+    def _attempt_cap(self, job: Job, target: CloudTarget, attempt: int | None = None) -> float:
+        """The dollars one attempt may spend: what is left of the job's lifetime cap, or the
+        submitter's `--max-cost` when that is lower. `--max-cost` alone bounds one attempt, so a
+        job paused five times could spend it five times over; the lifetime cap is what closes
+        that, and it goes through the same money-to-time machinery `--max-cost` always did
+        (`_ceiling`, `_approved_seconds`, `_attempt_seconds`, `_extend`) rather than a second
+        path beside it, so that it pauses a job exactly the way running out of `--max-cost`
+        does."""
+        left = self._job_left(job, target, attempt)
+        return left if job.spec.max_cost is None else min(job.spec.max_cost, left)
+
+    def _cap_binds(self, job: Job, target: CloudTarget, attempt: int | None = None) -> str:
+        """Which dollar cap is the lower one for this attempt: `max_cost` or `job_cap`."""
+        left = self._job_left(job, target, attempt)
+        if job.spec.max_cost is not None and job.spec.max_cost <= left:
+            return "max_cost"
+        return "job_cap"
+
+    def _at_job_cap(self, job: Job) -> bool:
+        """True if `job`'s next attempt would have nothing left under its lifetime cap."""
+        target = self.cfg.clouds.get(job.spec.target)
+        return target is not None and self._job_left(job, target) < JOB_CAP_FLOOR
+
+    def _cap_reached(self, job: Job, target: CloudTarget) -> str:
+        """Why a job with nothing left under its lifetime cap cannot run again, and who can
+        change that. It waits rather than fails: raising the cap and approving it again lets it
+        carry on from its checkpoint."""
+        return (f"has spent ${self.ledger.job_spent(job.id):.2f} of the "
+                f"${target.max_job_cost:.2f} one job may spend on {target.name} (max_job_cost), "
+                "so it waits here until that limit is raised, which is done by the user in "
+                "pasard's config, not by an agent. Approve it again once it has been raised")
+
+    def _over_job_cap(self, spec: JobSpec, target: CloudTarget, rate: float, est: float) -> str:
+        """The refusal for a submit whose estimate alone is past the job cap: the figures, the
+        GPUs on the same target whose estimate for the same run would fit (from the live rates,
+        priciest first, since that is usually the nearest to what was asked for), and who may
+        raise the limit. A shorter `--time` is deliberately not offered: the estimate is meant to
+        be honest, and the cap covers every later attempt anyway."""
+        cap = target.max_job_cost
+        kind, count = parse_gpu(spec.gpu)
+        rates = self.cloud_rates(target)
+        fits = []
+        for key in rates:
+            other = key.removeprefix("gpu_hour_cost_")
+            if other == key or other == kind.lower():
+                continue
+            try:
+                cost = estimate(hourly_rate(rates, other, count), spec.est_runtime)
+            except KeyError:
+                continue
+            if cost <= cap + PRICE_TOLERANCE:
+                fits.append((cost, other.upper() + (f":{count}" if count > 1 else "")))
+        fits.sort(reverse=True)
+        msg = (f"estimated cost ${est:.2f} ({fmt_duration(spec.est_runtime)} of {spec.gpu} at "
+               f"${rate:.2f}/hour) is above the ${cap:.2f} one job may spend on {target.name} "
+               "over its whole life (max_job_cost). ")
+        if fits:
+            msg += (f"GPUs on {target.name} whose estimate fits: "
+                    + ", ".join(f"{gpu} (${cost:.2f})" for cost, gpu in fits) + ". ")
+        else:
+            msg += f"No GPU on {target.name} fits that run under it. "
+        return msg + ("The limit is raised by the user, in pasard's config, not by an agent; "
+                      "ask them rather than working around it")
+
     def cloud_window(self, job: Job) -> tuple[int, int] | None:
         """(approved, full) seconds of run time for `job`'s next cloud attempt: what one approval
-        actually buys once `--max-cost` is taken into account, and what it would buy without it.
+        actually buys once its dollar caps (`--max-cost` and what is left of the job's lifetime
+        cap) are taken into account, and what it would buy without them.
         `None` for a job whose target isn't configured. Public because a dollar cap is enforced as
         a shorter run (`_approved_seconds`), and somebody who capped dollars deserves to see the
         time it costs them rather than discover it when the job pauses."""
         target = self.cfg.clouds.get(job.spec.target)
         if target is None:
             return None
-        return self._approved_seconds(job.spec, target), self._window(job.spec, target)
+        return self._approved_seconds(job, target), self._window(job.spec, target)
 
     def cloud_estimate(self, job: Job) -> tuple[float, float] | None:
         """(estimated, max) dollars for `job`'s next cloud attempt at today's rates, or `None`
@@ -247,37 +329,39 @@ class Daemon:
             return None
         try:
             est = self._cost(target, job.spec.gpu, job.spec.est_runtime)
-            top = self._ceiling(target, job.spec)
+            top = self._ceiling(target, job)
         except (KeyError, ValueError):
             return None
         return est, top
 
-    def _ceiling(self, target: CloudTarget, spec: JobSpec) -> float:
+    def _ceiling(self, target: CloudTarget, job: Job) -> float:
         """The most one attempt can bill: the price of the run time the target would allow it
-        (`_window`), or the submitter's own `--max-cost`, whichever is lower. This is a real
-        ceiling and not just a number to show, because `_approved_seconds` stops the attempt at
-        the moment the cap's dollars run out — the ceiling and the deadline are the same fact,
-        priced two ways."""
-        top = self._cost(target, spec.gpu, self._window(spec, target))
-        return top if spec.max_cost is None else min(top, spec.max_cost)
+        (`_window`), or its dollar cap (`_attempt_cap`: the submitter's own `--max-cost`, or what
+        is left of the job's lifetime cap), whichever is lower. This is a real ceiling and not
+        just a number to show, because `_approved_seconds` stops the attempt at the moment the
+        cap's dollars run out — the ceiling and the deadline are the same fact, priced two
+        ways."""
+        top = self._cost(target, job.spec.gpu, self._window(job.spec, target))
+        return min(top, self._attempt_cap(job, target))
 
     @staticmethod
     def _window(spec: JobSpec, target: CloudTarget) -> int:
         """The run time the target itself allows one attempt: the estimate with room to be wrong,
-        but never more than the target allows. `--max-cost` narrows it further, in
+        but never more than the target allows. The dollar caps narrow it further, in
         `_approved_seconds`; this is the unnarrowed figure, and the one a price rise is priced
         against, so that a cap never hides a rise."""
         return max(1, min(int(spec.est_runtime * target.timeout_factor), target.max_runtime))
 
-    def _approved_seconds(self, spec: JobSpec, target: CloudTarget) -> int:
+    def _approved_seconds(self, job: Job, target: CloudTarget) -> int:
         """The run time one approval would buy at today's price: the target's window, cut short at
-        the point where the job would have spent its `--max-cost`. What views quote for a job that
+        the point where the attempt would have spent its dollar cap (`_attempt_cap`: its
+        `--max-cost`, or what is left of the job's lifetime cap). What views quote for a job that
         has not started yet (`cloud_window`); once an attempt is running, `_attempt_seconds` is
         the figure `_pause_overdue` enforces, because by then there is an approvals row saying what
         was actually agreed to.
 
         A dollar cap has to become a time bound to mean anything. Stopping the attempt is the only
-        power the daemon has over a running sandbox, so `max_cost / hourly rate` is the cap: past
+        power the daemon has over a running sandbox, so `cap / hourly rate` is the cap: past
         that instant the job is spending money nobody approved. A job stopped here pauses and comes
         back for approval like any other pause, which is the right answer to "you hit your cap".
 
@@ -286,16 +370,14 @@ class Daemon:
         buys, which is what "never spend more than $X" means. A job that cannot be priced right now
         keeps the full window rather than being stopped on a missing rate — nothing launches
         without a price (`_launch_cloud`), and a wrong stop costs the job its progress."""
-        window = self._window(spec, target)
-        if spec.max_cost is None:
-            return window
+        window = self._window(job.spec, target)
+        cap = self._attempt_cap(job, target)
         try:
-            rate = self._hourly(target, spec.gpu)
+            rate = self._hourly(target, job.spec.gpu)
         except (KeyError, ValueError):
-            log.warning("job on %s cannot be priced; holding it to the full approved window",
-                        target.name)
+            log.warning("job %s cannot be priced; holding it to the full approved window", job.id)
             return window
-        return max(1, min(window, int(spec.max_cost / rate * 3600)))
+        return max(1, min(window, int(cap / rate * 3600)))
 
     def _attempt_seconds(self, job: Job, att: Attempt, target: CloudTarget) -> float:
         """The run time this *running* attempt may still have, and so the deadline `_pause_overdue`
@@ -307,29 +389,29 @@ class Daemon:
         the market moves under them, and `extend` raises it by writing a new figure into that same
         row (`_extend`), which is exactly what this reads back.
 
-        The **cap** is live. `--max-cost` is a promise about dollars, not about time: if the rate
-        rises mid-run, the same cap buys fewer seconds, and enforcing the seconds it bought at
-        yesterday's price would let the job bill straight past the figure its submitter set. So the
-        cap is re-derived from today's rate on every tick and the attempt is held to whichever of
-        the two is shorter. A rate that *falls* cannot buy back time beyond the frozen window,
-        which is the asymmetry the two promises imply.
+        The **cap** is live. The attempt's dollar cap (`_attempt_cap`: `--max-cost`, or what the
+        job's other attempts have left of its lifetime cap) is a promise about dollars, not about
+        time: if the rate rises mid-run, the same cap buys fewer seconds, and enforcing the seconds
+        it bought at yesterday's price would let the job bill straight past the figure its
+        submitter set. So the cap is re-derived from today's rate on every tick and the attempt is
+        held to whichever of the two is shorter. A rate that *falls* cannot buy back time beyond
+        the frozen window, which is the asymmetry the two promises imply.
 
         Falls back to the full window for a job that cannot be priced right now (and to
-        `_approved_seconds(job.spec, target)` for a row missing a price, which `approve` no longer
+        `_approved_seconds(job, target)` for a row missing a price, which `approve` no longer
         writes but older rows may still hold): a wrong stop costs the job its progress."""
         row = next((r for r in self.store.approvals(job.id) if r["attempt"] == att.n), None)
         if row is None or row["max_cost"] is None or not row["hourly_rate"]:
-            return self._approved_seconds(job.spec, target)
+            return self._approved_seconds(job, target)
         window = row["max_cost"] / row["hourly_rate"] * 3600
-        if job.spec.max_cost is None:
-            return window
+        cap = self._attempt_cap(job, target, att.n)
         try:
             rate = self._hourly(target, job.spec.gpu)
         except (KeyError, ValueError):
             log.warning("job %s cannot be priced; holding it to the run time its approval bought",
                         job.id)
             return window
-        return max(1.0, min(window, job.spec.max_cost / rate * 3600))
+        return max(1.0, min(window, cap / rate * 3600))
 
     def needs_more_time(self, job: Job) -> float | None:
         """Extra seconds `job`'s own pace (see `pasar.cloud.pace.needs_more_time`) projects past
@@ -370,14 +452,17 @@ class Daemon:
           for it is a job reporting nonsense, not a job that needs a bigger ceiling. Writing that
           figure into the approvals row would also hand `Ledger.committed()` an imaginary
           commitment and shut every other job on the target out of its budget.
-        - the submitter's own `--max-cost` (below).
+        - the submitter's own `--max-cost`, and what is left of the job's lifetime cap
+          (below).
 
         Refused past the submitter's own `--max-cost`: that figure is the hard financial limit
         they set at submit time, and an extension is a person granting more *time* on the strength
         of the job's own pace, not silently spending past a dollar figure nobody has revisited. A
         job whose cap is already what is binding its ceiling has nothing left to extend into — the
         message says so plainly and points at resubmitting with a higher cap instead of leaving
-        the person to discover it when the extension appears to do nothing.
+        the person to discover it when the extension appears to do nothing. The job's lifetime
+        cap (`max_job_cost`) is refused the same way, with a message that says only the user may
+        raise it.
 
         Refused past the target's own daily and monthly budgets (`_afford_extension`), which a
         first approval also has to clear on its way through the lane: a bigger commitment made
@@ -427,12 +512,19 @@ class Daemon:
                 "--time estimate (and a checkpoint to resume from) rather than extending this "
                 "attempt")
         new_cost = estimate(rate, new_seconds)
-        if job.spec.max_cost is not None and new_cost > job.spec.max_cost + PRICE_TOLERANCE:
+        if new_cost > self._attempt_cap(job, target, att.n) + PRICE_TOLERANCE:
+            if self._cap_binds(job, target, att.n) == "max_cost":
+                raise Conflict(
+                    f"job {job_id} would need ${new_cost:.2f} to cover its current pace, above "
+                    f"the ${job.spec.max_cost:.2f} --max-cost it was submitted with; that cap is "
+                    "what is binding, so it cannot be extended past it — submit it again with a "
+                    "higher --max-cost if it should be allowed to run longer")
             raise Conflict(
-                f"job {job_id} would need ${new_cost:.2f} to cover its current pace, above the "
-                f"${job.spec.max_cost:.2f} --max-cost it was submitted with; that cap is what is "
-                "binding, so it cannot be extended past it — submit it again with a higher "
-                "--max-cost if it should be allowed to run longer")
+                f"job {job_id} would need ${new_cost:.2f} to cover its current pace, but only "
+                f"${self._job_left(job, target, att.n):.2f} of the ${target.max_job_cost:.2f} "
+                f"one job may spend on {target.name} (max_job_cost) is left for this attempt, so "
+                "it cannot be extended that far; it will pause at its approved time. That limit "
+                "is raised by the user, in pasard's config, not by an agent")
         self._afford_extension(target, job_id, att.n, new_cost)
         self.store.add_approval(job_id, att.n, now, new_cost, new_cost, rate)
         self.ledger.record(target.name, job_id, att.n, new_cost)
@@ -549,9 +641,14 @@ class Daemon:
                              "config), not through pasar submit; leave it out for now")
         self._validate_spec(spec)
         try:
-            est = self._cost(target, spec.gpu, spec.est_runtime)
+            rate = self._hourly(target, spec.gpu)
         except KeyError as e:
             raise ValueError(f"{spec.target} has no price for --gpu {spec.gpu}: {e}") from None
+        est = estimate(rate, spec.est_runtime)
+        # The estimate, not the padded ceiling: a job expected to fit under the lifetime cap is
+        # let in and held to it by a shorter window, the way `--max-cost` holds one attempt.
+        if est > target.max_job_cost + PRICE_TOLERANCE:
+            raise ValueError(self._over_job_cap(spec, target, rate, est))
         if spec.max_cost is not None and est > spec.max_cost + PRICE_TOLERANCE:
             raise ValueError(
                 f"estimated cost ${est:.2f} already exceeds --max-cost ${spec.max_cost:.2f}; "
@@ -606,11 +703,15 @@ class Daemon:
             # expires it: the job would wait there for good.
             raise Conflict(f"cloud target {job.spec.target!r} has no provider on this pasard, "
                            "so approving this job would leave it queued for good")
+        if self._at_job_cap(job):
+            # Refused rather than approved for a sliver of run time: the job stays awaiting, which
+            # is what lets a raised cap carry it on from its checkpoint.
+            raise Conflict(f"job {job_id} {self._cap_reached(job, target)}")
         now = self.clock()
         try:
             rate = self._hourly(target, job.spec.gpu)
             est = estimate(rate, job.spec.est_runtime)
-            top = self._ceiling(target, job.spec)
+            top = self._ceiling(target, job)
         except (KeyError, ValueError) as e:
             # An approval is a person agreeing to a price, so an approval with no price in it is
             # not one: the row's NULL hourly_rate also switches off `_over_the_approval`'s
@@ -906,11 +1007,11 @@ class Daemon:
         enforces a limit of its own, but that one is the sandbox's backstop: pausing from here
         keeps the decision (and the deadline it is measured against) with the daemon.
 
-        This is the only thing that stops a running attempt, so it is also where `--max-cost` is
-        enforced: `_attempt_seconds` holds the attempt to the shorter of the window its own
+        This is the only thing that stops a running attempt, so it is also where the dollar caps
+        are enforced: `_attempt_seconds` holds the attempt to the shorter of the window its own
         approvals row bought (including any extension `_extend` has granted since) and what its
-        `--max-cost` buys at today's rate. A job stopped for either reason pauses and returns for
-        approval.
+        dollar cap (`--max-cost`, or what is left of the job's lifetime cap) buys at today's rate.
+        A job stopped for any of these reasons pauses and returns for approval.
 
         Driven from the store, not from this tick's statuses: a status read that threw is not a
         reason to let an attempt bill past the time somebody approved."""
@@ -931,12 +1032,21 @@ class Daemon:
                 # rather than record a stop that never happened.
                 log.exception("job %s could not be paused at its approved run time", job.id)
                 continue
-            if job.spec.max_cost is not None and approved < self._window(job.spec, target):
+            if approved < self._window(job.spec, target) - 1:
                 # The pause itself reads the same either way ("paused at its approved run time"),
-                # so say which of the two deadlines was the short one while it is still known.
-                self.store.add_machine_event(
-                    now, "max_cost", f"job {job.id} has run for the ${job.spec.max_cost:.2f} its "
-                    "--max-cost allows; pausing it for approval")
+                # so say which of the deadlines was the short one while it is still known. A
+                # second of slack, because an uncapped approval's window comes back from dollars
+                # to seconds with float noise on it.
+                if self._cap_binds(job, target, att.n) == "max_cost":
+                    self.store.add_machine_event(
+                        now, "max_cost", f"job {job.id} has run for the "
+                        f"${job.spec.max_cost:.2f} its --max-cost allows; pausing it for approval")
+                else:
+                    self.store.add_machine_event(
+                        now, "job_cap", f"job {job.id} has run for the "
+                        f"${self._job_left(job, target, att.n):.2f} left of the "
+                        f"${target.max_job_cost:.2f} one job may spend on {target.name} "
+                        "(max_job_cost); pausing it")
             self.store.update_job(job.id, state=State.STOPPING, stop_requested="pause")
 
     def _sample_machine(self) -> None:
@@ -1068,6 +1178,11 @@ class Daemon:
                 summary = (f"ran out of its approved time {paused} times without finishing; "
                            "submit it again with a longer --time, or make sure it checkpoints "
                            "and resumes")
+            elif self._at_job_cap(job):
+                # Waiting, not failed, but "approve it again" would be wrong: approval is refused
+                # until the cap is raised, and whoever reads this should know that up front.
+                reason = "job_cap"
+                summary = self._cap_reached(job, self.cfg.clouds[job.spec.target])
         else:
             state, retries_used = self._retry_state(job)
         extra = {}
@@ -1185,8 +1300,8 @@ class Daemon:
                     continue
                 try:
                     # The same ceiling the launch records against the budget: the most this
-                    # attempt can bill, `--max-cost` included.
-                    price = self._ceiling(target, job.spec)
+                    # attempt can bill, its dollar caps included.
+                    price = self._ceiling(target, job)
                 except (KeyError, ValueError):
                     log.warning("job %s has no price on %s; leaving it queued", job.id, name)
                     continue
@@ -1310,6 +1425,12 @@ class Daemon:
         return True
 
     def _launch_cloud(self, job: Job, target: CloudTarget, ex: CloudExecutor, now: float) -> None:
+        if self._at_job_cap(job):
+            # Approval refuses a job with nothing left under its cap, so this is a cap lowered in
+            # the config after the approval: launching would buy a sandbox a second of run time.
+            self.store.update_job(job.id, state=State.AWAITING, queue_time=now, reason="job_cap",
+                                  summary=self._cap_reached(job, target))
+            return
         prior = self.store.attempts(job.id)
         n = len(prior) + 1
         d = self.job_dir(job.id)
@@ -1322,7 +1443,7 @@ class Daemon:
             # ceiling, which is also what the ledger is told, because `_approved_seconds` stops
             # the attempt at the point that ceiling is reached.
             rate = self._hourly(target, job.spec.gpu)
-            price = self._ceiling(target, job.spec)
+            price = self._ceiling(target, job)
         except (OSError, ValueError, KeyError) as e:
             self._fail_launch(job, n, pending, now, str(e))
             return

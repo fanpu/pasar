@@ -38,12 +38,18 @@ class CloudTarget:
     # limit of its own, and where it does not this budget is the only thing between a job and a
     # bill. Turn it on for a target whose provider will refuse a launch it cannot pay for.
     probe_past_budget: bool = False
+    # The most one job may spend over its whole life: every attempt, every re-approval after a
+    # pause or a reclaim, every extension. `--max-cost` bounds one attempt only, so without this
+    # a job paused five times could spend five of them. Config rather than a constant because it
+    # is meant to be raised as the jobs earn trust, and only by whoever owns this file.
+    max_job_cost: float = 10.0
 
 
 def _cloud_target(name: str, raw: dict) -> CloudTarget:
     known_keys = {"budget", "provider", "profile", "owner", "group", "max_running",
                   "timeout_factor", "max_runtime", "approval_ttl", "env_passthrough", "volumes",
-                  "bundle_max", "data_max", "base_image", "rates", "probe_past_budget"}
+                  "bundle_max", "data_max", "base_image", "rates", "probe_past_budget",
+                  "max_job_cost"}
     unknown = sorted(set(raw) - known_keys)
     if unknown:
         raise ValueError(f"unknown config keys in cloud target {name!r}: {', '.join(unknown)}")
@@ -62,6 +68,10 @@ def _cloud_target(name: str, raw: dict) -> CloudTarget:
     monthly_budget = float(budget.get("monthly", daily_budget * 10))
     if monthly_budget <= 0:
         raise ValueError(f"cloud target {name!r} budget.monthly must be positive, got {monthly_budget}")
+
+    max_job_cost = float(raw.get("max_job_cost", 10.0))
+    if max_job_cost <= 0:
+        raise ValueError(f"cloud target {name!r} max_job_cost must be positive, got {max_job_cost}")
 
     return CloudTarget(
         name=name,
@@ -84,6 +94,7 @@ def _cloud_target(name: str, raw: dict) -> CloudTarget:
         base_image=raw.get("base_image", ""),
         rates={k: float(v) for k, v in (raw.get("rates") or {}).items()},
         probe_past_budget=bool(raw.get("probe_past_budget", False)),
+        max_job_cost=max_job_cost,
     )
 
 

@@ -96,17 +96,30 @@ def _mem(job: dict) -> str:
     return fmt_gib(job["mem_request"])
 
 
+def _cap_note(cloud: dict) -> str:
+    """Which dollar cap set the ceiling, when one did: the submitter's `--max-cost`, or the job's
+    lifetime cap. A shortened run nobody passed `--max-cost` for is the job cap's doing, and
+    saying "your --max-cost" there would blame a flag nobody used."""
+    if cloud.get("user_capped"):
+        return " (your --max-cost)"
+    approved, full = cloud.get("approved_seconds"), cloud.get("full_seconds")
+    if approved and full and approved < full:
+        return " (the job cap)"
+    return ""
+
+
 def _approved_run(cloud: dict) -> str:
-    """How much run time one approval buys, and — when `--max-cost` is what limits it — how much
-    time that cap is costing. A dollar cap is enforced by pausing the job early, which is not what
-    somebody who capped dollars expects to have bought, so it is said plainly rather than left to
-    be discovered when the job pauses."""
+    """How much run time one approval buys, and — when a dollar cap (`--max-cost`, or the job's
+    lifetime cap) is what limits it — how much time that cap is costing. A dollar cap is enforced
+    by pausing the job early, which is not what somebody who capped dollars expects to have
+    bought, so it is said plainly rather than left to be discovered when the job pauses."""
     approved, full = cloud.get("approved_seconds"), cloud.get("full_seconds")
     if not approved:
         return ""
     if full and approved < full:
-        return (f"{fmt_duration(approved)} of run time"
-                f" (your --max-cost cuts it from {fmt_duration(full)})")
+        who = ("your --max-cost" if cloud.get("user_capped")
+               else f"the {_money(cloud.get('job_cap'))} job cap")
+        return f"{fmt_duration(approved)} of run time ({who} cuts it from {fmt_duration(full)})"
     return f"{fmt_duration(approved)} of run time"
 
 
@@ -171,14 +184,17 @@ def print_job(job: dict) -> None:
         ("note", job["note"]), ("by", job["submitter"]), ("git", job["git_commit"] or ""),
     ]
     if cloud is not None:
-        cap_note = " (your --max-cost)" if cloud.get("user_capped") else ""
-        cost = f"est {_money(cloud['estimated_cost'])}, capped at {_money(cloud['max_cost'])}{cap_note}"
+        cost = (f"est {_money(cloud['estimated_cost'])}, "
+                f"capped at {_money(cloud['max_cost'])}{_cap_note(cloud)}")
         # `phase` is the live attempt's own, and is absent between attempts; the job's state is
         # already on its own line, so there is nothing to fall back to and nothing to repeat.
         where = f" · {cloud['phase']}" if cloud["phase"] else ""
         fields.append(("cloud", f"{cloud['target']} · {cloud['gpu']}{where}"))
         fields.append(("cost", cost))
         fields.append(("approved", _approved_run(cloud)))
+        if cloud.get("job_cap") is not None:
+            spent = f"{_money(cloud['job_spent'])} of its {_money(cloud['job_cap'])} job cap"
+            fields.append(("spent", spent))
         if cloud.get("needs_more_time"):
             pace = (f"projected to run {fmt_duration(cloud['needs_more_time'])} past its "
                     "approved time; extend it in the web UI to keep it running "
@@ -196,14 +212,15 @@ def print_cloud(body: dict) -> None:
     if not targets:
         print("no cloud targets configured")
     else:
-        rows = [("TARGET", "PROVIDER", "RUNNING", "TODAY", "MONTH", "RATES")]
+        rows = [("TARGET", "PROVIDER", "RUNNING", "TODAY", "MONTH", "JOB CAP", "RATES")]
         for t in targets:
             today = f"{_money(t['spent_today'])} / {_money(t['daily_budget'])}"
             month = f"{_money(t['spent_month'])} / {_money(t['monthly_budget'])}"
             running = f"{t['running']}/{t['max_running']}"
             rates = ", ".join(f"{k}={_money(v)}" for k, v in sorted(t["rates"].items())) or "none"
             name = t["name"] + ("" if t["configured"] else " (no provider)")
-            rows.append((name, t["provider"], running, today, month, rates))
+            rows.append((name, t["provider"], running, today, month,
+                         _money(t.get("max_job_cost")), rates))
         widths = [max(len(r[i]) for r in rows) for i in range(len(rows[0]))]
         for r in rows:
             print("  ".join(c.ljust(w) for c, w in zip(r, widths)).rstrip())
@@ -329,7 +346,7 @@ def run(args, client: httpx.Client) -> int:
             out(job)
         elif job.get("cloud"):
             c = job["cloud"]
-            cap_note = " (your --max-cost)" if c.get("user_capped") else ""
+            cap_note = _cap_note(c)
             print(f"submitted #{job['id']} {job['name']} ({_state(job)}) on {c['target']}")
             print(f"  estimated {_money(c['estimated_cost'])}, "
                   f"capped at {_money(c['max_cost'])}{cap_note} for this run")

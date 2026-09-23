@@ -90,6 +90,17 @@ class Ledger:
             total += max(estimated, estimated * elapsed / est_runtime)
         return total
 
+    def job_spent(self, job_id: int, excluding: int | None = None) -> float:
+        """Dollars one job has spent or still holds, across all its attempts: the settled figure
+        for an attempt that has ended, and the ceiling still reserved for one that has not. The
+        reservation, not a guess at what is burnt so far (as `committed()` makes), because this is
+        what a lifetime cap is measured against, and a live attempt may yet bill all of it.
+
+        `excluding` leaves one attempt out, so an attempt's own cap can be worked out from what
+        the job's *other* attempts have taken without counting its own reservation against it."""
+        return sum(self._effective(r) for r in self.store.cloud_spend_of_job(job_id)
+                   if r["attempt"] != excluding)
+
     def spent_day(self, target: str) -> float:
         """Dollars recorded for today, billed or not: an open attempt still counts here at its
         flat estimate. That overlaps `committed()`, which prices the same open attempts again

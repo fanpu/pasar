@@ -13,7 +13,7 @@ import pytest
 from pasar.cloud.cost import estimate, hourly_rate
 from pasar.cloud.executor import parse_unit
 from pasar.cloud.pace import MIN_OBSERVATION, MIN_REPORTS, needs_more_time
-from pasar.daemon import Conflict
+from pasar.daemon import CLOUD_RATE_TTL, Conflict
 from pasar.models import JobSpec, State
 from pasar.views import cloud_status_view, job_view
 
@@ -255,6 +255,9 @@ def test_extending_says_what_rate_it_commits_at(cloud_daemon, cloud_provider, cl
                                                           "mem_gib_hour_cost_sandbox": 0.024})
     now_rate = hourly_rate(cloud_provider.rates(), "h100", 1)
     assert now_rate > was_rate
+    # Every tick prices a running attempt (its lifetime cap is live), so the old price list is
+    # still memoised; the new one is seen once that copy is stale.
+    clock.advance(CLOUD_RATE_TTL)
 
     job = daemon.approve(job_id, extend=True)
     assert f"${now_rate:.2f}/hour" in job.summary       # what it is committing at
@@ -293,6 +296,28 @@ def test_extending_refuses_to_exceed_max_cost(cloud_daemon, cloud_provider, clou
     # nothing changed: not the approval row, not the ledger, not the job
     after = dict(daemon.store.approvals(job_id)[0])
     assert after == before
+    assert daemon.job(job_id).state == State.RUNNING
+    assert cloud_provider.stopped == []
+
+
+def test_extending_refuses_to_exceed_the_jobs_lifetime_cap(cloud_daemon, cloud_provider,
+                                                           cloud_cwd, clock):
+    # The same refusal as --max-cost's, for the cap nobody passed on the command line: the
+    # target's max_job_cost bounds every attempt and every extension of every attempt.
+    daemon = cloud_daemon
+    rate = hourly_rate(cloud_provider.rates(), "h100", 1)
+    daemon.cfg.clouds["fake"].max_job_cost = estimate(rate, 900) + 0.5
+    job_id = start(daemon, cloud_cwd)
+    before = dict(daemon.store.approvals(job_id)[0])
+    committed = daemon.ledger.job_spent(job_id)
+    lag_the_job(daemon, clock, job_id)
+    assert daemon.needs_more_time(daemon.job(job_id)) is not None
+
+    with pytest.raises(Conflict) as excinfo:
+        daemon.approve(job_id, extend=True)
+    assert "max_job_cost" in str(excinfo.value) and "not by an agent" in str(excinfo.value)
+    assert dict(daemon.store.approvals(job_id)[0]) == before
+    assert daemon.ledger.job_spent(job_id) == pytest.approx(committed)
     assert daemon.job(job_id).state == State.RUNNING
     assert cloud_provider.stopped == []
 

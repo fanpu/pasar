@@ -183,6 +183,21 @@ def test_a_budget_with_neither_figure_is_still_an_error(tmp_path):
         _write(tmp_path, "[clouds.m]\nbudget = {}\n")
 
 
+def test_one_job_may_spend_ten_dollars_unless_the_config_says_otherwise(tmp_path):
+    """A job's lifetime cap is a safe default out of the box, and config rather than a constant,
+    because it is meant to be raised as trust in the jobs grows."""
+    cfg = _write(tmp_path, "[clouds.m]\nbudget = { monthly = 30.0 }\n")
+    assert cfg.clouds["m"].max_job_cost == 10.0
+    cfg = _write(tmp_path, "[clouds.m]\nbudget = { monthly = 30.0 }\nmax_job_cost = 25\n")
+    assert cfg.clouds["m"].max_job_cost == 25.0
+
+
+@pytest.mark.parametrize("value", ["0", "-5.0"])
+def test_a_job_cap_must_be_positive(tmp_path, value):
+    with pytest.raises(ValueError, match="max_job_cost must be positive"):
+        _write(tmp_path, f"[clouds.m]\nbudget = {{ monthly = 30.0 }}\nmax_job_cost = {value}\n")
+
+
 def test_groups_lists_members_in_config_order(tmp_path):
     # provider is explicit and identical on both members: it defaults to the target's own name,
     # and "b" and "a" differ, which would otherwise trip the mixed-provider check below.

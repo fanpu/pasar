@@ -494,3 +494,38 @@ def test_pull_api_rejects_a_relative_to(client, capsys, cloud_daemon, cloud_prov
     r = client.post(f"/api/jobs/{job_id}/pull", json={"to": "relative/dir"})
     assert r.status_code == 422
     assert "absolute" in r.text
+
+
+def test_show_and_cloud_state_the_jobs_lifetime_cap(client, capsys, cloud_daemon, cloud_cwd,
+                                                    monkeypatch):
+    monkeypatch.chdir(cloud_cwd)
+    run(client, capsys, "submit", "--time", "1h", "--on", "fake", "--gpu", "H100", "--",
+        "python", "-c", "pass")
+    code, out = run(client, capsys, "show", "1")
+    assert code == 0 and "$0.00 of its $10.00 job cap" in out.out
+    code, out = run(client, capsys, "cloud")
+    assert code == 0 and "JOB CAP" in out.out and "$10.00" in out.out
+    code, out = run(client, capsys, "cloud", "--json")
+    assert json.loads(out.out)["targets"][0]["max_job_cost"] == 10.0
+
+
+def test_submit_says_when_the_job_cap_is_what_shortens_the_run(client, capsys, cloud_daemon,
+                                                               cloud_cwd, monkeypatch):
+    # 1h30m estimates $7.92, but its 2h15m window would cost $11.88: the $10 cap cuts it short,
+    # and saying "your --max-cost" there would blame a flag nobody passed.
+    monkeypatch.chdir(cloud_cwd)
+    code, out = run(client, capsys, "submit", "--time", "1h30m", "--on", "fake", "--gpu", "H100",
+                    "--", "python", "-c", "pass")
+    assert code == 0
+    assert "capped at $10.00 (the job cap)" in out.out and "--max-cost" not in out.out
+    assert "instead of 2h15m" in out.out
+    code, out = run(client, capsys, "show", "1")
+    assert "(the $10.00 job cap cuts it from 2h15m)" in out.out
+
+
+def test_submit_past_the_job_cap_is_refused_with_the_reason(client, capsys, cloud_daemon,
+                                                            cloud_cwd, monkeypatch):
+    monkeypatch.chdir(cloud_cwd)
+    code, out = run(client, capsys, "submit", "--time", "3h", "--on", "fake", "--gpu", "H100",
+                    "--", "python", "-c", "pass")
+    assert code == 70 and "$15.83" in out.err and "max_job_cost" in out.err
