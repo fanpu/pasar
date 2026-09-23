@@ -230,20 +230,22 @@ class Daemon:
         return max(1, min(int(spec.est_runtime * target.timeout_factor), target.max_runtime))
 
     def _approved_seconds(self, spec: JobSpec, target: CloudTarget) -> int:
-        """The run time one approval actually buys, and so the deadline `_pause_overdue` stops an
-        attempt at: the target's window, cut short at the point where the job would have spent its
-        `--max-cost`.
+        """The run time one approval would buy at today's price: the target's window, cut short at
+        the point where the job would have spent its `--max-cost`. What views quote for a job that
+        has not started yet (`cloud_window`); once an attempt is running, `_attempt_seconds` is
+        the figure `_pause_overdue` enforces, because by then there is an approvals row saying what
+        was actually agreed to.
 
         A dollar cap has to become a time bound to mean anything. Stopping the attempt is the only
         power the daemon has over a running sandbox, so `max_cost / hourly rate` is the cap: past
         that instant the job is spending money nobody approved. A job stopped here pauses and comes
         back for approval like any other pause, which is the right answer to "you hit your cap".
 
-        Priced from live rates each time it is asked rather than frozen at approval: a rate that
-        rose mid-run shortens what is left, which is what "never spend more than $X" means. A job
-        that cannot be priced right now keeps the full window rather than being stopped on a
-        missing rate — nothing launches without a price (`_launch_cloud`), so this is a rate that
-        vanished after the launch, and a wrong stop costs the job its progress."""
+        Priced from live rates each time it is asked rather than frozen at approval — as is the
+        cap half of `_attempt_seconds`, for the same reason: a rate that rose shortens what the cap
+        buys, which is what "never spend more than $X" means. A job that cannot be priced right now
+        keeps the full window rather than being stopped on a missing rate — nothing launches
+        without a price (`_launch_cloud`), and a wrong stop costs the job its progress."""
         window = self._window(spec, target)
         if spec.max_cost is None:
             return window
@@ -256,21 +258,39 @@ class Daemon:
         return max(1, min(window, int(spec.max_cost / rate * 3600)))
 
     def _attempt_seconds(self, job: Job, att: Attempt, target: CloudTarget) -> float:
-        """The seconds this *running* attempt's own approval buys: its approvals row's `max_cost`
-        and `hourly_rate`, converted back to time — not `_approved_seconds` recomputed against
-        today's rate. Once a person has approved (or extended) a ceiling for this attempt, it is
-        the ceiling they agreed to, not one that drifts as the market moves under them; `extend`
-        raises it by writing a new figure into the same row (`_extend`), which is exactly what
-        this reads back.
+        """The run time this *running* attempt may still have, and so the deadline `_pause_overdue`
+        stops it at: the lesser of two different promises.
 
-        Falls back to `_approved_seconds(job.spec, target)` for a row missing a price — `approve`
-        still lets a job wait even when it could not be priced at that moment, though
-        `_launch_cloud` never launches one that still can't be, so a running attempt reaching this
-        fallback would be unusual."""
+        The **window** is frozen. It is this attempt's own approvals row (`max_cost / hourly_rate`,
+        converted back to time), not `_approved_seconds` recomputed against today's rate, because
+        it is the run time a person looked at and agreed to — it should not shrink or stretch as
+        the market moves under them, and `extend` raises it by writing a new figure into that same
+        row (`_extend`), which is exactly what this reads back.
+
+        The **cap** is live. `--max-cost` is a promise about dollars, not about time: if the rate
+        rises mid-run, the same cap buys fewer seconds, and enforcing the seconds it bought at
+        yesterday's price would let the job bill straight past the figure its submitter set. So the
+        cap is re-derived from today's rate on every tick and the attempt is held to whichever of
+        the two is shorter. A rate that *falls* cannot buy back time beyond the frozen window,
+        which is the asymmetry the two promises imply.
+
+        Falls back to the full window for a job that cannot be priced right now (and to
+        `_approved_seconds(job.spec, target)` for a row missing a price — `approve` still lets a
+        job wait when it could not be priced at that moment, though `_launch_cloud` never launches
+        one that still can't be): a wrong stop costs the job its progress."""
         row = next((r for r in self.store.approvals(job.id) if r["attempt"] == att.n), None)
-        if row is not None and row["max_cost"] is not None and row["hourly_rate"]:
-            return row["max_cost"] / row["hourly_rate"] * 3600
-        return self._approved_seconds(job.spec, target)
+        if row is None or row["max_cost"] is None or not row["hourly_rate"]:
+            return self._approved_seconds(job.spec, target)
+        window = row["max_cost"] / row["hourly_rate"] * 3600
+        if job.spec.max_cost is None:
+            return window
+        try:
+            rate = self._hourly(target, job.spec.gpu)
+        except (KeyError, ValueError):
+            log.warning("job %s cannot be priced; holding it to the run time its approval bought",
+                        job.id)
+            return window
+        return max(1.0, min(window, job.spec.max_cost / rate * 3600))
 
     def needs_more_time(self, job: Job) -> float | None:
         """Extra seconds `job`'s own pace (see `pasar.cloud.pace.needs_more_time`) projects past
@@ -648,9 +668,10 @@ class Daemon:
         keeps the decision (and the deadline it is measured against) with the daemon.
 
         This is the only thing that stops a running attempt, so it is also where `--max-cost` is
-        enforced: `_attempt_seconds` reads the attempt's own approvals row, whose `max_cost`
-        already accounts for the cap — and for any extension `_extend` has granted since. A job
-        stopped for either reason pauses and returns for approval.
+        enforced: `_attempt_seconds` holds the attempt to the shorter of the window its own
+        approvals row bought (including any extension `_extend` has granted since) and what its
+        `--max-cost` buys at today's rate. A job stopped for either reason pauses and returns for
+        approval.
 
         Driven from the store, not from this tick's statuses: a status read that threw is not a
         reason to let an attempt bill past the time somebody approved."""

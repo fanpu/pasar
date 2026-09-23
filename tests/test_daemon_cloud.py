@@ -419,6 +419,33 @@ def test_a_max_cost_stops_the_job_before_its_full_window(make_cloud, repo, clock
     assert daemon.job(plain).state == State.STOPPING
 
 
+def test_a_rate_rise_mid_run_shortens_what_a_capped_job_may_still_run(make_cloud, repo, clock,
+                                                                      monkeypatch):
+    # `--max-cost` is a spend ceiling, not a run time somebody agreed to. If the rate rises while
+    # the attempt runs, the same dollars buy less time, and the pause has to move with them or the
+    # job bills straight past the cap. (The *window* an approval bought stays frozen — that is
+    # what the person agreed to; only the cap is re-derived, and enforcement is the lesser.)
+    daemon, provider = make_cloud()
+    job_id = start(daemon, repo, max_cost=6.0)
+    started = daemon.store.current_attempt(job_id).start_time
+    h = handle_of(daemon, job_id)
+    at_the_old_rate = 6.0 / hourly_rate(provider.rates(), "h100", 1) * 3600  # 4092s
+    monkeypatch.setattr(provider, "rates", lambda: {"gpu_hour_cost_h100": 7.90,
+                                                    "cpu_hour_cost_sandbox": 0.14,
+                                                    "mem_gib_hour_cost_sandbox": 0.024})
+    at_the_new_rate = 6.0 / hourly_rate(provider.rates(), "h100", 1) * 3600  # 2340s
+    clock.t = started + at_the_new_rate - 1
+    daemon.tick()
+    assert daemon.job(job_id).state == State.RUNNING  # the cap's dollars are not spent yet
+    clock.advance(2)
+    daemon.tick()
+    assert clock.t - started < at_the_old_rate  # the frozen window has not run out; the cap has
+    assert daemon.job(job_id).state == State.STOPPING
+    assert provider.stopped == [h]
+    events = [e for e in daemon.store.machine_events() if e["kind"] == "max_cost"]
+    assert len(events) == 1 and "$6.00" in events[0]["text"]
+
+
 def test_a_capped_job_cannot_bill_more_than_the_ledger_committed(make_cloud, repo, clock):
     # The budget gate admits jobs against `committed()`; for a capped job that figure is the cap,
     # so the cap has to be what the job can actually bill, not a smaller number recorded next to
