@@ -100,11 +100,24 @@ was paid for. Checkpoint on time, not on steps, and checkpoint more often than y
 - **Test resuming locally first.** Run a few minutes on the local GPU, cancel, and resubmit. A
   cloud run is an expensive place to find out resuming is broken.
 
-Storage that survives between attempts isn't wired up for cloud jobs yet — see
-[docs/cloud.md](cloud.md#data-checkpoints-and-outputs) for the current state — so `pasar_job.job_dir()`
-gives a cloud attempt nothing today. Follow the discipline above anyway, so a job is ready the
-moment a target can actually keep a checkpoint around; until then, check the target's own setup
-notes for where (if anywhere) it can write something durable.
+A cloud job is paused, not killed, when it reaches the run time somebody approved: the next
+attempt starts from this directory, or from nothing if it never wrote to it.
+
+```python
+import os, pasar_job
+
+ckpt = os.path.join(pasar_job.persist_dir(), "last.pt")
+if pasar_job.resuming() and os.path.exists(ckpt):
+    step = load(ckpt)
+    pasar_job.resumed(step)
+...
+save(ckpt); pasar_job.checkpoint(step)
+```
+
+`pasar_job.persist_dir()` is a directory shared by every attempt of this job — a cloud volume
+mounted at `$PASAR_PERSIST_DIR`, or locally your job's own directory (`$PASAR_JOB_DIR`), or the
+working directory outside pasar entirely. Write checkpoints there, not to a path you invent
+yourself, so the attempt after a pause or a reclaim can find them.
 
 ## Environment
 
@@ -115,6 +128,7 @@ notes for where (if anywhere) it can write something durable.
 | `PASAR_RESUMING` | `1` if an earlier attempt ran |
 | `PASAR_EVENTS` | file to append events to |
 | `PASAR_JOB_DIR` | the job's directory in pasar's data dir |
+| `PASAR_PERSIST_DIR` | cloud only: the job's persist volume — see `pasar_job.persist_dir()` above |
 | `PASAR_MEM_LIMIT_BYTES` | shared jobs: your limit |
 | `PASAR_GRACE_SECONDS` | time between SIGTERM and SIGKILL |
 

@@ -401,10 +401,24 @@ def test_approving_a_paused_job_resumes_it_as_a_new_attempt(cloud, repo):
     assert daemon.job(job_id).state == State.RUNNING
     assert len(daemon.store.attempts(job_id)) == 2
     env = provider.boxes[handle_of(daemon, job_id)].req.env
-    # Not "1", however many attempts have run: `resuming()` means a checkpoint may be there to
-    # load, and a cloud attempt has nowhere durable to have written one yet, so saying so would
-    # send the job hunting for a file that cannot exist.
-    assert env["PASAR_ATTEMPT"] == "2" and env["PASAR_RESUMING"] == "0"
+    assert env["PASAR_ATTEMPT"] == "2"
+
+
+def test_a_second_cloud_attempt_is_told_it_may_have_a_checkpoint(cloud, repo):
+    """The persist dir outlives the attempt, so the second one really may find a checkpoint —
+    and a job that is not told will redo everything the first attempt paid for."""
+    daemon, provider = cloud
+    job_id = start(daemon, repo)
+    first = handle_of(daemon, job_id)
+    provider.reclaim(first)
+    daemon.tick()
+    daemon.approve(job_id)
+    daemon.tick()
+    assert daemon.job(job_id).state == State.RUNNING
+    second = handle_of(daemon, job_id)
+    assert first != second
+    assert provider.boxes[first].req.env["PASAR_RESUMING"] == "0"
+    assert provider.boxes[second].req.env["PASAR_RESUMING"] == "1"
 
 
 def out_of_time(daemon, provider, job_id, attempt):

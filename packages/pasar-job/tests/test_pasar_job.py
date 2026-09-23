@@ -1,4 +1,5 @@
 import json
+import os
 import signal
 import subprocess
 import sys
@@ -57,6 +58,29 @@ def test_on_preempt_runs_hook_then_exits(tmp_path):
     p.send_signal(signal.SIGTERM)
     assert p.wait(timeout=10) == 143
     assert marker.read_text() == "ok"
+
+
+def test_persist_dir_is_the_cloud_directory_when_there_is_one(monkeypatch, tmp_path):
+    monkeypatch.setenv("PASAR_PERSIST_DIR", str(tmp_path / "persist" / "52"))
+    path = pasar_job.persist_dir()
+    assert path == str(tmp_path / "persist" / "52")
+    assert os.path.isdir(path)  # created, so a job can just open a file in it
+
+
+def test_persist_dir_falls_back_to_the_working_directory_locally(monkeypatch, tmp_path):
+    """One script has to serve both: locally there is a filesystem that outlives the job already."""
+    monkeypatch.delenv("PASAR_PERSIST_DIR", raising=False)
+    monkeypatch.delenv("PASAR_JOB_DIR", raising=False)
+    monkeypatch.chdir(tmp_path)
+    assert pasar_job.persist_dir() == str(tmp_path)
+
+
+def test_persist_dir_prefers_the_job_directory_over_the_working_directory(monkeypatch, tmp_path):
+    """Locally PASAR_JOB_DIR is one directory per job, unlike the working directory, which two
+    jobs submitted from the same checkout share and would clobber each other's checkpoint in."""
+    monkeypatch.delenv("PASAR_PERSIST_DIR", raising=False)
+    monkeypatch.setenv("PASAR_JOB_DIR", str(tmp_path / "jobs" / "7"))
+    assert pasar_job.persist_dir() == str(tmp_path / "jobs" / "7")
 
 
 def test_memory_limit_bytes(monkeypatch):

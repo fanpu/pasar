@@ -21,6 +21,7 @@ __all__ = [
     "memory_limit_bytes",
     "note",
     "on_preempt",
+    "persist_dir",
     "progress",
     "resumed",
     "resuming",
@@ -43,6 +44,21 @@ def resuming() -> bool:
 
 def job_dir() -> str | None:
     return os.environ.get("PASAR_JOB_DIR")
+
+
+def persist_dir() -> str:
+    """A directory that outlives this attempt: write checkpoints here.
+
+    In the cloud it is a volume shared by every attempt of this job, so the attempt after a pause
+    or a reclaim finds what this one wrote. Locally it falls back to the job's own directory
+    (PASAR_JOB_DIR), which is one per job and likewise outlives every attempt; without pasar at
+    all it falls back to the working directory, which outlives the job anyway. A plain working
+    directory is skipped whenever PASAR_JOB_DIR is set, so two local jobs run from the same
+    checkout never share one checkpoint file.
+    """
+    path = os.environ.get("PASAR_PERSIST_DIR") or os.environ.get("PASAR_JOB_DIR") or os.getcwd()
+    os.makedirs(path, exist_ok=True)
+    return path
 
 
 def _emit(event: str, **fields) -> None:

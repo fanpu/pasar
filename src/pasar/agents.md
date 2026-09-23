@@ -117,26 +117,31 @@ call them unconditionally, including in code you also run by hand. What's availa
 | `pasar_job.progress(step, total_steps, **metrics)` | Report progress out of `total_steps` (required, a positive integer). pasar projects a running job's finish from it, instead of from `--time`: time so far × steps left ÷ steps done this attempt (counted from the step you passed to `resumed`). Report at least every few minutes. Extra keyword args must be finite numbers (e.g. `loss=1.84`) — the UI charts each one as its own line on the job's Metrics tab. |
 | `pasar_job.note(text)` | Leave a free-text note on the job (e.g. "switched to lr 1e-5"). |
 | `pasar_job.job_id() / .attempt() / .job_dir()` | Introspect the current job ID, attempt number (from 1), and scratch directory. |
+| `pasar_job.persist_dir() -> str` | A directory that outlives this attempt: write checkpoints here. In the cloud it is a volume shared by every attempt of the job; locally it falls back to `.job_dir()`, then to the working directory. Created if it doesn't exist. |
 | `pasar_job.memory_limit_bytes()` / `apply_memory_limit(device=0)` | Shared (`--mem`) jobs only: your byte limit, and a helper that caps PyTorch's allocator at it so `torch.cuda.OutOfMemoryError` is raised inside your process instead of pasar killing it from outside. Returns `None` for whole-GPU jobs. |
 
-A minimal complete training loop:
+A minimal complete training loop. Checkpoint under `pasar_job.persist_dir()`, not a path you
+invent yourself: locally it's the job's own directory (or the working directory outside pasar
+entirely); on a cloud target it's the volume that survives the pause or reclaim a fresh
+approval follows, so the next attempt finds what this one wrote instead of starting from zero.
 
 ```python
-import pasar_job
+import os, pasar_job
 
 pasar_job.apply_memory_limit()           # no-op for whole-GPU jobs
 pasar_job.on_preempt(save_checkpoint)    # runs on SIGTERM, then exits
 
+ckpt = os.path.join(pasar_job.persist_dir(), "last.pt")
 start = 0
-if pasar_job.resuming():
-    start = load_checkpoint()
+if pasar_job.resuming() and os.path.exists(ckpt):
+    start = load_checkpoint(ckpt)
     pasar_job.resumed(start)
 
 for step in range(start, total_steps):
     loss = train_step()
     pasar_job.progress(step, total_steps, loss=loss)
     if step % 500 == 0:
-        save_checkpoint()
+        save_checkpoint(ckpt)
         pasar_job.checkpoint(step)
 ```
 
@@ -221,7 +226,7 @@ These apply to every `pasar` command, not just `wait`:
 | `preempted` | Stopped to make room for a higher-bid job that asked to preempt. It is requeued automatically — this is not a failure. | Nothing to do. |
 | `target_gone` | Cloud only. The job's target is no longer configured here: `failed` if it was running (its sandbox may still be billing — end it at the provider), `cancelled` if it was only waiting (nothing was spent). | Put the target back and resubmit, or clean up at the provider yourself. |
 | `price_rose` | Cloud only. The job is back to `awaiting`: its price rose past what was approved between approval and launch. `summary` has the old ceiling and the new price. | Approve it again in the web UI if the new price is still fine. |
-| `cloud_preempted` | Cloud only. The provider reclaimed the machine (a spot interruption, a host failure). The job is back to `awaiting`, showing how far it got. | Approve it again in the web UI to run it again; not a failure. It starts over rather than resuming from a checkpoint, since there is no per-job cloud storage yet. |
+| `cloud_preempted` | Cloud only. The provider reclaimed the machine (a spot interruption, a host failure). The job is back to `awaiting`, showing how far it got. | Approve it again in the web UI to run it again; not a failure. The next attempt resumes from `pasar_job.persist_dir()` if the job checkpoints there. |
 | `pause_limit` | Cloud only. The job ran out of its approved time 5 times running without finishing — each pause on its own is not a failure, but 5 with nothing to show for them means something is wrong. | Resubmit with a longer `--time`, or check that the job actually checkpoints and resumes. |
 
 ## Cloud jobs
@@ -275,9 +280,9 @@ instead, `reason` `pause_limit`), if the provider reclaims the machine (reason
 `cloud_preempted`), or if its price rose past what was approved between approval and launch
 (reason `price_rose`, with the old ceiling and new price in `summary`) — in every case, it needs
 approving again in the web UI, the same as a fresh submission. An approved job starts a fresh
-attempt from the same code snapshot: resuming it from its last checkpoint is the intent, but that
-needs per-job cloud storage which isn't built yet, so for now a paused or reclaimed cloud job
-starts its work over. `pasar wait` keeps waiting through
+attempt from the same code snapshot, with `PASAR_RESUMING=1`: it resumes from its last checkpoint
+if it wrote one under `pasar_job.persist_dir()`, or starts over if it never checkpointed.
+`pasar wait` keeps waiting through
 all of these (they aren't a terminal state); use `--timeout` if you don't want to wait on a human.
 If the target stops being configured on this pasard, a running cloud job ends `failed` (reason
 `target_gone` — its sandbox may still be running and billing at the provider, since nothing here
