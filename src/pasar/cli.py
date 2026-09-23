@@ -294,6 +294,11 @@ def build_parser() -> Parser:
     w.add_argument("--timeout", type=float, default=None, help="seconds")
     w.add_argument("--interval", type=float, default=2.0, help=argparse.SUPPRESS)
 
+    pl = add("pull", "fetch a finished cloud job's results to local disk, then delete the remote copy")
+    pl.add_argument("id", type=int)
+    pl.add_argument("--to", help="destination directory (default: the daemon's pull_dir/<id>/)")
+    pl.add_argument("--keep", action="store_true", help="leave the remote copy in place instead of deleting it once verified")
+
     add("status", "machine and memory pool status")
     add("cloud", "cloud targets: budgets, spend, rates and jobs awaiting approval")
     sub.add_parser("guide", help="print the agent guide (works without a daemon running)")
@@ -357,6 +362,20 @@ def run(args, client: httpx.Client) -> int:
                 "bid": args.bid, "retries": args.retries, "preempt": args.preempt}
         job = call(client, "POST", f"/api/jobs/{args.id}/restart", json=body)
         out(job) if out else print(f"#{job['id']} requeued")
+    elif args.cmd == "pull":
+        body = {"to": os.path.abspath(args.to) if args.to else None, "keep": args.keep}
+        # No read timeout: a multi-GiB checkpoint can take a long time to fetch, and the server
+        # sends nothing back until the whole thing (download, verify, maybe delete) is done.
+        result = call(client, "POST", f"/api/jobs/{args.id}/pull", json=body,
+                      timeout=httpx.Timeout(30, read=None))
+        if out:
+            out(result)
+        elif result["files"] == 0:
+            print(f"#{args.id}: nothing on the volume to pull")
+        else:
+            where = "deleted the remote copy" if result["deleted"] else "kept the remote copy"
+            print(f"#{args.id}: pulled {result['files']} file(s), {fmt_gib(result['bytes'])} "
+                  f"to {result['dest']} ({where})")
     elif args.cmd == "logs":
         if args.follow:
             try:

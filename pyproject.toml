@@ -48,6 +48,10 @@ addopts = "-m 'not systemd and not gpu'"
 filterwarnings = [
     "ignore:Using `httpx` with `starlette.testclient` is deprecated; install `httpx2` instead\\.:starlette.exceptions.StarletteDeprecationWarning",
     "ignore:The anyio.abc.BlockingPortal alias is deprecated, use anyio.from_thread.BlockingPortal instead\\.:DeprecationWarning",
+    # `pasar pull`'s CLI legitimately passes a no-read-timeout for its one request (a
+    # multi-GiB download); TestClient still honours it, it just warns that it would rather
+    # nobody did this.
+    "ignore:You should not use the 'timeout' argument with the TestClient\\.:starlette.exceptions.StarletteDeprecationWarning",
 ]
 
 [tool.ruff]

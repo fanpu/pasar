@@ -6,6 +6,7 @@ from fastapi.testclient import TestClient
 
 from pasar.api import create_app
 from pasar.cli import ApiError, base_url, call, main, wait_code
+from pasar.cloud.executor import parse_unit
 from pasar.cloud.pace import MIN_REPORTS
 
 
@@ -376,3 +377,108 @@ def test_show_and_cloud_surface_a_job_that_needs_more_time(client, capsys, cloud
 
     code, out = run(client, capsys, "cloud")
     assert code == 0 and "running past the pace" in out.out
+
+
+def _run_cloud_job_to_completion(client, capsys, cloud_daemon, cloud_provider, cloud_cwd,
+                                 monkeypatch):
+    """Submit, approve, launch and finish one cloud job through the CLI/API path; returns its
+    id. Mirrors `start`/`finish` in test_daemon_cloud.py, but through the HTTP surface `pull`'s
+    own CLI and API tests exercise."""
+    monkeypatch.chdir(cloud_cwd)
+    run(client, capsys, "submit", "--time", "1h", "--on", "fake", "--gpu", "H100", "--",
+        "python", "-c", "pass")
+    job_id = cloud_daemon.job(1).id
+    cloud_daemon.approve(job_id)
+    cloud_daemon.tick()
+    handle = parse_unit(cloud_daemon.store.current_attempt(job_id).unit)[1]
+    cloud_provider.finish(handle, 0)
+    cloud_daemon.tick()
+    assert cloud_daemon.job(job_id).state.value == "completed"
+    return job_id
+
+
+def test_pull_downloads_verifies_and_deletes_the_remote_copy(client, capsys, cloud_daemon,
+                                                              cloud_provider, cloud_cwd, tmp_path,
+                                                              monkeypatch):
+    job_id = _run_cloud_job_to_completion(client, capsys, cloud_daemon, cloud_provider,
+                                          cloud_cwd, monkeypatch)
+    cloud_provider.persist(job_id, "checkpoint.pt", b"weights")
+    dest = tmp_path / "out"
+
+    code, out = run(client, capsys, "pull", str(job_id), "--to", str(dest))
+
+    assert code == 0
+    assert "pulled 1 file" in out.out and "deleted the remote copy" in out.out
+    assert (dest / "checkpoint.pt").read_bytes() == b"weights"
+    assert cloud_provider.deleted_persist == [job_id]
+
+
+def test_pull_keep_leaves_the_remote_copy(client, capsys, cloud_daemon, cloud_provider,
+                                          cloud_cwd, tmp_path, monkeypatch):
+    job_id = _run_cloud_job_to_completion(client, capsys, cloud_daemon, cloud_provider,
+                                          cloud_cwd, monkeypatch)
+    cloud_provider.persist(job_id, "checkpoint.pt", b"weights")
+    dest = tmp_path / "out"
+
+    code, out = run(client, capsys, "pull", str(job_id), "--to", str(dest), "--keep")
+
+    assert code == 0 and "kept the remote copy" in out.out
+    assert cloud_provider.deleted_persist == []
+    assert job_id in cloud_provider.persisted
+
+
+def test_pull_reports_nothing_to_pull_and_exits_zero(client, capsys, cloud_daemon,
+                                                     cloud_provider, cloud_cwd, tmp_path,
+                                                     monkeypatch):
+    job_id = _run_cloud_job_to_completion(client, capsys, cloud_daemon, cloud_provider,
+                                          cloud_cwd, monkeypatch)
+    dest = tmp_path / "out"
+
+    code, out = run(client, capsys, "pull", str(job_id), "--to", str(dest))
+
+    assert code == 0 and "nothing on the volume" in out.out
+    assert not dest.exists()
+
+
+def test_pull_refuses_a_job_that_is_still_running(client, capsys, cloud_daemon, cloud_provider,
+                                                  cloud_cwd, monkeypatch):
+    monkeypatch.chdir(cloud_cwd)
+    run(client, capsys, "submit", "--time", "1h", "--on", "fake", "--gpu", "H100", "--",
+        "python", "-c", "pass")
+    job_id = cloud_daemon.job(1).id
+    cloud_daemon.approve(job_id)
+    cloud_daemon.tick()
+    assert cloud_daemon.job(job_id).state.value == "running"
+
+    code, out = run(client, capsys, "pull", str(job_id))
+
+    assert code == 70 and "still live" in out.err
+
+
+def test_pull_refuses_a_local_job(client, capsys, daemon, executor, tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    run(client, capsys, "submit", "--time", "1h", "--", "python a.py")
+    daemon.tick()
+    unit = daemon.store.current_attempt(1).unit
+    executor.exit(unit, 0)
+    daemon.tick()
+    assert daemon.job(1).state.value == "completed"
+
+    code, out = run(client, capsys, "pull", "1")
+
+    assert code == 70 and "local GPU" in out.err
+
+
+def test_pull_json_output(client, capsys, cloud_daemon, cloud_provider, cloud_cwd, tmp_path,
+                          monkeypatch):
+    job_id = _run_cloud_job_to_completion(client, capsys, cloud_daemon, cloud_provider,
+                                          cloud_cwd, monkeypatch)
+    cloud_provider.persist(job_id, "checkpoint.pt", b"weights")
+    dest = tmp_path / "out"
+
+    code, out = run(client, capsys, "pull", str(job_id), "--to", str(dest), "--json")
+
+    assert code == 0
+    body = json.loads(out.out)
+    assert body == {"job_id": job_id, "files": 1, "bytes": len(b"weights"), "dest": str(dest),
+                    "deleted": True}

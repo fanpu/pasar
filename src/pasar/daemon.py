@@ -6,6 +6,7 @@ import logging
 import os
 import shutil
 import tempfile
+import threading
 import time
 from collections import deque
 from dataclasses import replace
@@ -77,6 +78,14 @@ def _separator(n: int, now: float, prev: Attempt | None) -> str:
     return f"──── attempt {n} · {stamp}{why} ────\n"
 
 
+def _disk_usage(dest: Path) -> tuple[int, int]:
+    """(file count, total bytes) actually sitting under `dest` right now. What `pull` verifies
+    a download against is this, walked fresh, and not the provider's own return value — see
+    `Daemon.pull`."""
+    files = [p for p in dest.rglob("*") if p.is_file()]
+    return len(files), sum(p.stat().st_size for p in files)
+
+
 class Daemon:
     def __init__(self, cfg: Config, store: Store, executor: Executor, probe, data_dir: Path,
                  clock=time.time, metrics=None, providers: dict | None = None,
@@ -114,6 +123,13 @@ class Daemon:
                 continue
             self.executors[name] = CloudExecutor(provider, target, store, clock, self.job_dir)
         self.version = 0
+        # A job being pulled right now, guarded by this lock: a pull deletes the only copy of a
+        # job's data once it has verified the local one, and a second pull racing the first would
+        # see the same "still there" persist dir and could delete out from under a download that
+        # has not finished yet, or double-delete an already-gone one. Held only for the duration
+        # of one `pull()` call, never across a tick.
+        self._pulling: set[int] = set()
+        self._pull_lock = threading.Lock()
 
     # ---- helpers
     def job_dir(self, job_id: int) -> Path:
@@ -685,6 +701,91 @@ class Daemon:
         )
         self.changed()
         return self.job(job_id)
+
+    def _pull_root(self) -> Path:
+        """Where a pull lands when nobody names a `--to`. `cfg.pull_dir` is what production
+        uses (resolved by `load_config` to `<data_dir>/pulls`); the fallback to `self.data_dir`
+        (the constructor argument, not `cfg.data_dir`) is what a `Daemon` built directly from an
+        unresolved `Config()` gets instead — which is how every test builds one, and which must
+        not write into the test process's own working directory."""
+        return Path(self.cfg.pull_dir) if self.cfg.pull_dir else self.data_dir / "pulls"
+
+    def pull(self, job_id: int, dest: Path | None = None, keep: bool = False) -> dict:
+        """Fetch a finished cloud job's persist dir to local disk, verify it landed whole, and
+        delete the remote copy — the only copy of whatever the job left behind, until this runs.
+
+        Runs to completion on the caller's thread rather than touching the event loop itself:
+        `api.py` is the one that has to keep a multi-GiB fetch off it (`asyncio.to_thread`), and
+        a later automatic post-finish pull calls this exact method, so it stays self-contained
+        here — no CLI or HTTP concerns.
+
+        Refused (a `Conflict`, each saying why) for: a job whose checkpoint is still live (not
+        `TERMINAL`, including `AWAITING` — the very case `TERMINAL` excludes, because that
+        checkpoint is what the next attempt resumes from); a local job, which never had anything
+        on a provider; a cloud target whose provider this pasard cannot reach (config or
+        provider gone, like `approve`'s own refusal); a second pull of the same job while one is
+        already in flight; and a `dest` that already exists with something in it, which pulling
+        into would both corrupt and make the verification below meaningless.
+
+        `persist_usage` is read *before* downloading, and is the number the download is checked
+        against — not its own return value, which a provider that quietly wrote less could lie
+        about, but `dest` walked fresh on disk after the fact. A mismatch, or the download itself
+        raising, deletes nothing: not the remote copy, not the partial local one — the only
+        record of what actually happened is the exception raised to the caller.
+        """
+        job = self.job(job_id)
+        if job.state not in TERMINAL:
+            raise Conflict(f"job {job_id} is {job.state}, not finished: its checkpoint is still "
+                           "live and a future attempt may resume from it, so it cannot be pulled "
+                           "yet — wait for it to finish, or cancel it first")
+        if not self._is_cloud(job):
+            raise Conflict(f"job {job_id} ran on the local GPU; there is nothing on a provider "
+                           "to pull")
+        ex = self.executors.get(job.spec.target)
+        if not isinstance(ex, CloudExecutor):
+            raise Conflict(f"job {job_id} ran on {job.spec.target}, which has no provider on "
+                           "this pasard, so its persist dir cannot be reached")
+        dest = Path(dest) if dest is not None else self._pull_root() / str(job_id)
+        with self._pull_lock:
+            if job_id in self._pulling:
+                raise Conflict(f"job {job_id} is already being pulled")
+            self._pulling.add(job_id)
+        try:
+            return self._pull(job_id, job, ex.provider, dest, keep)
+        finally:
+            with self._pull_lock:
+                self._pulling.discard(job_id)
+
+    def _pull(self, job_id: int, job: Job, provider, dest: Path, keep: bool) -> dict:
+        if dest.exists() and any(dest.iterdir()):
+            raise Conflict(f"{dest} already exists and is not empty; pulling into it would "
+                           "merge with whatever is already there and make verification "
+                           "meaningless — pick another --to, or clear it out first")
+        files, size = provider.persist_usage(job_id)
+        if files == 0 and size == 0:
+            # Not an error: a job that never wrote a checkpoint is common, and there is nothing
+            # to delete at the provider either.
+            return {"job_id": job_id, "files": 0, "bytes": 0, "dest": None, "deleted": False}
+        provider.download_persist(job_id, dest)
+        found_files, found_bytes = _disk_usage(dest)
+        if found_files != files or found_bytes != size:
+            raise Conflict(
+                f"job {job_id}'s pull does not match what {job.spec.target} reported: expected "
+                f"{files} file(s)/{size} bytes, found {found_files}/{found_bytes} on disk at "
+                f"{dest}; nothing was deleted, at the provider or locally — check {dest} by hand "
+                "before trying again")
+        deleted = False
+        if not keep:
+            provider.delete_persist(job_id)
+            deleted = True
+        now = self.clock()
+        self.store.add_machine_event(
+            now, "pulled",
+            f"job {job_id}: pulled {files} file(s), {size} bytes to {dest}"
+            + (" and deleted the remote copy" if deleted else "; kept the remote copy"))
+        self.changed()
+        return {"job_id": job_id, "files": files, "bytes": size, "dest": str(dest),
+                "deleted": deleted}
 
     # ---- the loop
     def tick(self) -> None:

@@ -983,3 +983,188 @@ def test_only_one_job_probes_even_with_a_queue_behind_it(make_cloud, repo):
     assert daemon.job(first.id).state == State.RUNNING
     assert daemon.job(second.id).state == State.QUEUED
     assert len(provider.boxes) == 1
+
+
+# ---- pull
+
+def finish(daemon, provider, repo, **kw):
+    """Submit, approve, launch and complete one cloud job; returns its id."""
+    job_id = start(daemon, repo, **kw)
+    provider.finish(handle_of(daemon, job_id), 0)
+    daemon.tick()
+    assert daemon.job(job_id).state == State.COMPLETED
+    return job_id
+
+
+def test_pull_downloads_verifies_and_deletes_the_remote_copy(cloud, repo, tmp_path):
+    daemon, provider = cloud
+    job_id = finish(daemon, provider, repo)
+    provider.persist(job_id, "checkpoint.pt", b"weights")
+    provider.persist(job_id, "nested/metrics.json", b"{}")
+    dest = tmp_path / "out"
+
+    result = daemon.pull(job_id, dest=dest)
+
+    assert result == {"job_id": job_id, "files": 2, "bytes": len(b"weights") + len(b"{}"),
+                      "dest": str(dest), "deleted": True}
+    assert (dest / "checkpoint.pt").read_bytes() == b"weights"
+    assert (dest / "nested" / "metrics.json").read_bytes() == b"{}"
+    assert provider.deleted_persist == [job_id]
+    assert job_id not in provider.persisted
+    events = daemon.store.machine_events(50)
+    assert any(e["kind"] == "pulled" and str(job_id) in e["text"] and "deleted" in e["text"]
+              for e in events)
+
+
+def test_pull_keep_leaves_the_remote_copy(cloud, repo, tmp_path):
+    daemon, provider = cloud
+    job_id = finish(daemon, provider, repo)
+    provider.persist(job_id, "checkpoint.pt", b"weights")
+    dest = tmp_path / "out"
+
+    result = daemon.pull(job_id, dest=dest, keep=True)
+
+    assert result["deleted"] is False
+    assert (dest / "checkpoint.pt").read_bytes() == b"weights"
+    assert provider.deleted_persist == []
+    assert job_id in provider.persisted
+    events = daemon.store.machine_events(50)
+    assert any(e["kind"] == "pulled" and "kept" in e["text"] for e in events)
+
+
+def test_pull_default_destination_is_under_pull_dir(cloud, repo):
+    daemon, provider = cloud
+    job_id = finish(daemon, provider, repo)
+    provider.persist(job_id, "checkpoint.pt", b"weights")
+
+    result = daemon.pull(job_id)
+
+    expected = daemon.data_dir / "pulls" / str(job_id)
+    assert result["dest"] == str(expected)
+    assert (expected / "checkpoint.pt").read_bytes() == b"weights"
+
+
+def test_pull_nothing_on_the_volume_is_not_an_error(cloud, repo, tmp_path):
+    daemon, provider = cloud
+    job_id = finish(daemon, provider, repo)
+    dest = tmp_path / "out"
+
+    result = daemon.pull(job_id, dest=dest)
+
+    assert result == {"job_id": job_id, "files": 0, "bytes": 0, "dest": None, "deleted": False}
+    assert not dest.exists()
+    assert provider.deleted_persist == []
+
+
+@pytest.mark.parametrize("state_setup", ["awaiting", "queued", "running"])
+def test_pull_refuses_a_job_whose_checkpoint_is_still_live(cloud, repo, state_setup):
+    daemon, _provider = cloud
+    job = daemon.submit(cloud_spec(repo))
+    if state_setup in ("queued", "running"):
+        daemon.approve(job.id)
+    if state_setup == "running":
+        daemon.tick()
+        assert daemon.job(job.id).state == State.RUNNING
+    else:
+        assert daemon.job(job.id).state == State(state_setup)
+    with pytest.raises(Conflict, match="live|resum"):
+        daemon.pull(job.id)
+
+
+def test_pull_refuses_a_local_job(daemon, executor, tmp_path):
+    job = daemon.submit(JobSpec(command="true", est_runtime=60, cwd=str(tmp_path)))
+    daemon.tick()
+    unit = daemon.store.current_attempt(job.id).unit
+    executor.exit(unit, 0)
+    daemon.tick()
+    assert daemon.job(job.id).state == State.COMPLETED
+    with pytest.raises(Conflict, match="nothing|local"):
+        daemon.pull(job.id)
+
+
+def test_pull_refuses_a_cloud_target_whose_provider_is_gone(cloud, repo):
+    daemon, provider = cloud
+    job_id = finish(daemon, provider, repo)
+    # Simulate the provider having been dropped from this pasard without the job's history
+    # changing underneath it (see `_executor`/`approve`'s own "no provider" refusal).
+    del daemon.executors["fake"]
+    with pytest.raises(Conflict, match="provider"):
+        daemon.pull(job_id)
+
+
+def test_pull_refuses_when_dest_exists_and_is_not_empty(cloud, repo, tmp_path):
+    daemon, provider = cloud
+    job_id = finish(daemon, provider, repo)
+    provider.persist(job_id, "checkpoint.pt", b"weights")
+    dest = tmp_path / "out"
+    dest.mkdir()
+    (dest / "already-here.txt").write_text("do not touch")
+
+    with pytest.raises(Conflict, match="exists|empty"):
+        daemon.pull(job_id, dest=dest)
+
+    assert job_id in provider.persisted
+    assert (dest / "already-here.txt").read_text() == "do not touch"
+    assert not (dest / "checkpoint.pt").exists()
+
+
+def test_pull_refuses_a_second_pull_while_one_is_in_flight(cloud, repo, tmp_path):
+    daemon, provider = cloud
+    job_id = finish(daemon, provider, repo)
+    provider.persist(job_id, "checkpoint.pt", b"weights")
+    # No real second thread needed to prove the guard: `job_id` is added to `_pulling` before
+    # `download_persist` is ever called, so a second `pull()` made from *inside* the first
+    # download — reentrant, same thread — is already racing the exact window the guard exists
+    # for, and asserting on it is deterministic rather than timing-dependent.
+    caught = []
+
+    def on_download(jid):
+        try:
+            daemon.pull(job_id, dest=tmp_path / "second")
+        except Conflict as e:
+            caught.append(e)
+
+    provider.on_download = on_download
+
+    result = daemon.pull(job_id, dest=tmp_path / "first")
+
+    assert len(caught) == 1 and "already" in str(caught[0])
+    assert result["files"] == 1
+    # The guard was released once the first pull finished: a pull afterwards is not refused as
+    # "already being pulled" (there is simply nothing left, since the first one deleted it).
+    assert daemon.pull(job_id, dest=tmp_path / "third") == {
+        "job_id": job_id, "files": 0, "bytes": 0, "dest": None, "deleted": False}
+
+
+def test_pull_mismatch_leaves_both_copies_alone_and_reports_it(cloud, repo, tmp_path):
+    daemon, provider = cloud
+    job_id = finish(daemon, provider, repo)
+    provider.persist(job_id, "checkpoint.pt", b"weights")
+    provider.persist(job_id, "metrics.json", b"{}")
+    provider.short_download.add(job_id)
+    dest = tmp_path / "out"
+
+    with pytest.raises(Conflict) as exc:
+        daemon.pull(job_id, dest=dest)
+    message = str(exc.value)
+    assert "2" in message and "1" in message  # expected vs found file counts
+
+    assert provider.deleted_persist == []
+    assert job_id in provider.persisted
+    # The partial download is left exactly as it landed, not cleaned up.
+    assert len(list(dest.rglob("*"))) == 1
+
+
+def test_pull_leaves_everything_alone_when_the_download_itself_raises(cloud, repo, tmp_path):
+    daemon, provider = cloud
+    job_id = finish(daemon, provider, repo)
+    provider.persist(job_id, "checkpoint.pt", b"weights")
+    provider.fail_download.add(job_id)
+    dest = tmp_path / "out"
+
+    with pytest.raises(RuntimeError, match="pretend network failure"):
+        daemon.pull(job_id, dest=dest)
+
+    assert provider.deleted_persist == []
+    assert job_id in provider.persisted
+    assert not dest.exists()

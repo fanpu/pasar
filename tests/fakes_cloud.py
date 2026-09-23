@@ -39,6 +39,12 @@ class FakeProvider:
         self.deleted_persist: list[int] = []
         self.fail_launch: str | None = None
         self.next_id = 1
+        # Pull test hooks: a callback run from inside `download_persist` (to prove a pull made
+        # from within it — i.e. one already in flight — is refused) and a way to make it write
+        # less than `persist_usage` reported (to prove a mismatch is caught rather than trusted).
+        self.on_download = None
+        self.short_download: set[int] = set()
+        self.fail_download: set[int] = set()
 
     # --- provider interface
     def prepare_image(self, env: EnvSpec) -> str:
@@ -91,12 +97,19 @@ class FakeProvider:
         return len(files), sum(len(data) for data in files.values())
 
     def download_persist(self, job_id: int, dest) -> tuple[int, int]:
+        if self.on_download is not None:
+            self.on_download(job_id)
+        if job_id in self.fail_download:
+            raise RuntimeError(f"pretend network failure downloading job {job_id}'s persist dir")
         files = self.persisted.get(job_id)
         if not files:
             return 0, 0
         dest = Path(dest)
         dest.mkdir(parents=True, exist_ok=True)
-        for rel, data in files.items():
+        items = list(files.items())
+        if job_id in self.short_download:
+            items = items[:-1]  # write less than persist_usage reported
+        for rel, data in items:
             out = dest.joinpath(*rel.split("/"))
             out.parent.mkdir(parents=True, exist_ok=True)
             out.write_bytes(data)

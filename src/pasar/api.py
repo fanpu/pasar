@@ -83,6 +83,11 @@ class PatchBody(BaseModel):
     preempt: bool | None = None
 
 
+class PullBody(BaseModel):
+    to: str | None = None
+    keep: bool = False
+
+
 class RestartBody(BaseModel):
     mem: str | int | None = None
     whole_gpu: bool = False
@@ -311,6 +316,16 @@ def create_app(daemon: Daemon, *, prom: Prometheus | None = None, wake=lambda: N
         )
         wake()
         return view(job)
+
+    @app.post("/api/jobs/{job_id}/pull")
+    async def pull(job_id: int, body: PullBody | None = None):
+        body = body or PullBody()
+        dest = Path(body.to) if body.to else None
+        # A multi-GiB checkpoint can take minutes to fetch; off the event loop, like every other
+        # provider call the daemon makes on its own tick.
+        result = await asyncio.to_thread(daemon.pull, job_id, dest, body.keep)
+        wake()
+        return result
 
     # Deliberately not "/api/jobs/sparks": that would sit under the "/api/jobs/{job_id}" path and
     # only work as long as it stayed declared first, which is a trap for whoever reorders next.

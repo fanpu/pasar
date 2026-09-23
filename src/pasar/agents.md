@@ -282,6 +282,16 @@ instead, `reason` `pause_limit`), if the provider reclaims the machine (reason
 approving again in the web UI, the same as a fresh submission. An approved job starts a fresh
 attempt from the same code snapshot, with `PASAR_RESUMING=1`: it resumes from its last checkpoint
 if it wrote one under `pasar_job.persist_dir()`, or starts over if it never checkpointed.
+
+Whatever a cloud job wrote under `pasar_job.persist_dir()` stays on the provider's volume once
+the job is finished — nothing copies it back or deletes it on its own. `pasar pull <id> [--to
+DIR] [--keep]` fetches it to local disk (default `<pull_dir>/<id>/` on the daemon), verifies the
+file count and byte total against what the provider reports, and only then deletes the remote
+copy (`--keep` leaves it in place instead). Refused for a job that hasn't finished yet (its
+checkpoint is still live and the next attempt may resume from it), a local job (there is nothing
+on a provider to pull), or a destination that already has something in it. A job that never
+wrote anything reports that and exits `0` — not an error.
+
 `pasar wait` keeps waiting through
 all of these (they aren't a terminal state); use `--timeout` if you don't want to wait on a human.
 If the target stops being configured on this pasard, a running cloud job ends `failed` (reason
@@ -317,6 +327,7 @@ whatever `PASAR_URL` would be (default `http://127.0.0.1:8750`).
 | `PATCH /api/jobs/{id}` | Change `bid` and/or `preempt` (bool); a field left out keeps its value. |
 | `POST /api/jobs/{id}/cancel` | Cancel a job. |
 | `POST /api/jobs/{id}/restart` | Requeue a finished job, optionally changing `mem`/`whole_gpu`/`time`/`bid`/`retries`; `preempt` (default `false`) is not carried over. |
+| `POST /api/jobs/{id}/pull` | Cloud only. Fetch a finished job's persist dir to local disk and delete the remote copy once verified. Body: `to` (absolute path, default `<pull_dir>/{id}/`), `keep` (bool, default `false`, leaves the remote copy in place). |
 | `POST /api/jobs/{id}/approve` / `/reject` | Web-UI-only. **Agents must never call these**, including `approve?extend=1` — a person approves a cloud job's cost, and its cost overruns, not code. |
 | `GET /api/cloud` | Cloud targets: budget, spend today/this month, live rates, and jobs awaiting approval. |
 | `GET /api/jobs/{id}/logs` | A chunk of output (`?offset=N`), or an SSE stream with `?follow=true`. |
