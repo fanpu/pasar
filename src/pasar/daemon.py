@@ -287,6 +287,11 @@ class Daemon:
         target = self.cfg.clouds.get(job.spec.target)
         if target is None:
             raise Conflict(f"job {job_id} runs on {job.spec.target}, which is not configured")
+        if job.spec.target not in self.executors:
+            # Approving would only move it to the queue, where nothing launches it and nothing
+            # expires it: the job would wait there for good.
+            raise Conflict(f"cloud target {job.spec.target!r} has no provider on this pasard, "
+                           "so approving this job would leave it queued for good")
         now = self.clock()
         est = top = None
         try:
@@ -443,17 +448,25 @@ class Daemon:
     def _pause_overdue(self, now: float) -> None:
         """Stop a cloud attempt that has used the run time its approval bought. The wrapper
         enforces a limit of its own, but that one is the sandbox's backstop: pausing from here
-        keeps the decision (and the deadline it is measured against) with the daemon."""
-        for job_id in list(self.cloud_units):
-            job = self.job(job_id)
+        keeps the decision (and the deadline it is measured against) with the daemon.
+
+        Driven from the store, not from this tick's statuses: a status read that threw is not a
+        reason to let an attempt bill past the time somebody approved."""
+        for job in self.store.list_jobs([State.RUNNING]):
             target = self.cfg.clouds.get(job.spec.target)
-            if job.state != State.RUNNING or job.stop_requested or target is None:
+            if not self._is_cloud(job) or job.stop_requested or target is None:
                 continue
-            att = self.store.current_attempt(job_id)
-            if now - att.start_time < self._approved_seconds(job.spec, target):
+            att = self.store.current_attempt(job.id)
+            if att is None or now - att.start_time < self._approved_seconds(job.spec, target):
                 continue
-            self.store.update_job(job_id, state=State.STOPPING, stop_requested="pause")
-            self._executor(job).stop(att.unit)
+            try:
+                self._executor(job).stop(att.unit)
+            except Exception:
+                # Nothing was asked to stop, so leave the job running and ask again next tick
+                # rather than record a stop that never happened.
+                log.exception("job %s could not be paused at its approved run time", job.id)
+                continue
+            self.store.update_job(job.id, state=State.STOPPING, stop_requested="pause")
 
     def _sample_machine(self) -> None:
         total, available = self.probe.meminfo()

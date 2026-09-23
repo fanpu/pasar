@@ -20,6 +20,16 @@ from pasar.units import GiB
 from tests.fakes_cloud import FakeProvider, launch_request
 
 
+class StubMetrics:
+    """Stands in for the GPU metric recorder, which only knows about the local machine."""
+
+    def __init__(self):
+        self.recorded: list[tuple[int, int]] = []
+
+    def record(self, job_id, attempt, start, end):
+        self.recorded.append((job_id, attempt))
+
+
 @pytest.fixture
 def repo(tmp_path):
     """A git repository with a lockfile: the least a bundle needs."""
@@ -38,14 +48,14 @@ def make_cloud(tmp_path, clock, executor, probe):
     data = tmp_path / "data"
     data.mkdir()
 
-    def make(provider=None, **target_kw):
+    def make(provider=None, metrics=None, **target_kw):
         provider = provider or FakeProvider()
         base = {"name": "fake", "provider": "fake", "daily_budget": 50.0,
                 "monthly_budget": 300.0, "max_running": 2,
                 "env_passthrough": ["WANDB_API_KEY"]}
         cfg = Config(clouds={"fake": CloudTarget(**{**base, **target_kw})})
         daemon = Daemon(cfg, Store(data / "pasar.db"), executor, probe, data, clock=clock,
-                        providers={"fake": provider})
+                        metrics=metrics, providers={"fake": provider})
         return daemon, provider
 
     return make
@@ -170,6 +180,20 @@ def test_an_unpackageable_job_is_refused_as_a_bad_request(cloud, tmp_path):
     with pytest.raises(ValueError, match="git repository"):
         daemon.submit(cloud_spec(plain))
     assert daemon.store.list_jobs() == []
+
+
+def test_approving_on_a_target_without_a_provider_is_refused(make_cloud, repo, tmp_path, clock,
+                                                             executor, probe):
+    # Nothing would launch it and nothing would expire it: it would sit in the queue for good.
+    daemon, _ = make_cloud()
+    job = daemon.submit(cloud_spec(repo))
+    data = tmp_path / "data"
+    cfg = Config(clouds={"fake": CloudTarget(name="fake", provider="fake", daily_budget=50.0,
+                                             monthly_budget=300.0)})
+    without = Daemon(cfg, Store(data / "pasar.db"), executor, probe, data, clock=clock)
+    with pytest.raises(Conflict, match="no provider"):
+        without.approve(job.id)
+    assert without.job(job.id).state == State.AWAITING
 
 
 def test_a_target_without_a_provider_is_refused_rather_than_called_unknown(tmp_path, clock,
@@ -400,6 +424,39 @@ def test_a_cancel_still_beats_a_clean_exit(cloud, repo):
     provider.emit(h, ctl(daemon, job_id, {"t": "exit", "code": 0, "signal": None, "reason": None}))
     daemon.tick()
     assert daemon.job(job_id).state == State.CANCELLED
+
+
+def test_an_overdue_job_is_paused_even_when_its_status_cannot_be_read(make_cloud, repo, clock,
+                                                                      monkeypatch):
+    # The approved run time is the daemon's promise, not the provider's: a status read that
+    # threw this tick must not buy the attempt another tick of billing.
+    daemon, provider = make_cloud(timeout_factor=1.0)
+    job_id = start(daemon, repo)
+    h = handle_of(daemon, job_id)
+
+    def boom(_unit):
+        raise RuntimeError("the provider is not answering")
+
+    monkeypatch.setattr(daemon.executors["fake"], "status", boom)
+    clock.advance(3601)
+    daemon.tick()
+    assert provider.stopped == [h] and daemon.job(job_id).state == State.STOPPING
+
+
+def test_metrics_are_not_recorded_for_a_cloud_attempt(make_cloud, repo, tmp_path, executor):
+    # The recorder summarises this machine's GPU over the attempt's window, which says nothing
+    # about a job that ran somewhere else.
+    metrics = StubMetrics()
+    daemon, provider = make_cloud(metrics=metrics)
+    job_id = start(daemon, repo)
+    provider.finish(handle_of(daemon, job_id), 0)
+    local = daemon.submit(JobSpec(command="python x.py", est_runtime=60, cwd=str(tmp_path)))
+    daemon.tick()
+    assert daemon.job(job_id).state == State.COMPLETED
+    executor.exit(f"pasar-job-{local.id}-1")
+    daemon.tick()
+    assert daemon.job(local.id).state == State.COMPLETED
+    assert metrics.recorded == [(local.id, 1)]
 
 
 def test_cancelling_a_running_cloud_job_stops_it(cloud, repo):
