@@ -100,3 +100,24 @@ def test_cloud_target_requires_budget(tmp_path):
 
 def test_no_clouds_by_default(tmp_path):
     assert load_config(tmp_path / "missing.toml").clouds == {}
+
+
+def test_cloud_target_rejects_unknown_keys(tmp_path):
+    p = tmp_path / "config.toml"
+    p.write_text('[clouds.modal]\nprovider = "modal"\nbudget = { daily = 50.0 }\nmax_runing = 4\n')
+    with pytest.raises(ValueError, match="unknown config keys"):
+        load_config(p)
+
+
+def test_cloud_target_rejects_nonpositive_daily_budget(tmp_path):
+    p = tmp_path / "config.toml"
+    p.write_text('[clouds.modal]\nprovider = "modal"\nbudget = { daily = 0 }\n')
+    with pytest.raises(ValueError, match="budget.daily must be positive"):
+        load_config(p)
+
+
+def test_cloud_target_rejects_nonpositive_monthly_budget(tmp_path):
+    p = tmp_path / "config.toml"
+    p.write_text('[clouds.modal]\nprovider = "modal"\nbudget = { daily = 50.0, monthly = -10.0 }\n')
+    with pytest.raises(ValueError, match="budget.monthly must be positive"):
+        load_config(p)

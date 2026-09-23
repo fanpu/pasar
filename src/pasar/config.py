@@ -15,7 +15,7 @@ _DURATION_KEYS = {"default_grace", "pressure_sustain"}
 
 @dataclass
 class CloudTarget:
-    """Cloud provider target configuration."""
+    """Cloud provider target; budget.daily gates whether it can be used."""
     name: str
     provider: str
     daily_budget: float
@@ -33,15 +33,30 @@ class CloudTarget:
 
 
 def _cloud_target(name: str, raw: dict) -> CloudTarget:
-    """Parse cloud target from config dict."""
+    known_keys = {"budget", "provider", "max_running", "timeout_factor", "max_runtime",
+                  "approval_ttl", "env_passthrough", "volumes", "bundle_max", "data_max",
+                  "base_image", "rates"}
+    unknown = sorted(set(raw) - known_keys)
+    if unknown:
+        raise ValueError(f"unknown config keys in cloud target {name!r}: {', '.join(unknown)}")
+
     budget = raw.get("budget") or {}
-    if not budget.get("daily"):
+    if "daily" not in budget:
         raise ValueError(f"cloud target {name!r} needs budget.daily before it can be used")
+
+    daily_budget = float(budget["daily"])
+    if daily_budget <= 0:
+        raise ValueError(f"cloud target {name!r} budget.daily must be positive, got {daily_budget}")
+
+    monthly_budget = float(budget.get("monthly", daily_budget * 10))
+    if monthly_budget <= 0:
+        raise ValueError(f"cloud target {name!r} budget.monthly must be positive, got {monthly_budget}")
+
     return CloudTarget(
         name=name,
         provider=raw.get("provider") or name,
-        daily_budget=float(budget["daily"]),
-        monthly_budget=float(budget.get("monthly", budget["daily"] * 10)),
+        daily_budget=daily_budget,
+        monthly_budget=monthly_budget,
         max_running=int(raw.get("max_running", 2)),
         timeout_factor=float(raw.get("timeout_factor", 1.5)),
         max_runtime=min(parse_duration(raw.get("max_runtime", "24h")), 86400),
