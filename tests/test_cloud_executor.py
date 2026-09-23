@@ -5,7 +5,13 @@ import pytest
 
 from pasar.cloud.base import Phase
 from pasar.cloud.bundle import Bundle, EnvSpec
-from pasar.cloud.executor import STOP_MARGIN, TIMEOUT_MARGIN, CloudExecutor, parse_unit
+from pasar.cloud.executor import (
+    STOP_MARGIN,
+    TERMINATE_RETRY,
+    TIMEOUT_MARGIN,
+    CloudExecutor,
+    parse_unit,
+)
 from pasar.config import CloudTarget
 from pasar.db import Store
 from pasar.executor.base import CloudLaunchInfo, LaunchError, LaunchRequest
@@ -19,6 +25,28 @@ LIMIT = 3600
 
 def ctl(obj):
     return "\x1epasar:" + TOKEN + " " + json.dumps(obj) + "\n"
+
+
+def state_path(tmp_path, job_id=1, attempt=1):
+    return tmp_path / "jobs" / str(job_id) / f"cloud-{attempt}.json"
+
+
+def _raise(*args, **kw):
+    raise RuntimeError("bookkeeping is broken")
+
+
+class RefusesToTerminate(FakeProvider):
+    """A provider that fails the first `failures` terminate calls, then behaves."""
+
+    def __init__(self, failures=1):
+        super().__init__()
+        self.failures = failures
+
+    def terminate(self, handle):
+        if self.failures:
+            self.failures -= 1
+            raise RuntimeError("the provider is having a moment")
+        super().terminate(handle)
 
 
 def make_target(**kw):
@@ -84,9 +112,29 @@ def test_each_attempts_token_is_unpredictable():
 
 
 def test_launch_caps_the_timeout_at_the_targets_max_runtime(tmp_path):
+    """The wrapper's own limit has to be cut with the timeout. A sandbox killed before the
+    wrapper reaches its limit leaves no exit line and reads as a reclaim, which pauses the job
+    and pays to run it again from the start, over and over."""
     ex, provider, _ = make_executor(tmp_path, max_runtime=7200)
     ex.launch(make_request(tmp_path, limit=86400))
-    assert provider.boxes["sb-1"].req.timeout == 7200
+    req = provider.boxes["sb-1"].req
+    assert req.timeout == 7200
+    assert f"--limit {7200 - GRACE - TIMEOUT_MARGIN}" in req.command
+
+
+def test_an_uncapped_limit_reaches_the_wrapper_whole(tmp_path):
+    ex, provider, _ = make_executor(tmp_path, max_runtime=86400)
+    ex.launch(make_request(tmp_path, limit=LIMIT))
+    req = provider.boxes["sb-1"].req
+    assert f"--limit {LIMIT}" in req.command
+    assert req.timeout == LIMIT + GRACE + TIMEOUT_MARGIN
+
+
+def test_a_max_runtime_with_no_room_for_the_grace_is_refused(tmp_path):
+    ex, provider, _ = make_executor(tmp_path, max_runtime=60)
+    with pytest.raises(LaunchError, match="too little"):
+        ex.launch(make_request(tmp_path, limit=3600))
+    assert provider.boxes == {}
 
 
 def test_status_maps_phases_to_unit_state(tmp_path):
@@ -144,6 +192,27 @@ def test_a_stop_we_never_asked_for_is_a_reclaim_even_when_the_wrapper_saw_the_si
     assert ex.status(unit).result == "reclaimed"
 
 
+def test_a_clean_wrapper_exit_stays_a_success_when_the_provider_ended_it(tmp_path):
+    """The provider reports 137 and "I ended it" for a sandbox it reaped after the job was
+    already done. Calling that a reclaim would pause a finished job and pay to run it again."""
+    ex, provider, _, unit = launched(tmp_path)
+    provider.start("sb-1")
+    provider.emit("sb-1", ctl({"t": "exit", "code": 0, "signal": None}))
+    ex.poll_output()
+    provider.finish("sb-1", 137, by_provider=True)
+    st = ex.status(unit)
+    assert st.exited and st.exit_code == 0 and st.result == "success"
+
+
+def test_a_failing_wrapper_exit_is_not_reclassified_by_the_provider(tmp_path):
+    ex, provider, _, unit = launched(tmp_path)
+    provider.start("sb-1")
+    provider.emit("sb-1", ctl({"t": "exit", "code": 1, "signal": None}))
+    ex.poll_output()
+    provider.finish("sb-1", 137, by_provider=True)
+    assert ex.status(unit).result == "exit-code"
+
+
 def test_the_wrappers_time_limit_surfaces_as_time_limit(tmp_path):
     ex, provider, _, unit = launched(tmp_path)
     provider.start("sb-1")
@@ -191,6 +260,19 @@ def test_the_grace_deadline_fires_once_not_every_tick(tmp_path):
     ex.status(unit)
     ex.status(unit)
     assert provider.terminated == ["sb-1"]
+
+
+def test_a_terminate_the_provider_refuses_is_asked_again(tmp_path):
+    clock = FakeClock()
+    ex, provider, _, unit = launched(tmp_path, clock=clock, provider=RefusesToTerminate())
+    provider.start("sb-1")
+    ex.stop(unit)
+    clock.advance(GRACE + STOP_MARGIN)
+    assert ex.status(unit).exited is False  # the provider refused; nothing has ended it
+    clock.advance(TERMINATE_RETRY)
+    st = ex.status(unit)
+    assert provider.status("sb-1").phase is Phase.EXITED
+    assert st.exited and st.result == "stopped"
 
 
 def test_kill_terminates_immediately(tmp_path):
@@ -329,6 +411,27 @@ def test_adopt_declines_a_unit_it_has_no_record_of(tmp_path):
     assert resumed.status(unit) is None
 
 
+@pytest.mark.parametrize("text", ["", "{not json", '["a list"]',
+                                  '{"unit": "cloud:fake:sb-1"}',
+                                  '{"unit": "cloud:fake:sb-1", "attempt": 1, "handle": "sb-1"}'])
+def test_adopt_declines_damaged_saved_state(tmp_path, text):
+    """One unusable file must not take out startup reconciliation for every other cloud job."""
+    _, _, _, unit = launched(tmp_path)
+    state_path(tmp_path).write_text(text)
+    resumed, _, _ = make_executor(tmp_path)
+    assert resumed.adopt(1, unit) is False
+    assert resumed.status(unit) is None
+
+
+def test_adopt_reads_past_an_unusable_file_from_another_attempt(tmp_path):
+    ex, provider, _ = make_executor(tmp_path)
+    ex.launch(make_request(tmp_path, attempt=1))
+    ex.launch(make_request(tmp_path, attempt=2))
+    state_path(tmp_path, attempt=1).write_text("{broken")
+    resumed, _, _ = make_executor(tmp_path, provider=provider)
+    assert resumed.adopt(1, "cloud:fake:sb-2") is True
+
+
 def test_the_wrappers_exit_ends_the_attempt_even_while_the_sandbox_lingers(tmp_path):
     ex, provider, _, unit = launched(tmp_path)
     provider.start("sb-1")
@@ -344,6 +447,19 @@ def test_a_vanished_handle_reports_nothing_so_the_daemon_can_call_it_lost(tmp_pa
     provider.start("sb-1")
     provider.forget("sb-1")
     assert ex.status(unit) is None
+
+
+def test_a_vanished_attempt_stops_being_tracked(tmp_path):
+    """Nothing keeps reading a handle the provider has forgotten, and the attempt gets one last
+    terminate in case the provider only seemed to forget a sandbox that is still billing."""
+    ex, provider, _, unit = launched(tmp_path)
+    provider.start("sb-1")
+    provider.forget("sb-1")
+    assert ex.status(unit) is None
+    assert ex.unit_of(1, 1) is None and not state_path(tmp_path).exists()
+    assert provider.terminated == ["sb-1"]
+    ex.poll_output()  # nothing left to read from
+    assert ex.status(unit) is None and provider.terminated == ["sb-1"]
 
 
 def test_a_handle_that_vanishes_after_its_exit_still_reports_the_exit(tmp_path):
@@ -374,8 +490,10 @@ def test_cleanup_forgets_the_unit_and_its_state_file(tmp_path):
     provider.finish("sb-1", 0)
     ex.cleanup(unit)
     assert ex.status(unit) is None and ex.unit_of(1, 1) is None
-    assert not (tmp_path / "jobs" / "1" / "cloud.json").exists()
-    assert provider.terminated == []
+    assert not state_path(tmp_path).exists()
+    # Ending an attempt that is already over costs nothing and leaves its exit alone.
+    assert provider.terminated == ["sb-1"]
+    assert provider.status("sb-1").exit_code == 0
     ex.cleanup(unit)  # a second cleanup is harmless
 
 
@@ -391,6 +509,34 @@ def test_cleanup_ends_a_sandbox_that_outlived_its_job(tmp_path):
 
 def test_the_state_file_is_private_to_the_user(tmp_path):
     launched(tmp_path)
-    state = tmp_path / "jobs" / "1" / "cloud.json"
-    assert state.stat().st_mode & 0o077 == 0
-    assert json.loads(state.read_text())["token"] == TOKEN
+    assert state_path(tmp_path).stat().st_mode & 0o077 == 0
+    assert json.loads(state_path(tmp_path).read_text())["token"] == TOKEN
+
+
+def test_a_leftover_temporary_file_cannot_widen_the_tokens_permissions(tmp_path):
+    d = tmp_path / "jobs" / "1"
+    d.mkdir(parents=True)
+    leftover = d / "cloud-1.json.tmp"
+    leftover.touch(mode=0o644)
+    launched(tmp_path)
+    assert state_path(tmp_path).stat().st_mode & 0o077 == 0
+
+
+def test_each_attempt_saves_its_own_state(tmp_path):
+    ex, _, _ = make_executor(tmp_path)
+    ex.launch(make_request(tmp_path, attempt=1))
+    ex.launch(make_request(tmp_path, attempt=2))
+    assert json.loads(state_path(tmp_path, attempt=1).read_text())["handle"] == "sb-1"
+    assert json.loads(state_path(tmp_path, attempt=2).read_text())["handle"] == "sb-2"
+    ex.cleanup(ex.unit_of(1, 1))
+    assert not state_path(tmp_path, attempt=1).exists()
+    assert state_path(tmp_path, attempt=2).exists()
+
+
+def test_a_launch_that_cannot_be_recorded_ends_the_sandbox(tmp_path, monkeypatch):
+    ex, provider, _ = make_executor(tmp_path)
+    monkeypatch.setattr(CloudExecutor, "_track", _raise)
+    with pytest.raises(LaunchError):
+        ex.launch(make_request(tmp_path))
+    assert provider.terminated == ["sb-1"]
+    assert ex.unit_of(1, 1) is None

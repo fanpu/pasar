@@ -26,7 +26,8 @@ log = logging.getLogger(__name__)
 EVENTS_PATH = "/tmp/pasar/events.jsonl"  # a plain file in the container; the wrapper tails it
 TIMEOUT_MARGIN = 60  # seconds the sandbox outlives the job's own limit and grace
 STOP_MARGIN = 15  # seconds past the grace before we stop asking and pull the plug
-STATE_FILE = "cloud.json"
+TERMINATE_RETRY = 30  # seconds before asking again when a provider refuses to end an attempt
+STATE_NAME = "cloud-{attempt}.json"
 
 
 def unit_name(target: str, handle: str) -> str:
@@ -77,24 +78,31 @@ class CloudExecutor:
         info = req.cloud
         if info is None:
             raise LaunchError("a cloud attempt needs LaunchRequest.cloud")
+        handle = unit = None
         try:
             gpu, count = parse_gpu(info.gpu)
-            command = self._command(req, info)
+            limit = self._limit(info.limit, req.grace)
+            command = self._command(req, info, limit)
             image_key = self.provider.prepare_image(info.bundle.env)
             handle = self.provider.launch(CloudLaunch(
                 job_id=info.job_id, attempt=info.attempt, bundle=info.bundle,
                 image_key=image_key, command=command, rel_cwd=info.bundle.rel_cwd,
                 gpu=gpu, gpu_count=count, env=dict(info.env),
                 volumes=dict(self.target.volumes),
-                timeout=min(info.limit + req.grace + TIMEOUT_MARGIN, self.target.max_runtime),
+                timeout=limit + req.grace + TIMEOUT_MARGIN,
                 tags={"pasar_job": str(info.job_id), "pasar_attempt": str(info.attempt),
                       "pasar_target": self.target.name},
             ))
+            unit = unit_name(self.target.name, handle)
+            self._track(unit, info.job_id, info.attempt, handle, info.token, req.grace)
+            self._persist(unit)
         except Exception as e:
+            if handle is not None:
+                # Bookkeeping failed around a sandbox that is already running, and nobody will
+                # be watching it: end it rather than hand the job a bill nobody asked for.
+                self._live.pop(unit, None)
+                self._end(handle)
             raise LaunchError(f"{self.target.name}: {e}") from e
-        unit = unit_name(self.target.name, handle)
-        self._track(unit, info.job_id, info.attempt, handle, info.token, req.grace)
-        self._persist(unit)
 
     def status(self, unit: str) -> UnitState | None:
         rec = self._live.get(unit)
@@ -112,11 +120,21 @@ class CloudExecutor:
                 return UnitState(unit, False, st.phase.value, None, None, None)
         if rec.pump.exit_info is None:
             # The exit line is the last thing the wrapper writes, so an attempt that ended
-            # between two ticks still has its own account of why waiting in the provider.
-            rec.pump.poll()
-            self._persist(unit)
+            # between two ticks still has its own account of why waiting in the provider. A
+            # read that fails here must not stall the attempt forever: the provider's own,
+            # blunter report is the fallback the exit states below are written around.
+            try:
+                rec.pump.poll()
+            except Exception:
+                log.exception("a last read of %s failed", unit)
+            else:
+                self._persist(unit)
             if st.phase is Phase.GONE and rec.pump.exit_info is None:
-                return None  # nothing left to ask; the daemon settles it as a lost attempt
+                # The daemon settles this as a lost attempt and never asks again, so this is
+                # the last chance to end a sandbox the provider only seems to have forgotten.
+                self._terminate(rec)
+                self._forget(unit)
+                return None
         return self._exit_state(unit, rec, st)
 
     def stop(self, unit: str) -> None:
@@ -141,16 +159,13 @@ class CloudExecutor:
 
     def cleanup(self, unit: str) -> None:
         """Forget the attempt, and make sure it is not still billing: an attempt whose wrapper
-        reported its exit while the sandbox around it lingers has to be told to end."""
-        rec = self._live.pop(unit, None)
+        reported its exit while the sandbox around it lingers has to be told to end. Ending one
+        that is already over costs nothing, so this never asks first."""
+        rec = self._live.get(unit)
         if rec is None:
             return
-        try:
-            if self.provider.status(rec.handle).phase not in (Phase.EXITED, Phase.GONE):
-                self.provider.terminate(rec.handle)
-        except Exception:
-            log.exception("checking %s was really over failed", unit)
-        (self.job_dir(rec.job_id) / STATE_FILE).unlink(missing_ok=True)
+        self._end(rec.handle)
+        self._forget(unit)
 
     def list_units(self) -> list[str]:
         return [unit_name(self.target.name, handle)
@@ -175,27 +190,45 @@ class CloudExecutor:
                      if r.job_id == job_id and r.attempt == attempt), None)
 
     def adopt(self, job_id: int, unit: str) -> bool:
-        """Pick an attempt back up after a restart, from the state saved beside its output."""
+        """Pick an attempt back up after a restart, from the state saved beside its output.
+
+        Damaged or half-written state is treated as no state at all: this runs once per active
+        cloud job at startup, where one unreadable file must not stop the others being found.
+        """
         if unit in self._live:
             return True
-        try:
-            state = json.loads((self.job_dir(job_id) / STATE_FILE).read_text())
-        except (OSError, ValueError):
-            return False
-        if state.get("unit") != unit:
-            return False
-        rec = self._track(unit, job_id, state["attempt"], state["handle"], state["token"],
-                          state["grace"])
-        rec.pump.cursor = state.get("cursor", 0)
-        rec.pump.exit_info = state.get("exit")
-        rec.asked_to_stop = state.get("asked_to_stop", False)
-        rec.stop_deadline = state.get("stop_deadline")
-        return True
+        for state in self._saved(job_id):
+            if state.get("unit") != unit:
+                continue
+            try:
+                rec = self._track(unit, job_id, int(state["attempt"]), str(state["handle"]),
+                                  str(state["token"]), int(state["grace"]))
+                rec.pump.cursor = int(state.get("cursor") or 0)
+                rec.pump.exit_info = state.get("exit")
+                rec.asked_to_stop = bool(state.get("asked_to_stop"))
+                deadline = state.get("stop_deadline")
+                rec.stop_deadline = None if deadline is None else float(deadline)
+            except (KeyError, TypeError, ValueError):
+                log.warning("the saved state of %s is unusable", unit)
+                self._live.pop(unit, None)
+                return False
+            return True
+        return False
 
     # ---- internals
-    def _command(self, req: LaunchRequest, info: CloudLaunchInfo) -> str:
+    def _limit(self, asked: int, grace: int) -> int:
+        """The run time the wrapper enforces, which must end before the sandbox's own timeout
+        does. A provider that kills the sandbox first leaves no exit line and looks exactly
+        like a reclaim, which would pause the job and pay to run it again from the start."""
+        room = self.target.max_runtime - grace - TIMEOUT_MARGIN
+        if room <= 0:
+            raise LaunchError(f"{self.target.name} allows {self.target.max_runtime}s per "
+                              f"attempt, too little for a {grace}s grace period")
+        return min(asked, room)
+
+    def _command(self, req: LaunchRequest, info: CloudLaunchInfo, limit: int) -> str:
         spec = json.loads((Path(req.job_dir) / "launch.json").read_text())
-        return wrapper_command(spec["command"], info.token, info.limit, req.grace)
+        return wrapper_command(spec["command"], info.token, limit, req.grace)
 
     def _track(self, unit: str, job_id: int, attempt: int, handle: str, token: str,
                grace: int) -> _Live:
@@ -210,33 +243,76 @@ class CloudExecutor:
         if rows:
             self.store.add_gpu_samples(job_id, attempt, self.clock(), rows)
 
+    def _end(self, handle: str) -> bool:
+        """Ask the provider to end an attempt now; False if it refused, so it can be asked
+        again. Ending one that is already over is a no-op at every provider we support."""
+        try:
+            self.provider.terminate(handle)
+        except Exception:
+            log.exception("terminating %s failed", handle)
+            return False
+        return True
+
     def _terminate(self, rec: _Live) -> None:
         rec.asked_to_stop = True
-        rec.stop_deadline = None  # asked once; a second terminate would say nothing new
-        try:
-            self.provider.terminate(rec.handle)
-        except Exception:
-            log.exception("terminating %s failed", rec.handle)
+        # The deadline is only cleared once the provider has really taken it: a sandbox nobody
+        # ends keeps billing until its own timeout, so a refusal has to be asked again.
+        rec.stop_deadline = None if self._end(rec.handle) else self.clock() + TERMINATE_RETRY
 
     def _exit_state(self, unit: str, rec: _Live, st) -> UnitState:
-        info = rec.pump.exit_info or {}
-        code = info.get("code") if info else st.exit_code
-        signal = info.get("signal")
-        reason = info.get("reason")
-        if reason == "time_limit":
-            result = "time_limit"
-        elif rec.asked_to_stop:
-            result = "stopped"
-        elif st.ended_by_provider or reason == "stopped":
-            # Nobody here asked, so the provider took the machine back.
-            result = "reclaimed"
-        elif signal:
-            result = "signal"
-        elif code == 0:
-            result = "success"
+        """What ended the attempt. The wrapper's own account wins whenever it left one: the
+        provider reports 137 for every termination, so it cannot tell a job that finished from
+        one whose machine was taken away, and calling a finished job reclaimed would pause it
+        and pay to run it a second time."""
+        info = rec.pump.exit_info
+        if info is not None:
+            code, signal, reason = info.get("code"), info.get("signal"), info.get("reason")
+            if reason == "time_limit":
+                result = "time_limit"
+            elif reason == "stopped":
+                # A reclaim reaches the wrapper as the same SIGTERM a stop does; only our own
+                # record of having asked tells them apart.
+                result = "stopped" if rec.asked_to_stop else "reclaimed"
+            elif signal:
+                result = "signal"
+            elif code == 0:
+                result = "success"
+            else:
+                result = "exit-code"
         else:
-            result = "exit-code"
+            code, signal = st.exit_code, None
+            if rec.asked_to_stop:
+                result = "stopped"
+            elif st.ended_by_provider:
+                result = "reclaimed"
+            else:
+                result = "success" if code == 0 else "exit-code"
         return UnitState(unit, True, result, code, signal, None)
+
+    def _state_path(self, job_id: int, attempt: int) -> Path:
+        """One file per attempt, so a relaunch can never read the attempt before it."""
+        return self.job_dir(job_id) / STATE_NAME.format(attempt=attempt)
+
+    def _saved(self, job_id: int) -> list[dict]:
+        states = []
+        try:
+            paths = sorted(self.job_dir(job_id).glob(STATE_NAME.format(attempt="*")))
+        except OSError:
+            return states
+        for path in paths:
+            try:
+                state = json.loads(path.read_text())
+            except (OSError, ValueError):
+                log.warning("%s is not readable saved state", path)
+                continue
+            if isinstance(state, dict):
+                states.append(state)
+        return states
+
+    def _forget(self, unit: str) -> None:
+        rec = self._live.pop(unit, None)
+        if rec is not None:
+            self._state_path(rec.job_id, rec.attempt).unlink(missing_ok=True)
 
     def _persist(self, unit: str) -> None:
         """Save what a restarted daemon needs to keep following this attempt: where its output
@@ -245,7 +321,7 @@ class CloudExecutor:
         rec = self._live.get(unit)
         if rec is None:
             return
-        path = self.job_dir(rec.job_id) / STATE_FILE
+        path = self._state_path(rec.job_id, rec.attempt)
         tmp = path.with_name(path.name + ".tmp")
         try:
             fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
@@ -254,6 +330,9 @@ class CloudExecutor:
                            "attempt": rec.attempt, "grace": rec.grace, "cursor": rec.pump.cursor,
                            "asked_to_stop": rec.asked_to_stop, "stop_deadline": rec.stop_deadline,
                            "exit": rec.pump.exit_info}, f)
+            # O_CREAT leaves an existing file's mode alone, and a leftover .tmp from a crash
+            # would hand the token whatever mode it had.
+            os.chmod(tmp, 0o600)
             tmp.replace(path)
         except OSError:
             # Worth a line in the log, but never worth failing a running attempt over: this
