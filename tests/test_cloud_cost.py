@@ -43,6 +43,18 @@ def test_missing_mem_rate_raises():
         hourly_rate(rates, "H100", 1)
 
 
+def test_zero_gpu_rate_raises():
+    rates = {**RATES, "gpu_hour_cost_h100": 0.0}
+    with pytest.raises(KeyError):
+        hourly_rate(rates, "H100", 1)
+
+
+def test_negative_cpu_rate_raises():
+    rates = {**RATES, "cpu_hour_cost_sandbox": -0.1}
+    with pytest.raises(KeyError):
+        hourly_rate(rates, "H100", 1)
+
+
 def test_estimate_is_rate_times_hours():
     assert estimate(4.0, 5400) == pytest.approx(6.0)
 
@@ -109,20 +121,31 @@ def test_record_overwrites_the_estimate_with_billed_when_given(store, ledger, cl
     assert ledger.spent_day("modal") == pytest.approx(7.25)
 
 
-def test_committed_sums_running_jobs_remaining_estimate(store, ledger, clock):
+def test_committed_never_drops_below_the_estimate_while_running(store, ledger, clock):
+    """A running job is still billing, so its estimate can never be counted as already spent —
+    not even once it is partway through its own estimated runtime, where elapsed/est_runtime
+    alone would suggest a smaller number."""
     j = store.insert_job(spec(est_runtime=3600), 1000, clock(), None)
     store.insert_attempt(Attempt(j, 1, "cloud:modal:sb-1", clock()))
     ledger.record("modal", j, 1, 4.0)
     clock.advance(1800)  # half the estimated runtime has elapsed
-    assert ledger.committed("modal") == pytest.approx(2.0)
+    assert ledger.committed("modal") == pytest.approx(4.0)
 
 
-def test_committed_floors_at_zero_once_a_job_overruns_its_estimate(store, ledger, clock):
+def test_committed_grows_past_the_estimate_once_a_job_overruns_it(store, ledger, clock):
     j = store.insert_job(spec(est_runtime=3600), 1000, clock(), None)
     store.insert_attempt(Attempt(j, 1, "cloud:modal:sb-1", clock()))
     ledger.record("modal", j, 1, 4.0)
     clock.advance(7200)  # twice the estimated runtime has elapsed
-    assert ledger.committed("modal") == 0.0
+    assert ledger.committed("modal") == pytest.approx(8.0)
+
+
+def test_committed_treats_a_non_positive_est_runtime_as_full_estimate(store, ledger, clock):
+    j = store.insert_job(spec(est_runtime=0), 1000, clock(), None)
+    store.insert_attempt(Attempt(j, 1, "cloud:modal:sb-1", clock()))
+    ledger.record("modal", j, 1, 4.0)
+    clock.advance(9999)
+    assert ledger.committed("modal") == pytest.approx(4.0)
 
 
 def test_committed_ignores_finished_attempts(store, ledger, clock):
@@ -139,6 +162,15 @@ def test_committed_ignores_billed_rows(store, ledger, clock):
     assert ledger.committed("modal") == 0.0
 
 
+def test_record_keeps_billed_when_re_recorded_with_none(store, ledger, clock):
+    """A restart re-running launch-time bookkeeping calls record() again with billed=None; a
+    real billed figure already on the row must survive that, not revert to the estimate."""
+    j = store.insert_job(spec(), 1000, clock(), None)
+    ledger.record("modal", j, 1, 5.0, billed=7.25)
+    ledger.record("modal", j, 1, 5.0)
+    assert ledger.spent_day("modal") == pytest.approx(7.25)
+
+
 def test_committed_ignores_a_stale_attempt_after_a_retry(store, ledger, clock):
     """A row recorded for attempt 1 must not still count once the job is on attempt 2."""
     j = store.insert_job(spec(est_runtime=3600), 1000, clock(), None)
@@ -149,8 +181,13 @@ def test_committed_ignores_a_stale_attempt_after_a_retry(store, ledger, clock):
 
 
 def test_day_boundary_splits_spend_between_days(store, ledger, clock):
-    before = dt.datetime(2026, 1, 1, 23, 59, 59, tzinfo=dt.UTC).timestamp()
-    after = dt.datetime(2026, 1, 2, 0, 0, 1, tzinfo=dt.UTC).timestamp()
+    """Days are local calendar days: build the boundary from naive local datetimes (Python
+    interprets a naive `.timestamp()` using the host's own timezone, DST and all, for that
+    date) rather than hardcoding UTC, so this stays correct wherever the daemon runs and needs
+    no real wall-clock date."""
+    midnight = dt.datetime(2026, 1, 2, 0, 0, 0)  # noqa: DTZ001 - naive on purpose, see docstring
+    before = (midnight - dt.timedelta(seconds=1)).timestamp()
+    after = (midnight + dt.timedelta(seconds=1)).timestamp()
 
     clock.t = before
     j1 = store.insert_job(spec(), 1000, clock(), None)

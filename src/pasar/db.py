@@ -288,12 +288,16 @@ class Store:
                            estimated: float, billed: float | None) -> None:
         """Insert one attempt's cost row, or refresh its figures if it already has one. `day`
         only takes effect on the first call for this (target, job_id, attempt): it is left out
-        of the update so a later call cannot move a row to a different day."""
+        of the update so a later call cannot move a row to a different day. `billed` is sticky:
+        once a real figure is recorded, a later call made with `billed=None` (a re-run of
+        launch-time bookkeeping, say, after a restart) must not erase it and fall back to the
+        estimate."""
         self._x(
             "INSERT INTO cloud_spend (target, job_id, attempt, day, estimated, billed)"
             " VALUES (?, ?, ?, ?, ?, ?)"
             " ON CONFLICT(target, job_id, attempt)"
-            " DO UPDATE SET estimated = excluded.estimated, billed = excluded.billed",
+            " DO UPDATE SET estimated = excluded.estimated,"
+            " billed = COALESCE(excluded.billed, cloud_spend.billed)",
             (target, job_id, attempt, day, estimated, billed),
         )
 

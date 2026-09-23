@@ -14,15 +14,22 @@ from collections.abc import Callable
 
 def hourly_rate(rates: dict, gpu: str, count: int, cpu: float = 4.0, mem_gib: float = 32.0) -> float:
     """Dollars per hour for `count` GPUs of `gpu` plus the CPU and memory the sandbox around
-    them costs. The GPU rate alone understates the job; an unpriced GPU or a rate table missing
-    the sandbox's own rates raises `KeyError` rather than quietly pricing that part at zero."""
+    them costs. The GPU rate alone understates the job; an unpriced GPU, a rate table missing
+    the sandbox's own rates, or a rate that is zero or negative all raise `KeyError` rather than
+    quietly pricing that part at zero or less — nothing gets approved against a price that
+    cannot be real."""
     gpu_key = f"gpu_hour_cost_{gpu.lower()}"
     if gpu_key not in rates:
         raise KeyError(f"no rate for GPU {gpu!r}; refusing to estimate blind")
     if "cpu_hour_cost_sandbox" not in rates or "mem_gib_hour_cost_sandbox" not in rates:
         raise KeyError("rate table is missing the sandbox's CPU or memory rate")
-    return (float(count) * float(rates[gpu_key]) + cpu * float(rates["cpu_hour_cost_sandbox"])
-            + mem_gib * float(rates["mem_gib_hour_cost_sandbox"]))
+    gpu_rate = float(rates[gpu_key])
+    cpu_rate = float(rates["cpu_hour_cost_sandbox"])
+    mem_rate = float(rates["mem_gib_hour_cost_sandbox"])
+    if gpu_rate <= 0 or cpu_rate <= 0 or mem_rate <= 0:
+        raise KeyError(f"non-positive rate for {gpu!r}; refusing to estimate against a price "
+                       "that cannot be real")
+    return float(count) * gpu_rate + cpu * cpu_rate + mem_gib * mem_rate
 
 
 def estimate(rate: float, seconds: float) -> float:
@@ -40,11 +47,13 @@ class Ledger:
         self.clock = clock
 
     def committed(self, target: str) -> float:
-        """Dollars still to come from `target`'s running jobs: each one's recorded estimate,
-        less the share its elapsed time has already used up. A job already past its own
-        estimate contributes nothing further here — its estimate has already been spent as far
-        as this number is concerned, and letting it go negative would let one overrunning job
-        buy headroom for approving another."""
+        """Dollars still to come from `target`'s running jobs. Each running attempt contributes
+        at least its recorded estimate — it is still billing, so its estimate is never money
+        already accounted for — and more once elapsed time against its own runtime estimate
+        says it has run past that: `elapsed/est_runtime` is the best proxy this has for money
+        already burnt, and a spend gate that under-counts a runaway job is worse than one that
+        over-counts a job about to finish on time. A job with no useful pace information (a
+        non-positive `est_runtime`) contributes its full estimate rather than nothing."""
         total = 0.0
         for row in self.store.cloud_spend(target):
             if row["billed"] is not None:
@@ -57,10 +66,10 @@ class Ledger:
                 continue
             est_runtime = job.spec.est_runtime
             if est_runtime <= 0:
+                total += row["estimated"]
                 continue
             elapsed = self.clock() - attempt.start_time
-            remaining_frac = max(0.0, 1 - elapsed / est_runtime)
-            total += row["estimated"] * remaining_frac
+            total += max(row["estimated"], row["estimated"] * elapsed / est_runtime)
         return total
 
     def spent_day(self, target: str) -> float:
@@ -87,4 +96,6 @@ class Ledger:
 
     @staticmethod
     def _day(ts: float) -> str:
-        return dt.datetime.fromtimestamp(ts, tz=dt.UTC).strftime("%Y-%m-%d")
+        """Local calendar day: `daily_budget` is a human-facing cap, and resetting it at UTC
+        midnight would reset it mid-evening for anyone west of Greenwich."""
+        return dt.datetime.fromtimestamp(ts).strftime("%Y-%m-%d")  # noqa: DTZ006

@@ -116,6 +116,17 @@ def test_cloud_spend_upsert_keeps_the_original_day(store):
     assert rows[0]["billed"] == 7.25
 
 
+def test_cloud_spend_upsert_keeps_billed_once_set(store):
+    """A later call made with billed=None (bookkeeping re-run after a restart, say) must not
+    erase a real billed figure already on the row."""
+    j = store.insert_job(spec(), 1000, 1.0, None)
+    store.record_cloud_spend("modal", j, 1, "2026-01-01", 5.0, 7.25)
+    store.record_cloud_spend("modal", j, 1, "2026-01-01", 5.0, None)
+    rows = store.cloud_spend("modal")
+    assert len(rows) == 1
+    assert rows[0]["billed"] == 7.25
+
+
 def test_cloud_spend_is_empty_for_a_target_with_no_rows(store):
     assert store.cloud_spend("modal") == []
     assert store.cloud_spend_on("modal", "2026-01-01") == []
