@@ -85,3 +85,9 @@ def test_progress_events_for_many_jobs_in_one_query(store):
     assert [(e["ts"], e["payload"]["loss"]) for e in got[a]] == [(5.0, 0.9), (7.0, 0.5)]
     assert [e["payload"]["acc"] for e in got[b]] == [0.3]
     assert store.progress_events([]) == {}
+
+
+def test_gpu_samples_roundtrip(store):
+    store.add_gpu_samples(1, 1, 100.0, [[0, 55.0, 1024.0, 81920.0, 240.5, 61.0]])
+    rows = store.gpu_samples(1, 1)
+    assert rows[0][1] == 0 and rows[0][2] == 55.0

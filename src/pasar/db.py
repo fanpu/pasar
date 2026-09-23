@@ -68,6 +68,14 @@ CREATE TABLE IF NOT EXISTS machine_events (
     kind TEXT NOT NULL,
     text TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS gpu_samples (
+    job_id INTEGER NOT NULL,
+    attempt INTEGER NOT NULL,
+    ts REAL NOT NULL,
+    gpu INTEGER NOT NULL,
+    util REAL, mem_used REAL, mem_total REAL, power REAL, temp REAL
+);
+CREATE INDEX IF NOT EXISTS gpu_samples_job ON gpu_samples(job_id, attempt, ts);
 """
 
 _JOB_UPDATABLE = {"spec", "state", "bid", "queue_time", "retries_used", "reason", "summary",
@@ -247,3 +255,20 @@ class Store:
             (job_id,),
         )
         return [dict(r) for r in rows]
+
+    # gpu samples
+    def add_gpu_samples(self, job_id: int, attempt: int, ts: float, rows: list[list[float]]) -> None:
+        with self._lock:
+            self._db.executemany(
+                "INSERT INTO gpu_samples (job_id, attempt, ts, gpu, util, mem_used, mem_total, "
+                "power, temp) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                [(job_id, attempt, ts, int(r[0]), *r[1:]) for r in rows],
+            )
+
+    def gpu_samples(self, job_id: int, attempt: int) -> list[tuple]:
+        rows = self._q(
+            "SELECT ts, gpu, util, mem_used, mem_total, power, temp FROM gpu_samples "
+            "WHERE job_id = ? AND attempt = ? ORDER BY ts",
+            (job_id, attempt),
+        )
+        return [tuple(r) for r in rows]
