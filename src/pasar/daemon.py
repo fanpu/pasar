@@ -851,11 +851,18 @@ class Daemon:
         elif lost:
             kind, reason = EndKind.FAILED, "lost"
             summary = "the job's process disappeared (did pasard or the machine restart?)"
-        elif st is not None and st.result == "success" and st.exit_code == 0 and not st.signal:
+        elif (self._is_cloud(job) and st is not None and st.result == "success"
+              and st.exit_code == 0 and not st.signal):
             # An attempt whose wrapper reported a clean exit has finished, even if a pause was
             # asked for in the same window: recording that as paused would send a job that
             # already succeeded back for approval and pay to run it a second time. A cancel is
             # still above this: the user asked for the job to stop.
+            #
+            # Cloud only, explicitly. `result` is two vocabularies in one field — the wrapper's
+            # account for a cloud attempt, systemd's `Result` for a local one — and this branch
+            # is reasoning about the wrapper's. Today a local job reaching it would fall through
+            # to the same answer below, but only because "success" happens to mean the same in
+            # both; nothing but this guard keeps that true.
             kind, reason, summary = EndKind.COMPLETED, None, ""
         elif job.stop_requested == "pause" or st.result == "time_limit":
             kind, reason = EndKind.PAUSED, "time_limit"
