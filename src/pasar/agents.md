@@ -244,9 +244,16 @@ real money, so these rules are hard:
   pasard's config: ask them, and don't work around it.
 - **Always pass `--max-cost`**, the dollars one attempt may spend.
 
-**Run `pasar guide cloud` before submitting cloud work.** It covers everything about running a
-cloud job: its flags, approval, pauses, `pasar cloud`, `pasar pull` and the `cloud` object in
-JSON.
+**Don't hold back an experiment because it would be slow here.** The GB10 has plenty of memory
+but a fraction of a datacenter GPU's compute and bandwidth: a run that takes a day here may take
+hours on a rented H100. If an experiment is worth doing, propose it even if it would take days
+locally. Don't drop it, shrink it to fit, or quietly swap in a weaker version. Propose it with the
+cloud route and its napkin math (GPU, time, cost), and let the user decide. Proposing is free;
+running costs money and needs the user's yes.
+
+**Run `pasar guide cloud` before proposing or submitting cloud work.** It covers when a cloud GPU
+is worth asking for, choosing one, the napkin math and how to ask, and everything about running
+one: its flags, approval, pauses, `pasar cloud`, `pasar pull` and the `cloud` object in JSON.
 
 ## HTTP API quick reference
 

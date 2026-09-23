@@ -60,6 +60,8 @@ real money, so it's built to be hard to trigger by accident:
 - Every cloud run needs a person's approval in the web UI, at its estimated cost, before it
   launches — there is no `pasar approve` command. That UI isn't built yet, so today a person
   approves by calling `POST /api/jobs/{id}/approve` directly.
+- One job may spend at most the target's `max_job_cost` (default $10) over its whole life, every
+  attempt included; a submit estimated above it is refused. Raise it in `config.toml`.
 - **Agents must only submit with `--on` when the user has explicitly asked for cloud compute for
   that work.**
 
@@ -97,7 +99,7 @@ count compute only.
 
 See [docs/cloud.md](docs/cloud.md) for the design and every setting, and
 [`src/pasar/agents-cloud.md`](src/pasar/agents-cloud.md) (`pasar guide cloud`) for the rules
-agents follow.
+agents follow, including when a cloud GPU is worth asking for.
 
 ## For AI agents and API users
 

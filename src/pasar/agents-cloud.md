@@ -2,7 +2,7 @@
 
 This is the cloud topic of the pasar agent guide: `pasar guide cloud` prints it, and pasard serves
 it at `/llms-cloud.txt`. The main guide (`pasar guide`) covers everything else. Read this before
-you submit any cloud work.
+you propose cloud work to the user, and again before you submit any.
 
 `pasar submit --on TARGET --gpu TYPE` runs a job on a rented GPU at a configured cloud target
 (today, Modal) instead of the local GB10. The job keeps the same record, logs, progress,
@@ -10,8 +10,9 @@ checkpoints, `pasar wait` and `pasar cancel` as a local one. It also costs real 
 
 ## The rules
 
-- **Submit to the cloud only with the user's explicit go-ahead for this work.** Never pass
-  `--on` as your own call, and never to dodge a busy local GPU.
+- **Submit to the cloud only with the user's explicit go-ahead for this work.** Proposing is
+  yours to do; deciding is theirs. Never pass `--on` as your own call, and never to dodge a busy
+  local GPU.
 - **Never approve.** Every cloud attempt waits in `awaiting` until a person approves it. There is
   no `pasar approve` command. Never call `POST /api/jobs/{id}/approve` (with or without
   `?extend=1`) or `/reject`, on the user's behalf or otherwise. The approval UI isn't built yet,
@@ -22,6 +23,149 @@ checkpoints, `pasar wait` and `pasar cancel` as a local one. It also costs real 
   submit whose estimate is already over it is refused. Only the user raises it, in pasard's
   config. Ask them; don't work around it (for example by splitting one run into several jobs).
 - **Always pass `--max-cost`**, the dollars one attempt may spend.
+
+## Don't hold back an idea because it is slow here
+
+An experiment worth doing is worth proposing, even if it would take days on the GB10. Don't
+silently drop it. Don't shrink it until it fits in an afternoon, and don't quietly swap in a
+weaker version. Propose it as it should be run, with the cloud route and its napkin math as the
+option, and let the user decide. Say what you would run locally instead if they say no.
+
+Proposing is free. Only running costs money, and running needs the user's yes.
+
+## What a cloud GPU buys
+
+Speed. The GB10 has a lot of memory (128 GB, shared with the CPU) but a fraction of a datacenter
+GPU's compute and memory bandwidth. Compute-bound training runs several times faster on an
+H100-class card, so a run that takes a day here can finish in hours.
+
+What it doesn't buy: memory. Only the H200, B200 and B300 have more than the GB10. A job that
+only fits here because of the unified memory needs one of those, or sharding across several GPUs.
+
+Vendor spec-sheet figures. They are rough guides for napkin math, not benchmarks:
+
+| GPU (`--gpu`) | Memory (GB) | Dense BF16 TFLOPS | Bandwidth (GB/s) |
+|---|---|---|---|
+| GB10 (local) | 128 unified | MEASURED_BF16_TFLOPS measured here (NVIDIA publishes none) | MEASURED_BW_GBS measured here (vendor: 273) |
+| `T4` | 16 | 65 (FP16: T4 has no BF16) | 300 |
+| `L4` | 24 | 121 | 300 |
+| `A10` | 24 | 125 | 600 |
+| `L40S` | 48 | 362 | 864 |
+| `A100-40GB` | 40 | 312 | 1,555 |
+| `A100-80GB` | 80 | 312 | 1,935-2,039 |
+| `RTX-PRO-6000` | 96 | ~504 | 1,597-1,792 |
+| `H100` | 80 | 989 | 3,350 |
+| `H200` | 141 | 989 | 4,800 |
+| `B200` | 180 | 2,250 | 7,700 |
+| `B300` | 270 | 2,250 | 7,700 |
+
+- Dense means without sparsity. NVIDIA's sheets lead with the sparse figure, which is twice
+  this. Sources: NVIDIA's data sheet for each card, and Modal's GPU docs for which variant it
+  rents, checked September 2026. The H100 and H200 are the SXM parts (Modal says so).
+- Approximate: the T4 figure is FP16 standing in for BF16. Modal doesn't say whether its A100s
+  are PCIe or SXM, hence the bandwidth range. It doesn't say which RTX PRO 6000 edition it rents
+  either: ~504 is NVIDIA's Workstation Edition figure, and the Server Edition has the lower
+  bandwidth. For the B300, NVIDIA's sheet says 270 GB per GPU while Modal's own figures imply 288.
+- `A100` on its own means the 40 GB card. `pasar cloud` lists what a target actually accepts,
+  with each GPU's memory. Prices are never in this guide: read them from `pasar cloud`.
+
+## When to ask
+
+Ask the user about the cloud when all three hold:
+
+1. **The local wait is long, roughly over 2 hours.** Count the time until the result: the run
+   itself plus the local queue ahead of it. Get the run time from a measured rate (time a few
+   hundred steps, then multiply out) or, once it runs under pasar, from its progress reports
+   (`remaining`, and `pasar ls` marks a projected time with `*`). Get the queue wait from pasar:
+   `pasar ls` shows a queued job's `starts ~HH:MM`, and in `--json` the last span in `projected`
+   ends when the job is expected to finish. For work not yet submitted, judge from what
+   `pasar ls` shows ahead of it.
+2. **A cloud GPU would plausibly more than halve it.** Check the table: is the job limited by
+   compute or bandwidth that a bigger card has more of? A job limited by data loading, CPU work,
+   Python overhead or I/O gains little from a faster GPU.
+3. **The estimate fits under the job cap.** If it doesn't, still propose it and say so: the user
+   may raise the cap, or pick a cheaper card or a shorter first run.
+
+Ask before you start, not after the local run is half done. One ask covers one piece of work: a
+sweep is one ask, with the per-job and the total cost.
+
+## Choosing a GPU
+
+1. **Memory first.** Weights, gradients, optimizer state and activations must all fit, with
+   headroom. Measure peak memory on the GB10 (`peak` in `pasar show --json`), or work it out:
+   BF16 weights take 2 bytes per parameter, and full training with Adam roughly 16 bytes per
+   parameter before activations.
+2. **Then the cheapest card that fits and is fast enough.** Cost is rate × time, so a faster card
+   can cost less in total: a card twice the price that runs three times faster is cheaper.
+3. **Smoke-test on a cheap card first.** A few minutes on the cheapest card that fits (or a
+   cut-down config that fits a cheap one) proves the image builds, the data is reachable, and
+   checkpoint and resume work. Also test resuming locally first: run a few minutes, cancel,
+   resubmit. The smoke test costs money too, so it is part of the ask.
+4. **More than one GPU (`H100:4`) only if the code shards** across them (DDP, FSDP and the like).
+   A single-process script on four GPUs pays for four and uses one.
+
+## The napkin math
+
+- **Speedup.** Take the table's ratio for the column that limits the job (TFLOPS for large-batch,
+  matmul-heavy training; bandwidth for small batches, decoding and optimizer-heavy steps), then
+  discount it. Real jobs run well below peak, and startup, data loading and Python don't speed up
+  at all. Halving the spec ratio is a fair first guess. Say it is rough.
+- **Cloud time** = local run time ÷ speedup, plus a few minutes to start (longer the first time an
+  image is built).
+- **Cost per hour** = the GPU's `$/HOUR` from `pasar cloud` (times the count, for `H100:4`), plus
+  what pasar adds for the sandbox around it: 4 × `cpu_hour_cost_sandbox` + 32 ×
+  `mem_gib_hour_cost_sandbox`, both in the RATES column. On a cheap card that addition is a large
+  share of the total.
+- **Cost** = cloud time × cost per hour. That is what `pasar submit` would estimate for the same
+  `--time`.
+- **Ceiling.** One approval lets an attempt run up to the target's `timeout_factor` × `--time`
+  (1.5 × by default), unless `--max-cost` or what is left of the job cap stops it sooner.
+
+**Worked example.** All numbers are illustrative, not real rates or measurements.
+
+- A fine-tune timed at 1.1 s/step over 200 steps, with 20,000 steps to go: about 6 hours.
+  `pasar ls` says it would start in about an hour, so the result is about 7 hours away.
+- It peaked at 50 GB on the GB10, so it needs an 80 GB card: `A100-80GB`, `H100` or bigger.
+- Say the table puts the H100 at 8× the GB10's BF16 TFLOPS. Halved, that's about 4×, so about
+  1.5 hours in the cloud, plus a few minutes to start.
+- Say `pasar cloud` shows the H100 at $3/hour and the sandbox adds $1/hour: $4/hour, so about $6.
+  Pass `--time 1h30m --max-cost 8`. That lets the attempt run up to 2 hours, and it stays under
+  the $10 job cap.
+- The A100-80GB has about a third of the H100's TFLOPS in the table: say 2.5× the GB10, so about
+  1.3× halved. At, say, $2/hour plus $1, that's about 5 hours and $14: slower, dearer, and over
+  the cap. The faster card is the cheaper one.
+
+## Asking the user
+
+Put these in the ask, briefly:
+
+1. **Local:** the projected time to a result, and how you measured it (steps timed, pasar's
+   projection, queue wait).
+2. **GPU:** the one you propose and why (memory needed, what limits the job).
+3. **Speedup:** what you expect and how rough it is.
+4. **Cloud time:** the expected run time, and the `--time` you'd pass.
+5. **Cost:** time × $/hour from `pasar cloud`, the `--max-cost` you'd pass, and the job cap. For a
+   sweep, per job and in total.
+6. **Needs:** checkpointing to `pasar_job.persist_dir()` (does it already?), any `--env` keys,
+   where its data comes from, and a smoke test first if the cloud path is untested.
+
+For example, with the numbers above: "This fine-tune would take ~6 h on the GB10 (1.1 s/step,
+timed over 200 steps, 20k steps) plus ~1 h in the queue. On an H100 (it needs ~50 GB) I'd expect
+~4× faster, a rough guess from the spec ratio halved: ~1.5 h. At ~$4/h from `pasar cloud` that's
+~$6; I'd pass `--max-cost 8`, under the $10 job cap. It already checkpoints to persist_dir. Want
+me to submit it?"
+
+## Spending prudently
+
+- Stay well under the job cap. A run that would need most of it is better as a short first run
+  with a checkpoint, then a decision on the rest.
+- Always pass `--max-cost`, a little above the estimate (the example: $6 estimated, `--max-cost
+  8`). A cap that bites pauses the job rather than killing it, and the next approval resumes from
+  the checkpoint.
+- Prefer short attempts with frequent checkpoints over one long attempt. Checkpoint every 10-15
+  minutes of wall-clock time, and save the first one early.
+- `pasar cancel` a cloud job you no longer need, awaiting or running.
+- Results left at the provider are billed as storage even when nothing runs. `pasar pull` them.
 
 ## Submitting
 
