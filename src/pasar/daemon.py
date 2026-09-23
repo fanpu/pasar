@@ -724,14 +724,16 @@ class Daemon:
         checkpoint is what the next attempt resumes from); a local job, which never had anything
         on a provider; a cloud target whose provider this pasard cannot reach (config or
         provider gone, like `approve`'s own refusal); a second pull of the same job while one is
-        already in flight; and a `dest` that already exists with something in it, which pulling
-        into would both corrupt and make the verification below meaningless.
+        already in flight; and a `dest` that already exists with something in it (or exists as a
+        plain file), which pulling into would both corrupt and make the verification below
+        meaningless.
 
         `persist_usage` is read *before* downloading, and is the number the download is checked
         against — not its own return value, which a provider that quietly wrote less could lie
-        about, but `dest` walked fresh on disk after the fact. A mismatch, or the download itself
-        raising, deletes nothing: not the remote copy, not the partial local one — the only
-        record of what actually happened is the exception raised to the caller.
+        about, but a private staging directory (never `dest` itself — see `_pull`) walked fresh
+        on disk after the fact. A mismatch, or the download itself raising, deletes nothing: not
+        the remote copy, not the staged local one — the error names where the staged copy is, so
+        nothing is lost even when a pull cannot finish.
         """
         job = self.job(job_id)
         if job.state not in TERMINAL:
@@ -757,23 +759,57 @@ class Daemon:
                 self._pulling.discard(job_id)
 
     def _pull(self, job_id: int, job: Job, provider, dest: Path, keep: bool) -> dict:
-        if dest.exists() and any(dest.iterdir()):
-            raise Conflict(f"{dest} already exists and is not empty; pulling into it would "
-                           "merge with whatever is already there and make verification "
-                           "meaningless — pick another --to, or clear it out first")
+        if dest.exists():
+            if not dest.is_dir():
+                raise Conflict(f"{dest} exists and is not a directory; pulling into it is "
+                               "refused — pick another --to")
+            if any(dest.iterdir()):
+                raise Conflict(f"{dest} already exists and is not empty; pulling into it would "
+                               "merge with whatever is already there and make verification "
+                               "meaningless — pick another --to, or clear it out first")
         files, size = provider.persist_usage(job_id)
         if files == 0 and size == 0:
             # Not an error: a job that never wrote a checkpoint is common, and there is nothing
             # to delete at the provider either.
             return {"job_id": job_id, "files": 0, "bytes": 0, "dest": None, "deleted": False}
-        provider.download_persist(job_id, dest)
-        found_files, found_bytes = _disk_usage(dest)
+        # Downloaded into a private staging directory, never straight into `dest`: the
+        # non-empty check above is check-then-act, so two pulls of *different* jobs racing the
+        # same `--to` can both pass it before either has written a byte. Downloading straight
+        # into `dest` would let each verify and then delete against a directory that both of
+        # them wrote into — if their files happened to share names and sizes, both verifications
+        # would pass and both remote copies would be deleted, with only one job's data actually
+        # surviving underneath. A staging directory made fresh by `mkdtemp`, named uniquely, can
+        # never collide with another pull's, so each pull only ever verifies a directory it alone
+        # wrote to; claiming `dest` itself is left entirely to the atomic `os.rename` below, which
+        # is also this function's only real defence against the same race — the up-front check is
+        # just the fast, friendly path for the ordinary case.
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        staging = Path(tempfile.mkdtemp(dir=dest.parent, prefix=f".pasar-pull-{job_id}-"))
+        try:
+            provider.download_persist(job_id, staging)
+        except Exception as e:
+            raise Conflict(
+                f"job {job_id}'s download failed before it could be verified ({e}); nothing was "
+                f"deleted at the provider, and whatever it wrote is kept at {staging} — check it "
+                "by hand, or just try the pull again") from e
+        found_files, found_bytes = _disk_usage(staging)
         if found_files != files or found_bytes != size:
             raise Conflict(
                 f"job {job_id}'s pull does not match what {job.spec.target} reported: expected "
-                f"{files} file(s)/{size} bytes, found {found_files}/{found_bytes} on disk at "
-                f"{dest}; nothing was deleted, at the provider or locally — check {dest} by hand "
-                "before trying again")
+                f"{files} file(s)/{size} bytes, found {found_files}/{found_bytes} on disk; "
+                f"nothing was deleted, at the provider or locally — the download is kept at "
+                f"{staging}, check it by hand before trying again")
+        try:
+            # Atomic, and on Linux refuses outright if `dest` exists and is not empty: exactly
+            # the race the up-front check above cannot close on its own. A lost race here is a
+            # clean refusal rather than a silent merge or overwrite of whatever won it.
+            os.rename(staging, dest)
+        except OSError as e:
+            raise Conflict(
+                f"job {job_id}'s pull was verified, but {dest} was claimed by another pull "
+                f"before this one could move into it ({e}); nothing was deleted at the "
+                f"provider — the verified download is kept at {staging}: move it into place "
+                "by hand, or pull again with a different --to") from None
         deleted = False
         if not keep:
             provider.delete_persist(job_id)

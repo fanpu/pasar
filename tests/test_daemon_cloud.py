@@ -1136,6 +1136,14 @@ def test_pull_refuses_a_second_pull_while_one_is_in_flight(cloud, repo, tmp_path
         "job_id": job_id, "files": 0, "bytes": 0, "dest": None, "deleted": False}
 
 
+def _staging_dir(parent: Path, job_id: int) -> Path:
+    """The private staging directory `_pull` downloaded into, found by its prefix. Only ever
+    one, since each pull's `mkdtemp` call names it uniquely."""
+    found = [p for p in parent.iterdir() if p.name.startswith(f".pasar-pull-{job_id}-")]
+    assert len(found) == 1, f"expected exactly one staging dir for job {job_id}, found {found}"
+    return found[0]
+
+
 def test_pull_mismatch_leaves_both_copies_alone_and_reports_it(cloud, repo, tmp_path):
     daemon, provider = cloud
     job_id = finish(daemon, provider, repo)
@@ -1151,8 +1159,14 @@ def test_pull_mismatch_leaves_both_copies_alone_and_reports_it(cloud, repo, tmp_
 
     assert provider.deleted_persist == []
     assert job_id in provider.persisted
-    # The partial download is left exactly as it landed, not cleaned up.
-    assert len(list(dest.rglob("*"))) == 1
+    # `dest` was never claimed: the mismatch was caught before the rename that would have
+    # claimed it, so it does not even exist.
+    assert not dest.exists()
+    # The partial download is left exactly as it landed, in its own staging directory, not
+    # cleaned up and not merged into `dest`.
+    staging = _staging_dir(tmp_path, job_id)
+    assert len(list(staging.rglob("*"))) == 1
+    assert str(staging) in message
 
 
 def test_pull_leaves_everything_alone_when_the_download_itself_raises(cloud, repo, tmp_path):
@@ -1162,9 +1176,72 @@ def test_pull_leaves_everything_alone_when_the_download_itself_raises(cloud, rep
     provider.fail_download.add(job_id)
     dest = tmp_path / "out"
 
-    with pytest.raises(RuntimeError, match="pretend network failure"):
+    with pytest.raises(Conflict, match="pretend network failure") as exc:
         daemon.pull(job_id, dest=dest)
 
     assert provider.deleted_persist == []
     assert job_id in provider.persisted
     assert not dest.exists()
+    # The (empty) staging directory is left in place and named in the error, exactly as a
+    # mismatch's would be — there is simply nothing under it, since the fake raises before
+    # writing anything.
+    staging = _staging_dir(tmp_path, job_id)
+    assert str(staging) in str(exc.value)
+
+
+def test_pull_refuses_when_dest_exists_as_a_plain_file(cloud, repo, tmp_path):
+    daemon, provider = cloud
+    job_id = finish(daemon, provider, repo)
+    provider.persist(job_id, "checkpoint.pt", b"weights")
+    dest = tmp_path / "out"
+    dest.write_text("not a directory")
+
+    with pytest.raises(Conflict, match="not a directory"):
+        daemon.pull(job_id, dest=dest)
+
+    assert job_id in provider.persisted
+    assert dest.read_text() == "not a directory"
+
+
+def test_pull_of_two_different_jobs_racing_the_same_dest_deletes_at_most_one_remote_copy(
+        cloud, repo, tmp_path):
+    """Reproduces the reviewer's scenario: two pulls of *different* jobs into the same `--to`
+    both pass the up-front "dest is empty" check before either has written anything (real
+    concurrency isn't needed to prove this — a pull made from inside job A's own download is
+    already past that check the same way a truly concurrent one would be, and deterministically
+    so). If their files happened to share a name and size, downloading straight into `dest`
+    would let both verifications pass and delete both remote copies, even though only one job's
+    data can actually end up at `dest`. Downloading into a private staging directory and only
+    ever claiming `dest` through an atomic `os.rename` is what keeps that from happening: exactly
+    one of the two racing pulls wins the rename (and only it deletes its remote copy), and the
+    loser's own verified download — never lost — is left sitting in its own staging directory."""
+    daemon, provider = cloud
+    job_a = finish(daemon, provider, repo)
+    job_b = finish(daemon, provider, repo)
+    # Same name, same size: exactly the case where the old direct-into-`dest` download would
+    # have had both verifications pass against a directory holding a mix of both jobs' files.
+    provider.persist(job_a, "checkpoint.pt", b"AAAAAAA")
+    provider.persist(job_b, "checkpoint.pt", b"BBBBBBB")
+    dest = tmp_path / "ckpts"
+
+    def on_download(jid):
+        if jid == job_a:
+            # From inside job A's download, `dest` does not exist yet (A hasn't renamed its
+            # staging directory into place) -- so job B's own up-front check also passes here,
+            # the same as it would racing on two real threads.
+            daemon.pull(job_b, dest=dest)
+
+    provider.on_download = on_download
+
+    with pytest.raises(Conflict, match="claimed") as exc:
+        daemon.pull(job_a, dest=dest)
+
+    # Exactly one remote copy was deleted -- job B's, which won the rename -- and its bytes are
+    # the ones that actually made it to `dest`, not a mix of both jobs' files.
+    assert provider.deleted_persist == [job_b]
+    assert job_a in provider.persisted
+    assert (dest / "checkpoint.pt").read_bytes() == b"BBBBBBB"
+    # Job A's own verified download was not lost: it is exactly where the error says it is.
+    staging_a = _staging_dir(tmp_path, job_a)
+    assert (staging_a / "checkpoint.pt").read_bytes() == b"AAAAAAA"
+    assert str(staging_a) in str(exc.value)

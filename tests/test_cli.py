@@ -482,3 +482,15 @@ def test_pull_json_output(client, capsys, cloud_daemon, cloud_provider, cloud_cw
     body = json.loads(out.out)
     assert body == {"job_id": job_id, "files": 1, "bytes": len(b"weights"), "dest": str(dest),
                     "deleted": True}
+
+
+def test_pull_api_rejects_a_relative_to(client, capsys, cloud_daemon, cloud_provider, cloud_cwd,
+                                        monkeypatch):
+    # The CLI always resolves --to to an absolute path before sending it (see the "pull"
+    # branch of cli.run); this is what stops anyone talking to the API directly from getting a
+    # download that lands relative to pasard's own cwd instead of theirs.
+    job_id = _run_cloud_job_to_completion(client, capsys, cloud_daemon, cloud_provider,
+                                          cloud_cwd, monkeypatch)
+    r = client.post(f"/api/jobs/{job_id}/pull", json={"to": "relative/dir"})
+    assert r.status_code == 422
+    assert "absolute" in r.text

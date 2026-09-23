@@ -282,6 +282,12 @@ instead, `reason` `pause_limit`), if the provider reclaims the machine (reason
 approving again in the web UI, the same as a fresh submission. An approved job starts a fresh
 attempt from the same code snapshot, with `PASAR_RESUMING=1`: it resumes from its last checkpoint
 if it wrote one under `pasar_job.persist_dir()`, or starts over if it never checkpointed.
+`pasar wait` keeps waiting through
+all of these (they aren't a terminal state); use `--timeout` if you don't want to wait on a human.
+If the target stops being configured on this pasard, a running cloud job ends `failed` (reason
+`target_gone` — its sandbox may still be running and billing at the provider, since nothing here
+can reach it any more) and a waiting one ends `cancelled` (reason `target_gone`, nothing was
+spent) — both ordinary terminal states with `pasar wait`'s usual exit codes.
 
 Whatever a cloud job wrote under `pasar_job.persist_dir()` stays on the provider's volume once
 the job is finished — nothing copies it back or deletes it on its own. `pasar pull <id> [--to
@@ -291,13 +297,6 @@ copy (`--keep` leaves it in place instead). Refused for a job that hasn't finish
 checkpoint is still live and the next attempt may resume from it), a local job (there is nothing
 on a provider to pull), or a destination that already has something in it. A job that never
 wrote anything reports that and exits `0` — not an error.
-
-`pasar wait` keeps waiting through
-all of these (they aren't a terminal state); use `--timeout` if you don't want to wait on a human.
-If the target stops being configured on this pasard, a running cloud job ends `failed` (reason
-`target_gone` — its sandbox may still be running and billing at the provider, since nothing here
-can reach it any more) and a waiting one ends `cancelled` (reason `target_gone`, nothing was
-spent) — both ordinary terminal states with `pasar wait`'s usual exit codes.
 
 `pasar show <id>` and `pasar ls`/`pasar show --json` carry a `cloud` object for cloud jobs:
 `target`, `gpu`, `phase` (where the *attempt* the daemon is watching has got to — `pending`,

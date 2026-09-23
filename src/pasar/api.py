@@ -54,6 +54,16 @@ def _bounded(v):
     return v
 
 
+def _absolute(v):
+    """A field_validator for a path the daemon will use directly: its own cwd is not the
+    caller's, so a relative one would land somewhere nobody asked for. The CLI already resolves
+    `--to` before sending it; this is what stops anyone talking to the API straight from getting
+    a surprise instead."""
+    if v is not None and not Path(v).is_absolute():
+        raise ValueError(f"must be an absolute path, got {v!r}")
+    return v
+
+
 class SubmitBody(BaseModel):
     command: str
     time: str | int
@@ -86,6 +96,8 @@ class PatchBody(BaseModel):
 class PullBody(BaseModel):
     to: str | None = None
     keep: bool = False
+
+    _absolute_to = field_validator("to")(_absolute)
 
 
 class RestartBody(BaseModel):
