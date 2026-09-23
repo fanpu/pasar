@@ -275,9 +275,8 @@ class Daemon:
         which is the asymmetry the two promises imply.
 
         Falls back to the full window for a job that cannot be priced right now (and to
-        `_approved_seconds(job.spec, target)` for a row missing a price — `approve` still lets a
-        job wait when it could not be priced at that moment, though `_launch_cloud` never launches
-        one that still can't be): a wrong stop costs the job its progress."""
+        `_approved_seconds(job.spec, target)` for a row missing a price, which `approve` no longer
+        writes but older rows may still hold): a wrong stop costs the job its progress."""
         row = next((r for r in self.store.approvals(job.id) if r["attempt"] == att.n), None)
         if row is None or row["max_cost"] is None or not row["hourly_rate"]:
             return self._approved_seconds(job.spec, target)
@@ -524,13 +523,18 @@ class Daemon:
             raise Conflict(f"cloud target {job.spec.target!r} has no provider on this pasard, "
                            "so approving this job would leave it queued for good")
         now = self.clock()
-        est = top = rate = None
         try:
             rate = self._hourly(target, job.spec.gpu)
             est = estimate(rate, job.spec.est_runtime)
             top = self._ceiling(target, job.spec)
-        except (KeyError, ValueError):
-            log.exception("could not price job %s at approval", job_id)
+        except (KeyError, ValueError) as e:
+            # An approval is a person agreeing to a price, so an approval with no price in it is
+            # not one: the row's NULL hourly_rate also switches off `_over_the_approval`'s
+            # price-rise guard, and the job would launch at whatever the market happened to ask.
+            # Refused rather than written, the same way a provider-less target is.
+            raise Conflict(f"job {job_id} could not be priced right now, so approving it would "
+                           f"agree to a price nobody has seen: {e}. Try again once "
+                           f"{job.spec.target} reports its rates") from None
         self.store.add_approval(job_id, len(self.store.attempts(job_id)) + 1, now, est, top, rate)
         self.store.update_job(job_id, state=State.QUEUED, queue_time=now, reason=None, summary="")
         self.changed()

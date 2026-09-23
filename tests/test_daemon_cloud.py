@@ -197,6 +197,23 @@ def test_approving_on_a_target_without_a_provider_is_refused(make_cloud, repo, t
     assert without.job(job.id).state == State.AWAITING
 
 
+def test_an_approval_that_cannot_be_priced_is_refused_and_writes_nothing(cloud, repo, clock,
+                                                                         monkeypatch):
+    # A row with a NULL price is an approval nobody could have looked at, and its NULL
+    # hourly_rate also switches off the price-rise guard, so the job would later launch at
+    # whatever the market asked.
+    daemon, provider = cloud
+    job = daemon.submit(cloud_spec(repo))
+    monkeypatch.setattr(provider, "rates", dict)  # the provider stops reporting prices
+    clock.advance(60)
+    with pytest.raises(Conflict, match="could not be priced"):
+        daemon.approve(job.id)
+    assert daemon.job(job.id).state == State.AWAITING
+    assert daemon.store.approvals(job.id) == []
+    daemon.tick()
+    assert provider.boxes == {} and daemon.store.cloud_spend("fake") == []
+
+
 def test_a_target_without_a_provider_is_refused_rather_than_called_unknown(tmp_path, clock,
                                                                           executor, probe, repo):
     data = tmp_path / "no-provider"
