@@ -14,6 +14,7 @@ class State(StrEnum):
     COMPLETED = "completed"
     FAILED = "failed"
     CANCELLED = "cancelled"
+    AWAITING = "awaiting"  # cloud only: submitted, waiting for a person to approve the cost
 
 
 TERMINAL = frozenset({State.COMPLETED, State.FAILED, State.CANCELLED})
@@ -24,6 +25,7 @@ class EndKind(StrEnum):
     FAILED = "failed"
     PREEMPTED = "preempted"
     CANCELLED = "cancelled"
+    PAUSED = "paused"  # stopped at its approved run time, resumable
 
 
 @dataclass
@@ -42,6 +44,11 @@ class JobSpec:
     tags: list[str] = field(default_factory=list)
     submitter: str = ""
     env: dict[str, str] | None = None  # never persisted in the database
+    target: str = "local"
+    gpu: str | None = None          # cloud only: "H100" or "H100:4"
+    env_keys: list[str] = field(default_factory=list)  # cloud only: env vars to pass through
+    data: list[str] = field(default_factory=list)      # cloud only: local paths to upload
+    max_cost: float | None = None   # cloud only: stop the job above this many dollars
 
     def to_json(self) -> str:
         d = asdict(self)

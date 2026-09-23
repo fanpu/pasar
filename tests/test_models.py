@@ -19,3 +19,18 @@ def test_spec_json_round_trip_drops_env():
 
 def test_terminal_states():
     assert TERMINAL == {State.COMPLETED, State.FAILED, State.CANCELLED}
+
+
+def test_spec_roundtrip_keeps_cloud_fields():
+    spec = JobSpec(command="train.py", est_runtime=3600, cwd="/tmp", target="modal",
+                   gpu="H100:2", env_keys=["WANDB_API_KEY"], data=["/tmp/d"], max_cost=12.5)
+    assert JobSpec.from_json(spec.to_json()) == spec
+
+
+def test_spec_defaults_to_local():
+    assert JobSpec(command="x", est_runtime=1, cwd="/tmp").target == "local"
+
+
+def test_awaiting_is_neither_active_nor_terminal():
+    from pasar.daemon import ACTIVE
+    assert State.AWAITING not in ACTIVE and State.AWAITING not in TERMINAL
