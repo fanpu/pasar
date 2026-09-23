@@ -248,7 +248,7 @@ def test_submit_on_cloud_prints_cost_and_where_to_approve(client, capsys, cloud_
     assert code == 0
     assert "awaiting" in out.out
     assert "$" in out.out
-    assert "web UI" in out.out
+    assert "/api/jobs/1/approve" in out.out  # the endpoint, since there is no UI to point at
     assert cloud_daemon.job(1).state.value == "awaiting"
 
 

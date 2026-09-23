@@ -331,7 +331,8 @@ def run(args, client: httpx.Client) -> int:
             if c.get("full_seconds") and (c.get("approved_seconds") or 0) < c["full_seconds"]:
                 print(f"  it will be paused after {fmt_duration(c['approved_seconds'])}"
                       f" instead of {fmt_duration(c['full_seconds'])}, to stay under that cap")
-            print("  approve it in the web UI to let it launch")
+            print(f"  a person has to approve it before it launches: "
+                  f"POST /api/jobs/{job['id']}/approve (no web UI for it yet)")
         else:
             print(f"submitted #{job['id']} {job['name']} ({_state(job)})")
     elif args.cmd == "ls":
