@@ -212,3 +212,31 @@ def test_job_killed_from_outside_reports_the_signal(tmp_path):
     exits = [c for c in control(out) if c["t"] == "exit"]
     assert exits == [{"t": "exit", "code": None, "signal": "SIGKILL"}]
     assert p.returncode == 137
+
+
+def test_the_relay_gets_its_whole_timeout_to_drain_at_the_time_limit(tmp_path, monkeypatch):
+    """In the time-limit path the run-time deadline has by definition already passed, so joining
+    the relay on `deadline - now` was exactly join(0.0): it got no chance to drain, and the log
+    tail the daemon diagnoses a pause from could be lost with it. The relay winds itself down
+    within _RELAY_STOP_GRACE, so the join is on the fixed timeout instead."""
+    joins = []
+    real_thread = threading.Thread
+
+    class Recording(real_thread):
+        def __init__(self, *args, **kw):
+            super().__init__(*args, **kw)
+            # Recorded here, not in join(): Thread.run() drops `_target` once it returns, and
+            # the relay is usually finished by the time it is joined.
+            self.is_relay = kw.get("target") is wrapper._relay
+
+        def join(self, timeout=None):
+            if self.is_relay:
+                joins.append(timeout)
+            return super().join(timeout)
+
+    monkeypatch.setattr(wrapper.threading, "Thread", Recording)
+    code = wrapper.main(["--token", TOKEN, "--events", str(tmp_path / "events"),
+                         "--limit", "1", "--grace", "2", "--",
+                         'trap "echo SAVED; exit 143" TERM; sleep 30'])
+    assert code == 143
+    assert joins == [wrapper._RELAY_JOIN_TIMEOUT]

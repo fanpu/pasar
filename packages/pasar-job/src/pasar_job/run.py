@@ -210,7 +210,11 @@ def main(argv: list[str] | None = None) -> int:
     # double fork, setsid) can never wedge the wrapper past its own deadline.
     _signal_group(proc.pid, signal.SIGKILL)
     relay_stop.set()
-    relay.join(max(0.0, min(_RELAY_JOIN_TIMEOUT, deadline - time.time())))
+    # On its own fixed timeout, never against `deadline`: in the time-limit path the deadline has
+    # by definition already passed, so that arithmetic was exactly join(0.0) — the relay got no
+    # chance to drain and the log tail the daemon diagnoses the pause from could be lost. The
+    # relay bounds itself with _RELAY_STOP_GRACE, so this can never wait long.
+    relay.join(_RELAY_JOIN_TIMEOUT)
 
     tailer.drain()
     stop.set()
