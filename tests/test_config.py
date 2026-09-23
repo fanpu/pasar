@@ -69,3 +69,34 @@ def test_pasar_address_env_replaces_default(monkeypatch):
     monkeypatch.setenv("PASAR_ADDRESS", "127.0.0.1:18750")
     cfg = Config(bind=["100.64.0.1:8750"])
     assert cfg.addresses() == ["127.0.0.1:18750", "100.64.0.1:8750"]
+
+
+def test_cloud_target_parsed(tmp_path):
+    p = tmp_path / "config.toml"
+    p.write_text("""
+[clouds.modal]
+provider = "modal"
+budget = { daily = 50.0, monthly = 300.0 }
+max_running = 4
+max_runtime = "24h"
+approval_ttl = "12h"
+env_passthrough = ["WANDB_API_KEY"]
+bundle_max = "128MiB"
+""")
+    cfg = load_config(p)
+    t = cfg.clouds["modal"]
+    assert (t.provider, t.daily_budget, t.monthly_budget) == ("modal", 50.0, 300.0)
+    assert (t.max_running, t.max_runtime, t.approval_ttl) == (4, 86400, 43200)
+    assert t.bundle_max == 128 * 1024 * 1024
+    assert t.timeout_factor == 1.5           # default
+
+
+def test_cloud_target_requires_budget(tmp_path):
+    p = tmp_path / "config.toml"
+    p.write_text('[clouds.modal]\nprovider = "modal"\n')
+    with pytest.raises(ValueError, match="budget"):
+        load_config(p)
+
+
+def test_no_clouds_by_default(tmp_path):
+    assert load_config(tmp_path / "missing.toml").clouds == {}

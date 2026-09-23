@@ -14,6 +14,48 @@ _DURATION_KEYS = {"default_grace", "pressure_sustain"}
 
 
 @dataclass
+class CloudTarget:
+    """Cloud provider target configuration."""
+    name: str
+    provider: str
+    daily_budget: float
+    monthly_budget: float
+    max_running: int = 2
+    timeout_factor: float = 1.5
+    max_runtime: int = 86400          # seconds; Modal's own ceiling
+    approval_ttl: int = 86400
+    env_passthrough: list[str] = field(default_factory=list)
+    volumes: dict[str, str] = field(default_factory=dict)
+    bundle_max: int = 256 * 1024 * 1024
+    data_max: int = 4 * GiB
+    base_image: str = ""
+    rates: dict[str, float] = field(default_factory=dict)
+
+
+def _cloud_target(name: str, raw: dict) -> CloudTarget:
+    """Parse cloud target from config dict."""
+    budget = raw.get("budget") or {}
+    if not budget.get("daily"):
+        raise ValueError(f"cloud target {name!r} needs budget.daily before it can be used")
+    return CloudTarget(
+        name=name,
+        provider=raw.get("provider") or name,
+        daily_budget=float(budget["daily"]),
+        monthly_budget=float(budget.get("monthly", budget["daily"] * 10)),
+        max_running=int(raw.get("max_running", 2)),
+        timeout_factor=float(raw.get("timeout_factor", 1.5)),
+        max_runtime=min(parse_duration(raw.get("max_runtime", "24h")), 86400),
+        approval_ttl=parse_duration(raw.get("approval_ttl", "24h")),
+        env_passthrough=list(raw.get("env_passthrough", [])),
+        volumes=dict(raw.get("volumes", {})),
+        bundle_max=parse_size(raw.get("bundle_max", "256MiB")),
+        data_max=parse_size(raw.get("data_max", "4GiB")),
+        base_image=raw.get("base_image", ""),
+        rates={k: float(v) for k, v in (raw.get("rates") or {}).items()},
+    )
+
+
+@dataclass
 class Config:
     bind: list[str] = field(default_factory=list)
     system_reserve: int = 16 * GiB
@@ -33,6 +75,7 @@ class Config:
     mascot_dir: str = ""
     data_dir: str = ""
     allowed_hosts: list[str] = field(default_factory=list)
+    clouds: dict[str, CloudTarget] = field(default_factory=dict)
 
     def addresses(self) -> list[str]:
         """Return list of addresses with DEFAULT_ADDRESS first, then bind entries.
@@ -60,6 +103,7 @@ def default_data_dir() -> Path:
 def load_config(path: Path | None = None) -> Config:
     path = path or config_dir() / "config.toml"
     raw = tomllib.loads(path.read_text()) if path.exists() else {}
+    clouds_raw = raw.pop("clouds", {})
     known = {f.name for f in fields(Config)}
     unknown = sorted(set(raw) - known)
     if unknown:
@@ -76,4 +120,5 @@ def load_config(path: Path | None = None) -> Config:
     cfg = Config(**kwargs)
     cfg.mascot_dir = cfg.mascot_dir or str(config_dir() / "mascot")
     cfg.data_dir = cfg.data_dir or str(default_data_dir())
+    cfg.clouds = {name: _cloud_target(name, t) for name, t in clouds_raw.items()}
     return cfg
