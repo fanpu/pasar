@@ -24,6 +24,49 @@ def lost_time(attempts: list[Attempt]) -> dict:
     return {**lost, "known": known}
 
 
+SPARK_POINTS = 32  # most points a dashboard-row sparkline is drawn from
+# Bookkeeping fields a progress report carries alongside its metrics; never plottable.
+SPARK_SKIP = frozenset({"step", "total_steps", "ts"})
+
+
+def _spark_key(keys: set[str]) -> str | None:
+    """The one metric a dashboard row plots: `loss` when the job reports it, else the first
+    alphabetically. `web/src/lib/series.ts` orders the detail panel's charts the same way."""
+    if not keys:
+        return None
+    return "loss" if "loss" in keys else min(keys)
+
+
+def _thin(points: list[list[float]], limit: int) -> list[list[float]]:
+    """Evenly spaced sample of at most `limit` points, always keeping the first and the last so
+    the sparkline still starts and ends where the run did."""
+    if len(points) <= limit:
+        return points
+    last = len(points) - 1
+    return [points[round(i * last / (limit - 1))] for i in range(limit)]
+
+
+def spark_view(store, job_ids: list[int]) -> dict[int, dict]:
+    """Per-job sparkline data for the dashboard table: one metric each, already thinned. Jobs
+    that never reported a numeric metric are left out."""
+    out: dict[int, dict] = {}
+    for job_id, events in store.progress_events(job_ids).items():
+        keys = {k for e in events for k, v in e["payload"].items()
+                if k not in SPARK_SKIP and isinstance(v, (int, float))
+                and not isinstance(v, bool)}
+        key = _spark_key(keys)
+        if key is None:
+            continue
+        points = [[e["ts"], float(e["payload"][key])] for e in events
+                  if isinstance(e["payload"].get(key), (int, float))
+                  and not isinstance(e["payload"].get(key), bool)]
+        if not points:
+            continue
+        out[job_id] = {"key": key, "points": _thin(points, SPARK_POINTS),
+                       "latest": points[-1][1]}
+    return out
+
+
 def schedule_projection(daemon, now: float) -> dict[int, list[tuple[float, float]]]:
     queued, running = daemon.snapshot()
     remaining = {q.job_id: q.duration for q in queued}

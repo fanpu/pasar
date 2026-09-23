@@ -185,6 +185,21 @@ class Store:
         rows = self._q("SELECT * FROM events WHERE job_id = ? ORDER BY id", (job_id,))
         return [self._event(r) for r in rows]
 
+    def progress_events(self, job_ids: Iterable[int]) -> dict[int, list[dict]]:
+        """Every job's progress events, in order, from one query — the dashboard needs these for
+        many jobs at once and a per-job round trip would be one query per visible row. Jobs with
+        no progress events are left out of the result entirely."""
+        ids = list(job_ids)
+        if not ids:
+            return {}
+        holes = ",".join("?" * len(ids))
+        rows = self._q(f"SELECT * FROM events WHERE job_id IN ({holes}) AND kind = 'progress' "
+                       "ORDER BY id", tuple(ids))
+        out: dict[int, list[dict]] = {}
+        for r in rows:
+            out.setdefault(r["job_id"], []).append(self._event(r))
+        return out
+
     def last_event(self, job_id: int, kind: str, attempt: int | None = None) -> dict | None:
         sql = "SELECT * FROM events WHERE job_id = ? AND kind = ?"
         args: tuple = (job_id, kind)

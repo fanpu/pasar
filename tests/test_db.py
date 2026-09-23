@@ -68,3 +68,20 @@ def test_machine_events_and_metrics(store):
     assert store.metric_summaries(j) == [
         {"attempt": 1, "metric": "power_w", "avg": 61.0, "max": 81.0, "total": None}
     ]
+
+
+def test_progress_events_for_many_jobs_in_one_query(store):
+    a = store.insert_job(spec(), 1000, 1.0, None)
+    b = store.insert_job(spec(), 1000, 1.0, None)
+    c = store.insert_job(spec(), 1000, 1.0, None)
+    store.add_event(a, 1, 5.0, "progress", 1, {"step": 1, "loss": 0.9})
+    store.add_event(a, 1, 6.0, "checkpoint", 1, {"step": 1})
+    store.add_event(a, 1, 7.0, "progress", 2, {"step": 2, "loss": 0.5})
+    store.add_event(b, 1, 8.0, "progress", 1, {"step": 1, "acc": 0.3})
+    store.add_event(c, 1, 9.0, "progress", 1, {"step": 1, "loss": 0.1})
+
+    got = store.progress_events([a, b])
+    assert set(got) == {a, b}
+    assert [(e["ts"], e["payload"]["loss"]) for e in got[a]] == [(5.0, 0.9), (7.0, 0.5)]
+    assert [e["payload"]["acc"] for e in got[b]] == [0.3]
+    assert store.progress_events([]) == {}

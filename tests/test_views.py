@@ -1,6 +1,14 @@
 from pasar.models import Attempt, EndKind
 from pasar.units import GiB
-from pasar.views import job_view, lost_time, run_time, schedule_projection, status_view
+from pasar.views import (
+    SPARK_POINTS,
+    job_view,
+    lost_time,
+    run_time,
+    schedule_projection,
+    spark_view,
+    status_view,
+)
 
 
 def test_run_time_and_lost_time():
@@ -31,3 +39,36 @@ def test_job_and_status_views(daemon, executor, clock, make_spec):
     s = status_view(daemon, now, proj)
     assert s["pool"] == 105 * GiB and s["reserved"] == 66 * GiB and s["free"] == 39 * GiB
     assert s["blocked"] == [2]
+
+
+def test_spark_view_prefers_loss_over_other_metrics(daemon, make_spec):
+    daemon.submit(make_spec())
+    daemon.store.add_event(1, 1, 5.0, "progress", 1, {"step": 1, "acc": 0.3, "loss": 0.9})
+    daemon.store.add_event(1, 1, 6.0, "progress", 2, {"step": 2, "acc": 0.6, "loss": 0.4})
+    sparks = spark_view(daemon.store, [1])
+    assert sparks[1]["key"] == "loss"
+    assert sparks[1]["points"] == [[5.0, 0.9], [6.0, 0.4]]
+    assert sparks[1]["latest"] == 0.4
+
+
+def test_spark_view_falls_back_to_first_key_and_skips_bookkeeping(daemon, make_spec):
+    daemon.submit(make_spec())
+    daemon.submit(make_spec())
+    # `step`/`total_steps`/`ts` are bookkeeping, and a string value isn't plottable.
+    daemon.store.add_event(1, 1, 5.0, "progress", 1,
+                           {"step": 1, "total_steps": 99, "ts": 5.0, "zed": 2.0, "acc": 0.3})
+    daemon.store.add_event(2, 1, 5.0, "progress", 1, {"step": 1, "phase": "warmup"})
+    sparks = spark_view(daemon.store, [1, 2])
+    assert sparks[1]["key"] == "acc"
+    assert 2 not in sparks  # nothing plottable, so no row sparkline
+
+
+def test_spark_view_downsamples_long_runs_keeping_both_ends(daemon, make_spec):
+    daemon.submit(make_spec())
+    for i in range(500):
+        daemon.store.add_event(1, 1, float(i), "progress", i, {"step": i, "loss": 1.0 - i / 1000})
+    points = spark_view(daemon.store, [1])[1]["points"]
+    assert len(points) == SPARK_POINTS
+    assert points[0] == [0.0, 1.0]
+    assert points[-1] == [499.0, 1.0 - 499 / 1000]
+    assert points == sorted(points)  # still in time order after thinning
