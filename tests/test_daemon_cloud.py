@@ -498,6 +498,43 @@ def test_an_attempt_that_cannot_be_adopted_is_ended_rather_than_left_billing(mak
     assert restarted.job(job_id).state == State.FAILED
 
 
+def test_a_running_job_whose_target_is_gone_is_failed_loudly(make_cloud, repo, tmp_path, clock,
+                                                             executor, probe):
+    # The target was removed from the config while a job was running on it. Nothing here can
+    # poll, stop or price that attempt again, so leaving it running means a job that reads as
+    # running forever, an exception every tick, and budget committed to an unreachable target.
+    daemon, _ = make_cloud()
+    job_id = start(daemon, repo)
+    unit = daemon.store.current_attempt(job_id).unit
+    data = tmp_path / "data"
+    after = Daemon(Config(), Store(data / "pasar.db"), executor, probe, data, clock=clock)
+    after.reconcile()
+    after.tick()
+    job = after.job(job_id)
+    assert job.state == State.FAILED and job.reason == "target_gone"
+    att = after.store.current_attempt(job_id)
+    assert att.end_time == clock.t and att.end_kind == EndKind.FAILED
+    assert after.ledger.committed("fake") == 0
+    events = [e for e in after.store.machine_events() if e["kind"] == "target_gone"]
+    assert len(events) == 1 and unit in events[0]["text"]
+    after.tick()  # said once, not every tick
+    assert len([e for e in after.store.machine_events() if e["kind"] == "target_gone"]) == 1
+
+
+def test_a_waiting_job_whose_target_is_gone_is_not_left_stranded(make_cloud, repo, tmp_path,
+                                                                 clock, executor, probe):
+    daemon, _ = make_cloud()
+    waiting = daemon.submit(cloud_spec(repo))
+    queued = daemon.submit(cloud_spec(repo))
+    daemon.approve(queued.id)
+    data = tmp_path / "data"
+    after = Daemon(Config(), Store(data / "pasar.db"), executor, probe, data, clock=clock)
+    after.tick()
+    for job_id in (waiting.id, queued.id):
+        job = after.job(job_id)
+        assert job.state == State.CANCELLED and job.reason == "target_gone"
+
+
 def test_a_sandbox_whose_attempt_cannot_be_recorded_is_ended(cloud, repo, monkeypatch):
     daemon, provider = cloud
     job = daemon.submit(cloud_spec(repo))

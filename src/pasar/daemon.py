@@ -381,6 +381,7 @@ class Daemon:
     def tick(self) -> None:
         now = self.clock()
         self._sample_machine()
+        self._drop_unreachable(now)
         self._expire_awaiting(now)
         for _, ex in self._cloud_executors():
             # Before the statuses are read: an attempt that ended between two ticks left its own
@@ -392,6 +393,42 @@ class Daemon:
         self._pause_overdue(now)
         self._schedule(now)
         self.changed()
+
+    def _drop_unreachable(self, now: float) -> None:
+        """Settle jobs on a target this pasard cannot reach — one removed from the config, or one
+        whose provider is gone. Without this a running job stays running forever, its attempt
+        never ends (so the budget stays committed to a target nothing can spend on), the poll
+        raises every tick where only the log sees it, and a waiting job can never be approved
+        nor expired. A running job is failed rather than quietly closed: its sandbox may well
+        still be alive, nothing here can end it, and somebody has to go and look."""
+        for job in self.store.list_jobs(ACTIVE):
+            if job.spec.target in self.executors:
+                continue
+            att = self.store.current_attempt(job.id)
+            summary = (f"{job.spec.target} is no longer configured on this pasard, so this "
+                       "attempt cannot be followed")
+            if att is not None and att.end_time is None:
+                self.store.update_attempt(job.id, att.n, end_time=now, end_kind=EndKind.FAILED,
+                                          reason="target_gone", summary=summary)
+            self.store.add_machine_event(
+                now, "target_gone",
+                f"job {job.id} runs on {job.spec.target}, which is not configured here: "
+                f"{att.unit if att else 'its attempt'} may still be running and billing — "
+                "end it at the provider, or put the target back and restart pasard")
+            self.store.update_job(job.id, state=State.FAILED, reason="target_gone",
+                                  summary=summary, stop_requested=None)
+            self.cloud_units.pop(job.id, None)
+            self.usage.pop(job.id, None)
+        for job in self.store.list_jobs([State.AWAITING, State.QUEUED]):
+            if job.spec.target in self.executors:
+                continue
+            self.store.add_machine_event(
+                now, "target_gone", f"job {job.id} is waiting for {job.spec.target}, which is "
+                "not configured here; it was cancelled rather than left waiting forever")
+            self.store.update_job(
+                job.id, state=State.CANCELLED, reason="target_gone",
+                summary=f"{job.spec.target} is no longer configured on this pasard; nothing was "
+                        "spent — submit it again to a target that is")
 
     def _expire_awaiting(self, now: float) -> None:
         """An approval nobody gave is a job nobody wants; queue_time is when it started waiting."""
