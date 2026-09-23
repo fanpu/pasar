@@ -343,14 +343,25 @@ class Daemon:
         target = self.cfg.clouds.get(job.spec.target)
         return target is not None and self._job_left(job, target) < JOB_CAP_FLOOR
 
-    def _cap_reached(self, job: Job, target: CloudTarget) -> str:
-        """Why a job with nothing left under its lifetime cap cannot run again, and who can
-        change that. It waits rather than fails: raising the cap and approving it again lets it
-        carry on from its checkpoint."""
+    def _cap_reached(self, job: Job, target: CloudTarget,
+                     waiting_since: float | None = None) -> str:
+        """Why a job with nothing left under its lifetime cap cannot run again, who can change
+        that, and until when. It waits rather than fails: raising the cap and approving it again
+        lets it carry on from its checkpoint. But only for `approval_ttl`, like any job waiting
+        for approval (`_expire_awaiting`), so the message names the moment it is cancelled —
+        from `waiting_since`, for a caller about to start that wait, else from the wait already
+        under way. A resubmit is no way round the cap either: persist dirs are per job, so a new
+        job starts over, and this one's checkpoint comes home by pull once it has ended."""
+        since = job.queue_time if waiting_since is None else waiting_since
+        expires = time.strftime("%Y-%m-%d %H:%M", time.localtime(since + target.approval_ttl))
         return (f"has spent ${self.ledger.job_spent(job.id):.2f} of the "
                 f"${target.max_job_cost:.2f} one job may spend on {target.name} (max_job_cost), "
                 "so it waits here until that limit is raised, which is done by the user in "
-                "pasard's config, not by an agent. Approve it again once it has been raised")
+                "pasard's config, not by an agent. Approve it again once it has been raised, "
+                f"before {expires}: unapproved by then, it is cancelled (approval_ttl, "
+                f"{fmt_duration(target.approval_ttl)}). Submitting it again instead starts over "
+                "from scratch — a new job cannot resume from this one's checkpoint, which is "
+                f"pulled home once this job has ended (automatically, or `pasar pull {job.id}`)")
 
     def _over_job_cap(self, spec: JobSpec, target: CloudTarget, rate: float, est: float) -> str:
         """The refusal for a submit whose estimate alone is past the job cap: the figures, the
@@ -1633,7 +1644,7 @@ class Daemon:
                 # Waiting, not failed, but "approve it again" would be wrong: approval is refused
                 # until the cap is raised, and whoever reads this should know that up front.
                 reason = "job_cap"
-                summary = self._cap_reached(job, self.cfg.clouds[job.spec.target])
+                summary = self._cap_reached(job, self.cfg.clouds[job.spec.target], now)
         else:
             state, retries_used = self._retry_state(job)
         extra = {}
@@ -1884,7 +1895,7 @@ class Daemon:
             # Approval refuses a job with nothing left under its cap, so this is a cap lowered in
             # the config after the approval: launching would buy a sandbox a second of run time.
             self.store.update_job(job.id, state=State.AWAITING, queue_time=now, reason="job_cap",
-                                  summary=self._cap_reached(job, target))
+                                  summary=self._cap_reached(job, target, now))
             return
         prior = self.store.attempts(job.id)
         n = len(prior) + 1

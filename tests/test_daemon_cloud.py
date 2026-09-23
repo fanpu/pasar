@@ -2653,8 +2653,16 @@ def test_a_job_that_has_spent_its_cap_stays_awaiting_until_the_cap_is_raised(clo
     job = daemon.job(job_id)
     assert job.state == State.AWAITING and job.reason == "job_cap"
     assert "$10.00" in job.summary and "max_job_cost" in job.summary
-    with pytest.raises(Conflict, match="max_job_cost"):
+    # It does not wait for good: approval_ttl after it started waiting it is cancelled like
+    # any job nobody approved, and the message says when. A resubmit is no way round that
+    # either: it would be a new job, starting over, not resuming from this one's checkpoint.
+    ttl = daemon.cfg.clouds["fake"].approval_ttl
+    expires = time.strftime("%Y-%m-%d %H:%M", time.localtime(job.queue_time + ttl))
+    assert expires in job.summary and "approval_ttl" in job.summary
+    assert "starts over" in job.summary and "pasar pull" in job.summary
+    with pytest.raises(Conflict, match="max_job_cost") as refused:
         daemon.approve(job_id)
+    assert expires in str(refused.value)
     job = daemon.job(job_id)
     assert job.state == State.AWAITING  # not failed: a raised cap lets it carry on
     assert len(daemon.store.approvals(job_id)) == 2  # and the refusal wrote nothing

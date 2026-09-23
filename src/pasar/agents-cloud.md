@@ -11,8 +11,8 @@ checkpoints, `pasar wait` and `pasar cancel` as a local one. It also costs real 
 ## The rules
 
 - **Submit to the cloud only with the user's explicit go-ahead for this work.** Proposing is
-  yours to do; deciding is theirs. Never pass `--on` as your own call, and never to dodge a busy
-  local GPU.
+  yours to do; deciding is theirs. Never pass `--on` as your own call, and never submit to dodge
+  a busy GPU without asking.
 - **Never approve.** Every cloud attempt waits in `awaiting` until a person approves it. There is
   no `pasar approve` command. Never call `POST /api/jobs/{id}/approve` (with or without
   `?extend=1`) or `/reject`, on the user's behalf or otherwise. The approval UI isn't built yet,
@@ -71,7 +71,8 @@ Vendor spec-sheet figures. They are rough guides for napkin math, not benchmarks
 
 ## When to ask
 
-Ask the user about the cloud when all three hold:
+Ask the user about the cloud when the first two hold. The third decides what you say, not
+whether you ask:
 
 1. **The local wait is long, roughly over 2 hours.** Count the time until the result: the run
    itself plus the local queue ahead of it. Get the run time from a measured rate (time a few
@@ -83,8 +84,8 @@ Ask the user about the cloud when all three hold:
 2. **A cloud GPU would plausibly more than halve it.** Check the table: is the job limited by
    compute or bandwidth that a bigger card has more of? A job limited by data loading, CPU work,
    Python overhead or I/O gains little from a faster GPU.
-3. **The estimate fits under the job cap.** If it doesn't, still propose it and say so: the user
-   may raise the cap, or pick a cheaper card or a shorter first run.
+3. **Check the estimate against the job cap.** If it doesn't fit, still propose it and say so:
+   the user may raise the cap, or pick a cheaper card or a short first run.
 
 Ask before you start, not after the local run is half done. One ask covers one piece of work: a
 sweep is one ask, with the per-job and the total cost.
@@ -157,13 +158,17 @@ me to submit it?"
 
 ## Spending prudently
 
-- Stay well under the job cap. A run that would need most of it is better as a short first run
-  with a checkpoint, then a decision on the rest.
+- Stay well under the job cap. A run that would need most of it is better preceded by a short
+  first run, as a separate small job that proves the setup and checkpoints, then the user's
+  decision on the rest.
 - Always pass `--max-cost`, a little above the estimate (the example: $6 estimated, `--max-cost
   8`). A cap that bites pauses the job rather than killing it, and the next approval resumes from
   the checkpoint.
-- Prefer short attempts with frequent checkpoints over one long attempt. Checkpoint every 10-15
-  minutes of wall-clock time, and save the first one early.
+- Size `--time` for the whole run, not for a slice of it. A job may pause at its approved run
+  time only 5 times in its whole life (`pause_limit`): every `time_limit` pause counts, across all
+  its attempts, not just ones in a row, and the fifth fails it. So don't plan one run as a string
+  of short attempts. Still checkpoint every 10-15 minutes of wall-clock time, and save the first
+  one early: a pause, a reclaim or the cap resumes from it.
 - `pasar cancel` a cloud job you no longer need, awaiting or running.
 - Results left at the provider are billed as storage even when nothing runs. `pasar pull` them.
 
@@ -233,7 +238,7 @@ A cloud job goes back to `awaiting` rather than ending when:
 | Reason | What happened | What to do |
 |---|---|---|
 | `time_limit` | Its approved run time ran out before it finished. | Tell the user; they approve it again to carry on. |
-| `job_cap` | It has spent all its lifetime cap (`max_job_cost`). It waits until the user raises the cap. | Tell the user. Never work around it. |
+| `job_cap` | It has spent all its lifetime cap (`max_job_cost`). It waits for the user to raise the cap and approve it again, but only for `approval_ttl` (24 h by default; `summary` gives the time): unapproved by then, it is cancelled. Resubmitting starts over from scratch: a new job can't resume from this one's checkpoint, which is pulled home once this job ends. | Tell the user, with the deadline. Never work around it. |
 | `cloud_preempted` | The provider reclaimed the machine (a spot interruption, a host failure). Not a failure. | Tell the user; they approve it again to run again. |
 | `price_rose` | Its price rose past what was approved, between approval and launch. `summary` has the old ceiling and the new price. | Tell the user; they approve again if the new price is fine. |
 
@@ -246,7 +251,7 @@ Cloud-only terminal reasons:
 
 | Reason | What happened | What to do |
 |---|---|---|
-| `pause_limit` | It ran out of its approved time 5 times running without finishing. Each pause on its own is not a failure, but 5 with nothing to show for them means something is wrong. | Check that it checkpoints and resumes, then ask about resubmitting with a longer `--time`. |
+| `pause_limit` | It ran out of its approved time for the 5th time in its life (every `time_limit` pause counts, not only ones in a row) without finishing. One pause is not a failure, but 5 means `--time` was far too short or it isn't resuming. | Check that it checkpoints and resumes, then ask about resubmitting with a `--time` for the whole run. A resubmit starts over; this job's checkpoints are pulled home. |
 | `target_gone` | Its target is no longer configured here, or its provider could not be set up (often a bad `~/.modal.toml`; pasard's log says which). `failed` if it was running: its sandbox may still be billing, so tell the user to end it at the provider. A waiting job is left waiting when only the provider failed, and `cancelled` when the target left the config; its summary says whether anything was spent and where earlier attempts' files are. | Tell the user what the summary says to fix. |
 
 ## Getting results back
@@ -259,9 +264,10 @@ that is the only copy.
 `pasar pull <id> [--to DIR] [--keep]` fetches it by hand. It verifies every file against what
 the provider listed, and only then deletes the remote copy, exactly the files it verified
 (`--keep` leaves it, for the sweep). If the job's files changed while it pulled, it keeps the
-remote copy and says so: pull again with a different `--to` for the rest. It is refused for a job that hasn't finished yet (its checkpoint is still
-live and the next attempt may resume from it), a local job (there is nothing on a provider to
-pull), or a destination that already has something in it. A job that never wrote anything
+remote copy and says so: pull again with a different `--to` for the rest. It is refused for a
+job that hasn't finished yet (its checkpoint is still live and the next attempt may resume from
+it), a local job (there is nothing on a provider to pull), or a destination that already has
+something in it. A job that never wrote anything
 reports that and exits `0`.
 
 ## The `cloud` object

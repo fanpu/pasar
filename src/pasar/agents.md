@@ -235,7 +235,7 @@ pasar can also run a job on a rented cloud GPU (`pasar submit --on TARGET --gpu 
 real money, so these rules are hard:
 
 - **Submit to the cloud only with the user's explicit go-ahead for this work.** Never as your own
-  idea, and never to dodge a busy local GPU.
+  call, and never submit to dodge a busy GPU without asking.
 - **Never approve.** A cloud job waits `awaiting` until a person approves it. There is no `pasar
   approve` command. Never call `POST /api/jobs/{id}/approve` (with or without `?extend=1`) or
   `/reject`, on the user's behalf or otherwise.

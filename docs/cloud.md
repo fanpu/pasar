@@ -431,8 +431,8 @@ finishes, so the limit pauses instead, and pasar warns early, using the job's re
    the estimated cost to finish. Approving starts a new attempt from the same bundle snapshot,
    which resumes *from the checkpoint* in its persist dir, like a reclaimed job, so that the only
    work lost is the restart time (a job that never checkpointed starts over). Five such pauses
-   without finishing and the job fails
-   instead (`pause_limit`) rather than pausing forever on hardware billed by the second; a
+   over the job's whole life — counted across all its attempts, not only ones in a row — and it
+   fails instead (`pause_limit`) rather than pausing forever on hardware billed by the second; a
    provider reclaim doesn't count toward that five, since it isn't the job's fault.
 3. **Calibration.** Proposed, not implemented: pasar would record each finished cloud job's
    measured pace against its `--time`, by first tag and GPU type (and local jobs' by tag), and at
@@ -492,7 +492,7 @@ Additions:
 
 New end/job reasons: `time_limit` (paused at the approved run time or the wrapper's own backstop;
 the attempt's end kind is `paused`, which counts toward lost time like a preemption), `pause_limit`
-(failed after 5 `time_limit` pauses with nothing finished — a provider reclaim doesn't count
+(failed after its 5th `time_limit` pause, counted over its whole life, with nothing finished — a provider reclaim doesn't count
 toward the five), `cloud_preempted` (the provider reclaimed the sandbox), `price_rose` (the price
 moved above what was approved between approval and launch; back to **awaiting**, not a launch),
 `target_gone` (the job's target is no longer configured, or its provider could not be set up:
@@ -615,9 +615,15 @@ active, or if there are several profiles and none is — which leaves every Moda
 provider. A target left without a provider keeps its waiting jobs (paused, awaiting approval, or
 queued) where they are until it has one again; only a running job is failed, since nothing can
 follow its attempt. A job that finished meanwhile is pulled once the provider is back, however
-long that took: the retention sweep never deletes a job no automatic pull has tried. `max_job_cost` (default $10) caps
-what one job spends over its whole life — every attempt, re-approval and extension — and is raised
-here, by whoever owns this file, not per job.
+long that took: the retention sweep never deletes a job no automatic pull has tried.
+
+`max_job_cost` (default $10) caps what one job spends over its whole life — every attempt,
+re-approval and extension — and is raised here, by whoever owns this file, not per job. A job that
+reaches it pauses (`job_cap`) and waits for the cap to be raised and the job approved again, but
+only for `approval_ttl`, like any job awaiting approval: its summary names the time it is
+cancelled. Submitting it again is no way round the cap: a new job starts over, since persist dirs
+are per job and nothing carries a checkpoint from one job to another; the old job's checkpoint is
+pulled home once it has ended.
 
 `pull_dir` is where automatic pulls land, and where a manual `pasar pull` without `--to` does.
 A pull that fails after downloading leaves its `.pasar-pull-<id>-*` staging directory next to its
