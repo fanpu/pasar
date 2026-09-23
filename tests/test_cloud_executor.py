@@ -507,6 +507,26 @@ def test_cleanup_ends_a_sandbox_that_outlived_its_job(tmp_path):
     assert provider.terminated == ["sb-1"]
 
 
+def test_terminate_stray_ends_a_sandbox_and_forgets_it(tmp_path):
+    ex, provider, _, unit = launched(tmp_path)
+    provider.start("sb-1")
+    assert ex.terminate_stray(unit) is True
+    assert provider.terminated == ["sb-1"]
+    assert ex.unit_of(1, 1) is None  # nothing keeps polling it
+
+
+def test_terminate_stray_reports_a_provider_that_refused(tmp_path):
+    ex, _, _, unit = launched(tmp_path, provider=RefusesToTerminate())
+    assert ex.terminate_stray(unit) is False
+
+
+def test_terminate_stray_leaves_units_that_are_not_this_targets_alone(tmp_path):
+    ex, provider, _, _ = launched(tmp_path)
+    assert ex.terminate_stray("pasar-job-3-1") is False       # a local unit
+    assert ex.terminate_stray("cloud:elsewhere:sb-9") is False  # another target's sandbox
+    assert provider.terminated == []
+
+
 def test_the_state_file_is_private_to_the_user(tmp_path):
     launched(tmp_path)
     assert state_path(tmp_path).stat().st_mode & 0o077 == 0

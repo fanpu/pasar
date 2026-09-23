@@ -184,6 +184,15 @@ class CloudExecutor:
             except Exception:
                 log.exception("reading output for %s failed", unit)
 
+    def terminate_stray(self, unit: str) -> bool:
+        """End a sandbox no job owns. A stray local unit only wastes a cgroup and is left alone
+        for a person to look at; a stray sandbox bills by the second, so it is ended."""
+        parsed = parse_unit(unit)
+        if parsed is None or parsed[0] != self.target.name:
+            return False
+        self._live.pop(unit, None)
+        return self._end(parsed[1])
+
     def unit_of(self, job_id: int, attempt: int) -> str | None:
         """The unit a just-launched attempt got, since its handle only exists after launch."""
         return next((u for u, r in self._live.items()
