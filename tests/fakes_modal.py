@@ -58,6 +58,7 @@ class FakeSandbox:
         self.object_id = f"sb-{len(sdk.sandboxes) + 1}"
         self.tags = dict(kwargs.get("tags") or {})
         self.terminated = False
+        self.terminate_error = None   # a test sets this to make Modal refuse a terminate
         self.execs = []
         self._code = None
         self._out = _FakeStream()
@@ -82,6 +83,8 @@ class FakeSandbox:
         return self._code
 
     def terminate(self):
+        if self.terminate_error:
+            raise RuntimeError(self.terminate_error)
         self.terminated = True
         if self._code is None:
             self.finish(137)
@@ -99,13 +102,26 @@ class FakeSandbox:
         self._out.close()
         self._err.close()
 
+    def hangup(self):
+        """The output ends and no exit code is ever reported: Modal's status went unreadable."""
+        self._out.close()
+        self._err.close()
+
 
 class _FakeStream:
-    """Blocks like modal's does, so the provider's reader threads are exercised for real."""
+    """Blocks like modal's does, so the provider's reader threads are exercised for real.
+
+    Each iterator keeps its own position instead of consuming the chunk, because two providers
+    can follow one sandbox at once — that is what a pasard restart looks like — and each of them
+    has to see the whole stream. `handed` counts deliveries, so a test can wait until a reader
+    really has a chunk rather than guessing with a sleep.
+    """
 
     def __init__(self):
         self.chunks = []
+        self.handed = 0
         self.closed = False
+        self.error = None
         self.cv = threading.Condition()
 
     def push(self, text):
@@ -118,16 +134,25 @@ class _FakeStream:
             self.closed = True
             self.cv.notify_all()
 
+    def fail(self, message):
+        """Drop the stream mid-job, the way a gRPC stream that cannot be reconnected does."""
+        with self.cv:
+            self.error = message
+            self.cv.notify_all()
+
     def __iter__(self):
+        at = 0
         while True:
             with self.cv:
-                while not self.chunks and not self.closed:
+                while len(self.chunks) <= at and not self.closed and not self.error:
                     self.cv.wait(0.05)
-                if self.chunks:
-                    yield self.chunks.pop(0)
-                    continue
-                if self.closed:
+                if self.error:
+                    raise RuntimeError(self.error)
+                if len(self.chunks) <= at:
                     return
+                chunk, at = self.chunks[at], at + 1
+                self.handed += 1
+            yield chunk
 
 
 class FakeApp:

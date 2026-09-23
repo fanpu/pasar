@@ -1,10 +1,12 @@
 """ModalProvider against a fake SDK: no network, no credentials, no money."""
 
+import threading
 import time
 
 import pytest
 
 from pasar.cloud import container as c
+from pasar.cloud import modal_provider
 from pasar.cloud.base import Phase
 from pasar.cloud.bundle import EnvSpec
 from pasar.cloud.modal_provider import HANDLE_TAG, ModalProvider
@@ -35,6 +37,33 @@ def _wait(predicate, timeout=5.0):
     return False
 
 
+def _running(p, sdk, tmp_path, **kw):
+    """A launched attempt whose sandbox exists and whose watcher is following it."""
+    p.prepare_image(EnvSpec({}, "img"))
+    req = launch_request(tmp_path, **kw)
+    # `list()` finds a target's sandboxes by this tag, and fakes_cloud does not set it: the
+    # executor is what adds it in production (CloudExecutor.launch), not the request builder.
+    req.tags["pasar_target"] = "modal"
+    handle = p.launch(req)
+    box = sdk.wait_for_sandbox()
+    assert _wait(lambda: p.status(handle).phase is Phase.RUNNING)
+    return handle, box
+
+
+class _FakeClock:
+    """A clock the provider's own sleeps advance, so a two-minute wait costs no real time."""
+
+    def __init__(self, now=1000.0):
+        self.now = now
+
+    def __call__(self):
+        return self.now
+
+    def sleep(self, seconds):
+        self.now += seconds
+
+
+# ---- preparing to run
 def test_prepare_image_writes_the_env_files_and_caches_by_key(provider, tmp_path):
     p, _sdk = provider
     env = EnvSpec({"pyproject.toml": b"[project]", "packages/x/pyproject.toml": b"[project]"},
@@ -48,6 +77,18 @@ def test_prepare_image_writes_the_env_files_and_caches_by_key(provider, tmp_path
     assert p._images["k1"] is first  # cached: a second job on the same lockfile rebuilds nothing
 
 
+def test_launching_an_image_nobody_prepared_refuses_before_anything_is_created(provider,
+                                                                               tmp_path):
+    """The executor can handle a refusal it sees synchronously; an attempt that failed inside
+    the watcher thread has already been recorded, and costs a sandbox to find out."""
+    p, sdk = provider
+    with pytest.raises(KeyError):
+        p.launch(launch_request(tmp_path))
+    assert sdk.sandboxes == []
+    assert p.status("h-1-1-nothing").phase is Phase.GONE
+
+
+# ---- launching
 def test_launch_returns_before_any_network_call(provider, tmp_path):
     """The daemon's tick runs on the loop that serves the web UI, and a cold image build takes
     minutes; a launch that waited for one would freeze the dashboard."""
@@ -58,6 +99,8 @@ def test_launch_returns_before_any_network_call(provider, tmp_path):
         handle = p.launch(launch_request(tmp_path, job_id=7, attempt=2))
         assert handle.startswith("h-7-2-")
         assert p.status(handle).phase is Phase.PENDING
+        assert sdk.sandboxes == []
+        time.sleep(0.05)           # and it is the hook holding it, not just the head start
         assert sdk.sandboxes == []
     finally:
         p._pause_before_create.clear()
@@ -125,6 +168,159 @@ def test_a_launch_that_fails_ends_the_attempt_with_the_reason_in_its_log(provide
     assert data.endswith(b"\n")  # the pump only ever consumes whole lines
 
 
+def test_a_watcher_that_dies_still_ends_the_attempt(provider, tmp_path):
+    """A box left in a phase nothing will move again wedges the job for ever: the daemon sees
+    `done=False` on every tick while the sandbox goes on billing to its own timeout."""
+    p, sdk = provider
+
+    def no_threads_left(box, sb):
+        raise RuntimeError("can't start new thread")
+
+    p._stream = no_threads_left
+    p.prepare_image(EnvSpec({}, "img"))
+    handle = p.launch(launch_request(tmp_path))
+    box = sdk.wait_for_sandbox()
+    assert _wait(lambda: p.status(handle).phase is Phase.EXITED)
+    assert _wait(lambda: box.terminated)
+    assert b"can't start new thread" in p.read_output(handle, 0)[0]
+
+
+# ---- following an attempt's output
+def test_output_is_served_from_exactly_the_cursor_asked_for(provider, tmp_path):
+    p, sdk = provider
+    handle, box = _running(p, sdk, tmp_path)
+    box.emit("alpha\nbeta\n")
+    assert _wait(lambda: p.read_output(handle, 0)[0] == b"alpha\nbeta\n")
+    assert p.read_output(handle, 6)[0] == b"beta\n"
+    assert p.read_output(handle, 11)[0] == b""
+    box.emit("gamma\n")
+    assert _wait(lambda: p.read_output(handle, 11)[0] == b"gamma\n")
+    assert p.read_output(handle, 17) == (b"", 17)
+
+
+def test_reading_forward_then_back_to_an_unconsumed_tail_still_works(provider, tmp_path):
+    """The pump stops at the last complete line, so it re-asks for the tail it did not take."""
+    p, sdk = provider
+    handle, box = _running(p, sdk, tmp_path)
+    box.emit("one\ntwo")
+    assert _wait(lambda: p.read_output(handle, 0)[0] == b"one\n")
+    box.emit(" more\n")
+    assert _wait(lambda: p.read_output(handle, 4)[0] == b"two more\n")
+    assert p.read_output(handle, 4)[0] == b"two more\n"   # asking twice returns the same bytes
+
+
+def test_reading_behind_what_was_already_handed_over_refuses(provider, tmp_path):
+    """Serving a window that starts anywhere but the cursor splices the job's log together out
+    of order, silently; a cursor that has gone backwards is a bug worth hearing about."""
+    p, sdk = provider
+    handle, box = _running(p, sdk, tmp_path)
+    box.emit("alpha\nbeta\n")
+    assert _wait(lambda: p.read_output(handle, 6)[0] == b"beta\n")
+    with pytest.raises(ValueError, match="behind"):
+        p.read_output(handle, 0)
+
+
+def test_stderr_lands_in_the_same_stream(provider, tmp_path):
+    p, sdk = provider
+    handle, box = _running(p, sdk, tmp_path)
+    box.emit("Traceback\n", stream="stderr")
+    assert _wait(lambda: b"Traceback\n" in p.read_output(handle, 0)[0])
+
+
+def test_a_partial_line_never_splices_into_the_other_stream(provider, tmp_path):
+    """Both streams share one buffer, and the wrapper's \x1e control lines are the only record
+    of a job's exit status, its events and its GPU samples: half a line of stdout landing inside
+    one loses all of it, and the attempt then ends with no account of itself."""
+    p, sdk = provider
+    handle, box = _running(p, sdk, tmp_path)
+    box.emit("\x1epasar:control-")
+    assert _wait(lambda: box.stdout.handed == 1)   # the reader has it, and is holding it
+    assert p.read_output(handle, 0)[0] == b""
+    box.emit("TRACEBACK\n", stream="stderr")
+    assert _wait(lambda: p.read_output(handle, 0)[0] == b"TRACEBACK\n")
+    box.emit("line\n")
+    assert _wait(lambda: p.read_output(handle, 0)[0] == b"TRACEBACK\n\x1epasar:control-line\n")
+
+
+def test_a_last_line_with_no_newline_still_reaches_the_log(provider, tmp_path):
+    """The pump only consumes whole lines, so a job whose last write has no newline would
+    otherwise have it dropped — including a traceback's last frame."""
+    p, sdk = provider
+    handle, box = _running(p, sdk, tmp_path)
+    box.emit("no newline here")
+    box.finish(0)
+    assert _wait(lambda: p.status(handle).phase is Phase.EXITED)
+    assert p.read_output(handle, 0)[0] == b"no newline here\n"
+
+
+# ---- how it ended
+def test_status_reports_the_exit_code_once_the_sandbox_ends(provider, tmp_path):
+    p, sdk = provider
+    handle, box = _running(p, sdk, tmp_path)
+    box.finish(0)
+    assert _wait(lambda: p.status(handle).phase is Phase.EXITED)
+    st = p.status(handle)
+    assert st.exit_code == 0 and st.ended_by_provider is False
+    assert st.console_url.startswith("https://modal.test/")
+    assert st.gpu_type == "H100"
+
+
+def test_an_unexplained_137_reads_as_the_provider_ending_it(provider, tmp_path):
+    """Modal reports 137 for every termination, so the executor needs to know when pasar did not
+    ask — that is a reclaim, and a reclaim pauses the job instead of failing it."""
+    p, sdk = provider
+    handle, box = _running(p, sdk, tmp_path)
+    box.finish(137)
+    assert _wait(lambda: p.status(handle).phase is Phase.EXITED)
+    assert p.status(handle).ended_by_provider is True
+
+
+def test_a_137_pasar_asked_for_is_not_a_reclaim(provider, tmp_path):
+    p, sdk = provider
+    handle, _box = _running(p, sdk, tmp_path)
+    p.terminate(handle)
+    assert _wait(lambda: p.status(handle).phase is Phase.EXITED)
+    st = p.status(handle)
+    assert st.exit_code == 137 and st.ended_by_provider is False
+
+
+def test_an_exit_status_that_never_arrives_is_a_failure_not_a_reclaim(tmp_path):
+    """Pasar being unable to read a status is not evidence that Modal took the machine away.
+    Recording a reclaim there pauses the job, asks a person to approve another paid attempt, and
+    does not count toward PAUSE_LIMIT, so it can repeat without bound."""
+    sdk = FakeSDK()
+    clock = _FakeClock()
+    p = ModalProvider(_target(), tmp_path / "state", sdk=sdk, clock=clock, sleep=clock.sleep)
+    try:
+        handle, box = _running(p, sdk, tmp_path)
+        box.hangup()                      # output ends; no exit code is ever reported
+        assert _wait(lambda: p.status(handle).phase is Phase.EXITED)
+        st = p.status(handle)
+        assert st.exit_code is None
+        assert st.ended_by_provider is False
+        assert b"never reported an exit status" in p.read_output(handle, 0)[0]
+    finally:
+        p.close()
+
+
+def test_output_that_stops_early_says_so_in_the_job_log(provider, tmp_path):
+    """A stream that drops cannot be reconnected, so the log simply stops. Unmarked, that reads
+    exactly like a job that went quiet, which is hours of guessing on a long run."""
+    p, sdk = provider
+    handle, box = _running(p, sdk, tmp_path)
+    box.stdout.fail("the stream was reset")
+    assert _wait(lambda: b"modal stopped sending this attempt's stdout" in
+                 p.read_output(handle, 0)[0])
+
+
+# ---- stopping an attempt
+def test_request_stop_signals_pid_one(provider, tmp_path):
+    p, sdk = provider
+    handle, box = _running(p, sdk, tmp_path)
+    p.request_stop(handle)
+    assert box.execs == [("bash", "-c", "kill -TERM 1")]
+
+
 def test_terminate_before_the_sandbox_exists_still_ends_it(provider, tmp_path):
     """The window between launch() returning and Sandbox.create landing is exactly where a
     sandbox nobody is watching would go on billing to its own 24-hour timeout."""
@@ -136,3 +332,131 @@ def test_terminate_before_the_sandbox_exists_still_ends_it(provider, tmp_path):
     p._pause_before_create.clear()
     box = sdk.wait_for_sandbox()
     assert _wait(lambda: box.terminated)
+
+
+def test_a_terminate_modal_refuses_reaches_the_caller(provider, tmp_path):
+    """CloudExecutor._end turns a raise into a False and asks again at TERMINATE_RETRY. A
+    refusal reported as success is a rented GPU billing on with pasar sure it has ended."""
+    p, sdk = provider
+    handle, box = _running(p, sdk, tmp_path)
+    box.terminate_error = "503 from the control plane"
+    with pytest.raises(RuntimeError, match="503"):
+        p.terminate(handle)
+    assert box.terminated is False
+
+
+def test_terminating_a_handle_this_process_never_launched_finds_it_by_tag(provider, tmp_path):
+    """After a pasard restart the provider has no box for a live attempt; a terminate that
+    quietly did nothing would leave it billing with nobody's name on it."""
+    p, sdk = provider
+    handle, box = _running(p, sdk, tmp_path)
+    fresh = ModalProvider(_target(), tmp_path / "state2", sdk=sdk)
+    try:
+        fresh.terminate(handle)
+        assert box.terminated is True
+    finally:
+        fresh.close()
+
+
+def test_stopping_a_handle_this_process_never_launched_finds_it_by_tag(provider, tmp_path):
+    p, sdk = provider
+    handle, box = _running(p, sdk, tmp_path)
+    fresh = ModalProvider(_target(), tmp_path / "state2", sdk=sdk)
+    try:
+        fresh.request_stop(handle)
+        assert box.execs == [("bash", "-c", "kill -TERM 1")]
+    finally:
+        fresh.close()
+
+
+# ---- re-attaching, listing, pricing
+def test_status_of_an_unknown_handle_finds_it_by_tag(provider, tmp_path):
+    """After a pasard restart the provider has never seen the handle, but the attempt is still
+    running and still billing; the tag is how it is picked back up."""
+    p, sdk = provider
+    handle, box = _running(p, sdk, tmp_path)
+    fresh = ModalProvider(_target(), tmp_path / "state2", sdk=sdk)
+    try:
+        assert _wait(lambda: fresh.status(handle).phase is Phase.RUNNING)
+        box.emit("after the restart\n")
+        assert _wait(lambda: b"after the restart\n" in fresh.read_output(handle, 0)[0])
+    finally:
+        fresh.close()
+
+
+def test_status_of_a_handle_no_sandbox_carries_is_gone(provider, tmp_path):
+    p, _sdk = provider
+    assert _wait(lambda: p.status("h-9-1-deadbeef").phase is Phase.GONE)
+
+
+def test_list_returns_our_handles_with_their_tags(provider, tmp_path):
+    p, sdk = provider
+    handle, box = _running(p, sdk, tmp_path)
+    assert p.list() == [(handle, box.tags)]
+    box.finish(0)
+    assert p.list() == []  # a sandbox that has ended is not a stray to go and terminate
+
+
+def test_rates_are_served_from_memory_after_the_first_call(provider, tmp_path):
+    p, sdk = provider
+    first = p.rates()
+    assert first["gpu_hour_cost_t4"] == 0.59
+    sdk.rates_value = {"gpu_hour_cost_t4": 99.0}
+    assert p.rates()["gpu_hour_cost_t4"] == 0.59  # still cached; a thread refreshes it later
+
+
+def test_rates_are_aliased_so_a_gpu_spelt_with_a_dash_is_priced(provider, tmp_path):
+    """`--gpu A100-80GB` becomes the key `gpu_hour_cost_a100-80gb`, and Modal spells its own with
+    underscores; an unpriced GPU refuses to estimate, so the job would never start."""
+    p, _sdk = provider
+    rates = p.rates()
+    assert rates["gpu_hour_cost_a100-80gb"] == 2.5
+    assert rates["gpu_hour_cost_a100_80gb"] == 2.5
+
+
+def test_upload_and_download_say_they_are_not_built(provider):
+    p, _ = provider
+    with pytest.raises(NotImplementedError):
+        p.upload(["/tmp/x"], "k")
+    with pytest.raises(NotImplementedError):
+        p.download(1, "ckpt.pt", "/tmp/x")
+    assert p.billed_cost(["h-1-1-aa"], 0.0) is None
+
+
+# ---- shutting down
+def test_close_stops_following_and_late_output_goes_nowhere(provider, tmp_path):
+    """A reader thread cannot be interrupted, so the one thing close() can promise is that a
+    reader still delivering chunks grows nothing nobody will ever read."""
+    p, sdk = provider
+    handle, box = _running(p, sdk, tmp_path)
+    box.emit("before\n")
+    assert _wait(lambda: p.read_output(handle, 0)[0] == b"before\n")
+    p.close()
+    box.emit("after\n")
+    time.sleep(0.1)
+    assert p.read_output(handle, 7)[0] == b""
+
+
+def test_close_spends_one_join_budget_on_every_watcher_not_one_each(provider, tmp_path,
+                                                                    monkeypatch):
+    """A watcher parked inside Sandbox.create cannot notice `_closing` at all. Waiting each of
+    those out in turn stalls a systemd stop until it turns into a SIGKILL — which is itself how
+    a sandbox is orphaned."""
+    p, sdk = provider
+    monkeypatch.setattr(modal_provider, "JOIN_TIMEOUT", 0.3)
+    gate = threading.Event()
+    real_create = sdk.Sandbox.create
+
+    def slow_create(*args, **kwargs):
+        gate.wait(5.0)      # a cold image build, as far as the watcher can tell
+        return real_create(*args, **kwargs)
+
+    monkeypatch.setattr(sdk.Sandbox, "create", staticmethod(slow_create))
+    p.prepare_image(EnvSpec({}, "img"))
+    for _ in range(3):
+        p.launch(launch_request(tmp_path))
+    started = time.monotonic()
+    p.close()
+    elapsed = time.monotonic() - started
+    gate.set()
+    assert elapsed < 0.9    # one 0.3s budget for all three, not 0.3s each
