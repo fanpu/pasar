@@ -20,6 +20,16 @@ def test_defaults_when_file_missing(tmp_path, monkeypatch):
     assert cfg.default_bid == 1000 and cfg.default_grace == 120
     assert cfg.mascot_dir == str(tmp_path / "cfg" / "pasar" / "mascot")
     assert cfg.data_dir == str(tmp_path / "data" / "pasar")
+    assert cfg.pull_dir == str(tmp_path / "data" / "pasar" / "pulls")
+
+
+def test_pull_dir_defaults_under_data_dir_but_can_be_overridden(tmp_path):
+    cfg = _write(tmp_path, f'data_dir = "{tmp_path / "somewhere"}"\n')
+    assert cfg.pull_dir == str(tmp_path / "somewhere" / "pulls")
+
+    cfg = _write(tmp_path, f'data_dir = "{tmp_path / "somewhere"}"\n'
+                           f'pull_dir = "{tmp_path / "elsewhere"}"\n')
+    assert cfg.pull_dir == str(tmp_path / "elsewhere")
 
 
 def test_parses_sizes_and_durations(tmp_path):

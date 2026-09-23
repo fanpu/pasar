@@ -106,6 +106,7 @@ class Config:
     log_retention_size: int = 20 * GiB
     mascot_dir: str = ""
     data_dir: str = ""
+    pull_dir: str = ""
     allowed_hosts: list[str] = field(default_factory=list)
     clouds: dict[str, CloudTarget] = field(default_factory=dict)
 
@@ -161,6 +162,7 @@ def load_config(path: Path | None = None) -> Config:
     cfg = Config(**kwargs)
     cfg.mascot_dir = cfg.mascot_dir or str(config_dir() / "mascot")
     cfg.data_dir = cfg.data_dir or str(default_data_dir())
+    cfg.pull_dir = cfg.pull_dir or str(Path(cfg.data_dir) / "pulls")
     cfg.clouds = {name: _cloud_target(name, t) for name, t in clouds_raw.items()}
     for group, members in cfg.groups().items():
         if group in cfg.clouds:
