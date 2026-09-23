@@ -342,6 +342,32 @@ def test_the_daemon_stops_a_cloud_job_at_its_approved_run_time(make_cloud, repo,
     assert daemon.store.attempts(job_id)[0].end_kind == EndKind.PAUSED
 
 
+def test_a_job_that_finishes_inside_the_pause_window_is_not_paused(make_cloud, repo, clock):
+    # The daemon asked for a pause and the job finished before it took effect. Recording that as
+    # paused sends a finished job back for approval and pays to run it a second time.
+    daemon, provider = make_cloud(timeout_factor=1.0)
+    job_id = start(daemon, repo)
+    h = handle_of(daemon, job_id)
+    clock.advance(3601)
+    daemon.tick()
+    assert provider.stopped == [h] and daemon.job(job_id).state == State.STOPPING
+    provider.emit(h, ctl(daemon, job_id, {"t": "exit", "code": 0, "signal": None, "reason": None}))
+    daemon.tick()
+    job = daemon.job(job_id)
+    assert job.state == State.COMPLETED and job.reason is None
+    assert daemon.store.attempts(job_id)[0].end_kind == EndKind.COMPLETED
+
+
+def test_a_cancel_still_beats_a_clean_exit(cloud, repo):
+    daemon, provider = cloud
+    job_id = start(daemon, repo)
+    h = handle_of(daemon, job_id)
+    daemon.cancel(job_id)
+    provider.emit(h, ctl(daemon, job_id, {"t": "exit", "code": 0, "signal": None, "reason": None}))
+    daemon.tick()
+    assert daemon.job(job_id).state == State.CANCELLED
+
+
 def test_cancelling_a_running_cloud_job_stops_it(cloud, repo):
     daemon, provider = cloud
     job_id = start(daemon, repo)
