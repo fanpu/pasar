@@ -1,11 +1,28 @@
 """The interface the daemon uses to run attempts."""
 
-from dataclasses import dataclass
+import secrets
+from dataclasses import dataclass, field
 from typing import Protocol
+
+from pasar.cloud.bundle import Bundle
 
 
 class LaunchError(Exception):
     """The attempt could not be started at all."""
+
+
+@dataclass
+class CloudLaunchInfo:
+    """What a cloud attempt needs on top of a local one. `token` prefixes the control lines the
+    in-container wrapper writes, so it is fresh per attempt: a job that printed a guessable one
+    could otherwise forge its own exit status."""
+    job_id: int
+    attempt: int
+    bundle: Bundle
+    gpu: str                 # "H100" or "H100:4"
+    env: dict[str, str]      # the container's whole environment
+    limit: int               # seconds of run time approved
+    token: str = field(default_factory=lambda: secrets.token_hex(16))
 
 
 @dataclass
@@ -15,6 +32,7 @@ class LaunchRequest:
     log_path: str
     mem_max: int | None  # cgroup memory limit in bytes (CPU-side backstop)
     grace: int  # seconds between SIGTERM and SIGKILL when stopped
+    cloud: CloudLaunchInfo | None = None  # set only for attempts run on rented hardware
 
 
 @dataclass
