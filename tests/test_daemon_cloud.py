@@ -521,6 +521,27 @@ def test_an_overdue_job_is_paused_even_when_its_status_cannot_be_read(make_cloud
     assert provider.stopped == [h] and daemon.job(job_id).state == State.STOPPING
 
 
+def test_a_sick_provider_does_not_let_a_stopped_sandbox_bill_to_its_own_timeout(
+        make_cloud, repo, clock, monkeypatch):
+    # Every stop is only a request; the deadline behind it is what ends the sandbox. If that
+    # lived behind a provider status call, a provider outage would let a sandbox the daemon
+    # already knows is overdue bill on to the 24h ceiling.
+    daemon, provider = make_cloud(timeout_factor=1.0)
+    job_id = start(daemon, repo)
+    h = handle_of(daemon, job_id)
+
+    def boom(_handle):
+        raise RuntimeError("the provider is not answering")
+
+    clock.advance(3601)
+    daemon.tick()
+    assert provider.stopped == [h] and provider.terminated == []
+    monkeypatch.setattr(provider, "status", boom)
+    clock.advance(20000)
+    daemon.tick()
+    assert provider.terminated == [h]
+
+
 def test_metrics_are_not_recorded_for_a_cloud_attempt(make_cloud, repo, tmp_path, executor):
     # The recorder summarises this machine's GPU over the attempt's window, which says nothing
     # about a job that ran somewhere else.

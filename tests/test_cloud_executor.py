@@ -49,6 +49,13 @@ class RefusesToTerminate(FakeProvider):
         super().terminate(handle)
 
 
+class SickStatus(FakeProvider):
+    """A provider that can no longer report a status; everything else still works."""
+
+    def status(self, handle):
+        raise RuntimeError("the provider is not answering")
+
+
 def make_target(**kw):
     base = {"name": "fake", "provider": "fake", "daily_budget": 10.0, "monthly_budget": 100.0}
     return CloudTarget(**{**base, **kw})
@@ -273,6 +280,35 @@ def test_a_terminate_the_provider_refuses_is_asked_again(tmp_path):
     st = ex.status(unit)
     assert provider.status("sb-1").phase is Phase.EXITED
     assert st.exited and st.result == "stopped"
+
+
+def test_an_overdue_stop_is_enforced_when_the_provider_cannot_report_a_status(tmp_path):
+    # The deadline is the only thing that makes a stop request binding, and a provider too sick
+    # to answer status() is exactly when a sandbox would otherwise bill to its own 24h timeout.
+    clock = FakeClock()
+    ex, provider, _, unit = launched(tmp_path, clock=clock, provider=SickStatus())
+    provider.start("sb-1")
+    ex.stop(unit)
+    clock.advance(GRACE + STOP_MARGIN - 1)
+    ex.enforce_stops()
+    assert provider.terminated == []
+    clock.advance(2)
+    ex.enforce_stops()
+    assert provider.terminated == ["sb-1"]
+    ex.enforce_stops()
+    assert provider.terminated == ["sb-1"]  # once, not every tick
+
+
+def test_enforce_stops_leaves_an_attempt_that_already_reported_its_exit_alone(tmp_path):
+    clock = FakeClock()
+    ex, provider, _, unit = launched(tmp_path, clock=clock)
+    provider.start("sb-1")
+    ex.stop(unit)
+    provider.emit("sb-1", ctl({"t": "exit", "code": 143, "signal": None, "reason": "stopped"}))
+    ex.poll_output()
+    clock.advance(GRACE + STOP_MARGIN + 60)
+    ex.enforce_stops()
+    assert provider.terminated == []
 
 
 def test_kill_terminates_immediately(tmp_path):

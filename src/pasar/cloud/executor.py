@@ -112,7 +112,7 @@ class CloudExecutor:
         # A wrapper that has printed its exit line is done, whatever the provider still thinks:
         # the sandbox around it may take a while to be reaped, and cleanup() ends any that does.
         if rec.pump.exit_info is None and st.phase not in (Phase.EXITED, Phase.GONE):
-            if rec.stop_deadline is not None and self.clock() >= rec.stop_deadline:
+            if self._stop_due(rec):
                 # It was asked to leave and has not; only the provider can end it now.
                 self._terminate(rec)
                 st = self.provider.status(rec.handle)
@@ -185,6 +185,24 @@ class CloudExecutor:
             except Exception:
                 log.exception("reading output for %s failed", unit)
 
+    def enforce_stops(self) -> None:
+        """End every attempt whose stop deadline has passed, each tick.
+
+        A stop is only ever a request, so the deadline behind it is the only thing that
+        guarantees a sandbox stops billing. It cannot live in `status()` alone: that calls the
+        provider first, and a provider too sick to report a status is exactly the case where an
+        attempt would otherwise run to its 24-hour sandbox timeout while the daemon already knew
+        it was overdue. So the daemon drives this unconditionally, like `poll_output()`, and one
+        attempt the provider refuses to end must not stop the others being ended.
+        """
+        for unit, rec in list(self._live.items()):
+            try:
+                if self._stop_due(rec):
+                    self._terminate(rec)
+                    self._persist(unit)
+            except Exception:
+                log.exception("enforcing the stop deadline of %s failed", unit)
+
     def terminate_stray(self, unit: str) -> bool:
         """End a sandbox no job owns. A stray local unit only wastes a cgroup and is left alone
         for a person to look at; a stray sandbox bills by the second, so it is ended."""
@@ -235,6 +253,13 @@ class CloudExecutor:
             raise LaunchError(f"{self.target.name} allows {self.target.max_runtime}s per "
                               f"attempt, too little for a {grace}s grace period")
         return min(asked, room)
+
+    def _stop_due(self, rec: _Live) -> bool:
+        """Whether this attempt has outstayed the grace period a stop bought it. An attempt whose
+        wrapper has already reported its exit is over whatever the provider still shows, so it is
+        never terminated here: `cleanup()` ends the sandbox around it."""
+        return (rec.stop_deadline is not None and rec.pump.exit_info is None
+                and self.clock() >= rec.stop_deadline)
 
     def _command(self, req: LaunchRequest, info: CloudLaunchInfo, limit: int) -> str:
         spec = json.loads((Path(req.job_dir) / "launch.json").read_text())

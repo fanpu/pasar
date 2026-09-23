@@ -624,6 +624,9 @@ class Daemon:
             # Before the statuses are read: an attempt that ended between two ticks left its own
             # account of why on stdout, and that beats whatever the provider says.
             ex.poll_output()
+            # And unconditionally, because a sandbox asked to stop and still running is billing:
+            # reading its status may be the very thing that is failing.
+            ex.enforce_stops()
         self._poll()
         self._measure(now)
         self._enforce(now)
