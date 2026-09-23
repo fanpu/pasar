@@ -4,6 +4,12 @@ from pasar.config import Config, load_config
 from pasar.units import GiB
 
 
+def _write(tmp_path, content):
+    p = tmp_path / "config.toml"
+    p.write_text(content)
+    return load_config(p)
+
+
 def test_defaults_when_file_missing(tmp_path, monkeypatch):
     monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "cfg"))
     monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "data"))
@@ -121,3 +127,93 @@ def test_cloud_target_rejects_nonpositive_monthly_budget(tmp_path):
     p.write_text('[clouds.modal]\nprovider = "modal"\nbudget = { daily = 50.0, monthly = -10.0 }\n')
     with pytest.raises(ValueError, match="budget.monthly must be positive"):
         load_config(p)
+
+
+def test_cloud_target_parses_profile_owner_and_group(tmp_path):
+    cfg = _write(tmp_path, """
+        [clouds.modal-a]
+        provider = "modal"
+        profile = "alice"
+        owner = "Alice"
+        group = "modal"
+        budget = { monthly = 30.0 }
+    """)
+    t = cfg.clouds["modal-a"]
+    assert (t.profile, t.owner, t.group) == ("alice", "Alice", "modal")
+
+
+def test_owner_defaults_to_the_profile_name(tmp_path):
+    """An approval has to be able to say whose credit it is about to spend, and a username says
+    that; a second hand-written name would only drift out of date."""
+    cfg = _write(tmp_path, """
+        [clouds.modal-a]
+        profile = "alice"
+        budget = { monthly = 30.0 }
+    """)
+    assert cfg.clouds["modal-a"].owner == "alice"
+
+
+def test_owner_falls_back_to_the_target_name_without_a_profile(tmp_path):
+    cfg = _write(tmp_path, "[clouds.solo]\nbudget = { monthly = 5.0 }\n")
+    assert cfg.clouds["solo"].owner == "solo"
+
+
+def test_monthly_budget_alone_is_enough(tmp_path):
+    """An account's monthly credit is the whole budget; a daily slice of it is meaningless."""
+    cfg = _write(tmp_path, """
+        [clouds.m]
+        budget = { monthly = 30.0 }
+    """)
+    assert cfg.clouds["m"].monthly_budget == 30.0
+    assert cfg.clouds["m"].daily_budget == 30.0
+
+
+def test_a_budget_with_neither_figure_is_still_an_error(tmp_path):
+    with pytest.raises(ValueError, match="budget"):
+        _write(tmp_path, "[clouds.m]\nbudget = {}\n")
+
+
+def test_groups_lists_members_in_config_order(tmp_path):
+    # provider is explicit and identical on both members: it defaults to the target's own name,
+    # and "b" and "a" differ, which would otherwise trip the mixed-provider check below.
+    cfg = _write(tmp_path, """
+        [clouds.b]
+        provider = "modal"
+        group = "modal"
+        budget = { monthly = 30.0 }
+        [clouds.a]
+        provider = "modal"
+        group = "modal"
+        budget = { monthly = 30.0 }
+        [clouds.solo]
+        budget = { monthly = 5.0 }
+    """)
+    assert [t.name for t in cfg.groups()["modal"]] == ["b", "a"]
+    assert "solo" not in cfg.groups()
+
+
+def test_a_group_may_not_be_named_after_a_target(tmp_path):
+    """`--on x` has to mean one thing. Catching this at load beats resolving it at submit."""
+    with pytest.raises(ValueError, match="group 'a'"):
+        _write(tmp_path, """
+            [clouds.a]
+            budget = { monthly = 30.0 }
+            [clouds.b]
+            group = "a"
+            budget = { monthly = 30.0 }
+        """)
+
+
+def test_a_groups_members_must_share_a_provider(tmp_path):
+    """Members are interchangeable by definition; two providers in one group are not."""
+    with pytest.raises(ValueError, match="group 'mixed'"):
+        _write(tmp_path, """
+            [clouds.a]
+            provider = "modal"
+            group = "mixed"
+            budget = { monthly = 30.0 }
+            [clouds.b]
+            provider = "runpod"
+            group = "mixed"
+            budget = { monthly = 30.0 }
+        """)

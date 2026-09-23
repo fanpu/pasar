@@ -15,11 +15,14 @@ _DURATION_KEYS = {"default_grace", "pressure_sustain"}
 
 @dataclass
 class CloudTarget:
-    """Cloud provider target; budget.daily gates whether it can be used."""
+    """Cloud provider target; budget.daily or budget.monthly gates whether it can be used."""
     name: str
     provider: str
     daily_budget: float
     monthly_budget: float
+    profile: str = ""
+    owner: str = ""
+    group: str = ""
     max_running: int = 2
     timeout_factor: float = 1.5
     max_runtime: int = 86400          # seconds; Modal's own ceiling
@@ -33,18 +36,21 @@ class CloudTarget:
 
 
 def _cloud_target(name: str, raw: dict) -> CloudTarget:
-    known_keys = {"budget", "provider", "max_running", "timeout_factor", "max_runtime",
-                  "approval_ttl", "env_passthrough", "volumes", "bundle_max", "data_max",
-                  "base_image", "rates"}
+    known_keys = {"budget", "provider", "profile", "owner", "group", "max_running",
+                  "timeout_factor", "max_runtime", "approval_ttl", "env_passthrough", "volumes",
+                  "bundle_max", "data_max", "base_image", "rates"}
     unknown = sorted(set(raw) - known_keys)
     if unknown:
         raise ValueError(f"unknown config keys in cloud target {name!r}: {', '.join(unknown)}")
 
     budget = raw.get("budget") or {}
-    if "daily" not in budget:
-        raise ValueError(f"cloud target {name!r} needs budget.daily before it can be used")
-
-    daily_budget = float(budget["daily"])
+    if "daily" not in budget and "monthly" not in budget:
+        raise ValueError(f"cloud target {name!r} needs budget.daily or budget.monthly before it "
+                         "can be used")
+    # An account whose whole allowance is a monthly credit has no natural daily slice, so the
+    # daily cap defaults to the month's: present, so every existing gate still has a number to
+    # compare against, but never the binding one.
+    daily_budget = float(budget["daily"]) if "daily" in budget else float(budget["monthly"])
     if daily_budget <= 0:
         raise ValueError(f"cloud target {name!r} budget.daily must be positive, got {daily_budget}")
 
@@ -57,6 +63,11 @@ def _cloud_target(name: str, raw: dict) -> CloudTarget:
         provider=raw.get("provider") or name,
         daily_budget=daily_budget,
         monthly_budget=monthly_budget,
+        profile=raw.get("profile", ""),
+        # A Modal username already says whose credit this is, which is all `owner` is for; asking
+        # for a second, hand-written name only invites one that drifts out of date.
+        owner=raw.get("owner") or raw.get("profile") or name,
+        group=raw.get("group", ""),
         max_running=int(raw.get("max_running", 2)),
         timeout_factor=float(raw.get("timeout_factor", 1.5)),
         max_runtime=min(parse_duration(raw.get("max_runtime", "24h")), 86400),
@@ -91,6 +102,15 @@ class Config:
     data_dir: str = ""
     allowed_hosts: list[str] = field(default_factory=list)
     clouds: dict[str, CloudTarget] = field(default_factory=dict)
+
+    def groups(self) -> dict[str, list[CloudTarget]]:
+        """Targets that share a `group`, in config order. A group is what `--on` may name when
+        any of its members will do; a target with no group is only reachable by its own name."""
+        out: dict[str, list[CloudTarget]] = {}
+        for target in self.clouds.values():
+            if target.group:
+                out.setdefault(target.group, []).append(target)
+        return out
 
     def addresses(self) -> list[str]:
         """Return list of addresses with DEFAULT_ADDRESS first, then bind entries.
@@ -136,4 +156,12 @@ def load_config(path: Path | None = None) -> Config:
     cfg.mascot_dir = cfg.mascot_dir or str(config_dir() / "mascot")
     cfg.data_dir = cfg.data_dir or str(default_data_dir())
     cfg.clouds = {name: _cloud_target(name, t) for name, t in clouds_raw.items()}
+    for group, members in cfg.groups().items():
+        if group in cfg.clouds:
+            raise ValueError(f"group {group!r} has the same name as a cloud target, so `--on "
+                             f"{group}` would be ambiguous")
+        providers = {t.provider for t in members}
+        if len(providers) > 1:
+            raise ValueError(f"group {group!r} mixes providers ({', '.join(sorted(providers))}); "
+                             "a group's members have to be interchangeable")
     return cfg
