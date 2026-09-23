@@ -235,7 +235,7 @@ cloud` shows which targets are usable); ask before assuming `--on <target>` will
 A cloud job never launches on its own: it lands **awaiting** a person's approval in the web UI,
 priced at submit time, and only starts once approved there.
 
-    $ pasar submit --time 2h --on modal --gpu H100 --json -- .venv/bin/python train.py
+    $ pasar submit --time 2h --on modal --gpu H100 -- .venv/bin/python train.py
     submitted #7 train (awaiting) on modal
       estimated $7.90, capped at $11.85 for this run
       approve it in the web UI to let it launch
@@ -255,10 +255,11 @@ refused too (it would spend money on whatever is in the working tree now, unseen
 gives the equivalent `pasar submit` command to run instead.
 
 **There is no `pasar approve` command, and agents must never call `POST /api/jobs/{id}/approve`
-(with or without `?extend=1`) or `/reject` directly.** Approval is a web-UI-only action, by
-design: a person looks at the price before it's spent, whether that is a new job's first launch
-or a running job's request for more time (see `needs_more_time` below). `pasar cloud [--json]`
-shows what's waiting:
+(with or without `?extend=1`) or `/reject` directly.** Approval is meant to be a web-UI-only
+action; that UI doesn't exist yet, so for now a person does it by calling the endpoint directly
+themselves — still never an agent, on the user's behalf or otherwise. A person looks at the price
+before it's spent, whether that is a new job's first launch or a running job's request for more
+time (see `needs_more_time` below). `pasar cloud [--json]` shows what's waiting:
 
     $ pasar cloud
     TARGET  PROVIDER  RUNNING  TODAY          MONTH           RATES

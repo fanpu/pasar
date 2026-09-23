@@ -58,7 +58,8 @@ real money, so it's built to be hard to trigger by accident:
 - A cloud target only exists if `config.toml` defines it with a `budget`, and needs its own
   spending limit set at the provider (its dashboard, not pasar) as the real backstop.
 - Every cloud run needs a person's approval in the web UI, at its estimated cost, before it
-  launches — there is no `pasar approve` command.
+  launches — there is no `pasar approve` command. That UI isn't built yet, so today a person
+  approves by calling `POST /api/jobs/{id}/approve` directly.
 - **Agents must only submit with `--on` when the user has explicitly asked for cloud compute for
   that work.**
 
