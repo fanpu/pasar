@@ -343,7 +343,14 @@ class Daemon:
         The ledger is told the same new ceiling (`ledger.record`, the same call `_launch_cloud`
         makes): a longer approved run is a bigger commitment, and the budget gate that reads
         `committed()` has to see it grow, or a job could be extended past what its target's daily
-        or monthly budget would otherwise allow."""
+        or monthly budget would otherwise allow.
+
+        The price is stated, not assumed. An extension commits at *today's* rate, which may not be
+        the rate the first approval was made at — and unlike a launch, there is no price-rise guard
+        to bounce it back, because the person is standing right here. So the job's summary and a
+        `extended` machine event both name the rate being committed to, and say when it is above
+        the one this attempt was approved at: agreeing to more hours is also agreeing to what an
+        hour now costs."""
         job = self.job(job_id)
         if not self._is_cloud(job) or job.state != State.RUNNING:
             raise Conflict(f"job {job_id} is {job.state}, not a running cloud job, so there is "
@@ -355,6 +362,8 @@ class Daemon:
         if att is None:
             raise Conflict(f"job {job_id} has no running attempt to extend")
         now = self.clock()
+        was_rate = next((r["hourly_rate"] for r in self.store.approvals(job_id)
+                         if r["attempt"] == att.n), None)
         approved = self._attempt_seconds(job, att, target)
         overrun = _needs_more_time(self.store, job, self.store.attempts(job_id), now, approved)
         if overrun is None:
@@ -383,6 +392,12 @@ class Daemon:
                 "--max-cost if it should be allowed to run longer")
         self.store.add_approval(job_id, att.n, now, new_cost, new_cost, rate)
         self.ledger.record(target.name, job_id, att.n, new_cost)
+        note = (f"extended to {fmt_duration(new_seconds)} of run time, up to ${new_cost:.2f} at "
+                f"${rate:.2f}/hour")
+        if was_rate is not None and rate > was_rate + PRICE_TOLERANCE:
+            note += f", above the ${was_rate:.2f}/hour it was approved at"
+        self.store.add_machine_event(now, "extended", f"job {job_id} {note}")
+        self.store.update_job(job_id, summary=note)
         self.changed()
         return self.job(job_id)
 

@@ -205,6 +205,58 @@ def test_extending_raises_the_limit_and_the_job_is_not_paused_at_the_old_one(
     assert daemon.job(job_id).state == State.STOPPING
 
 
+def test_extending_grows_what_the_budget_gate_sees_committed(cloud_daemon, cloud_cwd, clock):
+    # Every other extension test reads the approvals row (which is also what the job view shows),
+    # so all of them would still pass if the ledger were never told. The budget gate reads
+    # `Ledger.committed()` instead: a longer approved run is a bigger commitment against the
+    # target's daily and monthly budgets, and it has to show up there too.
+    daemon = cloud_daemon
+    job_id = start(daemon, cloud_cwd)
+    lag_the_job(daemon, clock, job_id)
+    before = daemon.ledger.committed("fake")  # with the clock held still, only the extension moves
+    daemon.approve(job_id, extend=True)       # this figure
+
+    after = daemon.ledger.committed("fake")
+    assert after > before
+    spend = next(r for r in daemon.store.cloud_spend("fake") if r["job_id"] == job_id)
+    assert spend["estimated"] == pytest.approx(daemon.store.approvals(job_id)[0]["max_cost"])
+
+
+def test_extending_says_what_rate_it_commits_at(cloud_daemon, cloud_provider, cloud_cwd, clock,
+                                                 monkeypatch):
+    # A fresh approval that meets a risen price bounces the job back for approval; an extension
+    # cannot, because the person is already standing there. So it has to say what the hour now
+    # costs, and say plainly that it costs more than the price this attempt was approved at.
+    daemon = cloud_daemon
+    job_id = start(daemon, cloud_cwd)
+    was_rate = daemon.store.approvals(job_id)[0]["hourly_rate"]
+    lag_the_job(daemon, clock, job_id)
+    monkeypatch.setattr(cloud_provider, "rates", lambda: {"gpu_hour_cost_h100": 7.90,
+                                                          "cpu_hour_cost_sandbox": 0.14,
+                                                          "mem_gib_hour_cost_sandbox": 0.024})
+    now_rate = hourly_rate(cloud_provider.rates(), "h100", 1)
+    assert now_rate > was_rate
+
+    job = daemon.approve(job_id, extend=True)
+    assert f"${now_rate:.2f}/hour" in job.summary       # what it is committing at
+    assert f"${was_rate:.2f}/hour" in job.summary       # and what that is up from
+    assert "above" in job.summary
+    events = [e for e in daemon.store.machine_events() if e["kind"] == "extended"]
+    assert len(events) == 1 and f"job {job_id} " in events[0]["text"]
+    assert f"${now_rate:.2f}/hour" in events[0]["text"]
+    assert f"${was_rate:.2f}/hour" in events[0]["text"]
+
+
+def test_extending_at_a_steady_price_says_so_without_crying_wolf(cloud_daemon, cloud_cwd, clock):
+    daemon = cloud_daemon
+    job_id = start(daemon, cloud_cwd)
+    was_rate = daemon.store.approvals(job_id)[0]["hourly_rate"]
+    lag_the_job(daemon, clock, job_id)
+    job = daemon.approve(job_id, extend=True)
+    assert f"${was_rate:.2f}/hour" in job.summary  # the rate is always stated
+    assert "above" not in job.summary             # but only called out when it has risen
+
+
 def test_extending_refuses_to_exceed_max_cost(cloud_daemon, cloud_provider, cloud_cwd, clock):
     daemon = cloud_daemon
     rate = hourly_rate(cloud_provider.rates(), "h100", 1)
