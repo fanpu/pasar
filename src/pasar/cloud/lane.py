@@ -25,6 +25,7 @@ class CloudQueued:
 class CloudDecision:
     launch: list[int] = field(default_factory=list)
     blocked: dict[int, str] = field(default_factory=dict)  # job -> "budget" | "concurrency"
+    probe: int | None = None  # launched past the budget, to let the provider rule on it
 
 
 def order_queue(queued: list[CloudQueued]) -> list[CloudQueued]:
@@ -65,7 +66,22 @@ def decide_cloud(queued: list[CloudQueued], running_count: int, target: CloudTar
             d.blocked[q.job_id] = "concurrency"
             continue
         if q.estimate > day_budget + _TOLERANCE or q.estimate > month_budget + _TOLERANCE:
-            d.blocked[q.job_id] = "budget"
+            # pasar's budget is arithmetic over estimates; the provider's own refusal is a fact.
+            # The two disagree in both directions — an account has been seen refusing every
+            # launch while reporting nothing spent — so when the arithmetic says no, the head of
+            # the queue is still allowed to ask. An account with credit left runs the job; one
+            # without refuses in about a second, having spent nothing.
+            #
+            # Exactly one, and only with the target idle: that bounds the disagreement to a
+            # single attempt somebody already approved, and means an account that really is
+            # finished is asked once per pass rather than once per queued job. `probe_past_budget`
+            # turns it off for a target whose provider has no spending limit of its own, where
+            # the budget really is the only thing standing between a job and a bill.
+            if target.probe_past_budget and running_count == 0 and not d.launch:
+                d.probe = q.job_id
+                d.launch.append(q.job_id)
+            else:
+                d.blocked[q.job_id] = "budget"
             budget_exhausted = True
             continue
         d.launch.append(q.job_id)

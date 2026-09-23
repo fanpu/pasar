@@ -1062,6 +1062,15 @@ class Daemon:
                                     spent_month=self.ledger.settled_month(name),
                                     committed=self.ledger.committed(name))
             self.cloud_decisions[name] = decision
+            if decision.probe is not None:
+                # Worth a line somebody can find later: this attempt ran against the target's own
+                # arithmetic, and whether it starts or is refused is the only real answer about
+                # how much credit is left.
+                self.store.add_machine_event(
+                    now, "budget_probe",
+                    f"job {decision.probe} launched on {name} past its "
+                    f"${target.monthly_budget:.2f} budget: pasar's estimate says there is nothing "
+                    "left, so the provider is being asked directly")
             for job_id in decision.launch:
                 self._launch_cloud(self.job(job_id), target, ex, now)
 

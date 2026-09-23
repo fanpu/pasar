@@ -942,3 +942,44 @@ def test_a_settled_figure_is_never_replaced_by_a_later_estimate(cloud, repo, clo
 
     daemon.ledger.record("fake", job_id, 1, estimated=99.0)
     assert daemon.store.cloud_spend("fake")[0]["billed"] == pytest.approx(billed)
+
+
+def test_a_job_the_budget_refuses_still_gets_to_ask_the_provider(make_cloud, repo):
+    # The budget is pasar's arithmetic over estimates; the provider's refusal is the fact, and the
+    # two have been seen disagreeing in both directions. With a spending limit at the provider,
+    # the cheap way to settle it is to launch and find out.
+    daemon, provider = make_cloud(daily_budget=0.01, monthly_budget=0.01,
+                                  probe_past_budget=True)
+    job = daemon.submit(cloud_spec(repo))
+    daemon.approve(job.id)
+    daemon.tick()
+
+    assert daemon.job(job.id).state == State.RUNNING
+    assert daemon.cloud_decisions["fake"].probe == job.id
+    events = daemon.store.machine_events(50)
+    assert any(e["kind"] == "budget_probe" and str(job.id) in e["text"] for e in events)
+
+
+def test_the_budget_still_blocks_when_the_provider_has_no_limit_of_its_own(make_cloud, repo):
+    daemon, provider = make_cloud(daily_budget=0.01, monthly_budget=0.01)
+    job = daemon.submit(cloud_spec(repo))
+    daemon.approve(job.id)
+    daemon.tick()
+
+    assert daemon.job(job.id).state == State.QUEUED
+    assert daemon.cloud_decisions["fake"].blocked == {job.id: "budget"}
+    assert provider.boxes == {}
+
+
+def test_only_one_job_probes_even_with_a_queue_behind_it(make_cloud, repo):
+    daemon, provider = make_cloud(daily_budget=0.01, monthly_budget=0.01, max_running=4,
+                                  probe_past_budget=True)
+    first = daemon.submit(cloud_spec(repo))
+    second = daemon.submit(cloud_spec(repo))
+    daemon.approve(first.id)
+    daemon.approve(second.id)
+    daemon.tick()
+
+    assert daemon.job(first.id).state == State.RUNNING
+    assert daemon.job(second.id).state == State.QUEUED
+    assert len(provider.boxes) == 1

@@ -147,3 +147,62 @@ def test_decide_cloud_with_a_real_ledger_charges_a_running_job_exactly_once(tmp_
     wrong = decide_cloud(q, running_count=1, target=target, spent_day=raw_day,
                          spent_month=ledger.spent_month(target.name), committed=committed)
     assert wrong.blocked == {2: "budget"}  # 50 - 30 - 30 = -10: double-counting the running job
+
+
+# ---- probing past the budget
+
+def _t(**kw):
+    """A target that opts in to probing, as one with a provider-side spending limit would."""
+    from pasar.config import CloudTarget
+    base = {"name": "fake", "provider": "fake", "daily_budget": 10.0, "monthly_budget": 10.0,
+            "probe_past_budget": True}
+    return CloudTarget(**{**base, **kw})
+
+
+def test_an_unaffordable_head_of_queue_is_let_through_once_to_ask_the_provider():
+    # pasar's budget is arithmetic over estimates; the provider's refusal is the fact. An account
+    # has been seen refusing every launch while reporting nothing spent, so the two disagree in
+    # both directions and the cheap way to settle it is to ask.
+    d = decide_cloud([CloudQueued(1, 1000, 0.0, estimate=99.0)], 0, _t(),
+                     spent_day=10.0, spent_month=10.0, committed=0.0)
+    assert d.launch == [1] and d.probe == 1
+    assert 1 not in d.blocked
+
+
+def test_only_one_job_probes_and_the_rest_wait():
+    q = [CloudQueued(1, 1000, 0.0, estimate=99.0), CloudQueued(2, 1000, 1.0, estimate=99.0)]
+    d = decide_cloud(q, 0, _t(), spent_day=10.0, spent_month=10.0, committed=0.0)
+    assert d.launch == [1] and d.probe == 1
+    assert d.blocked == {2: "budget"}
+
+
+def test_nothing_probes_while_the_target_is_already_busy():
+    # Something is running, so the account is demonstrably not refusing launches; there is
+    # nothing to learn and a second over-budget job would just be an over-budget job.
+    d = decide_cloud([CloudQueued(1, 1000, 0.0, estimate=99.0)], 1, _t(max_running=2),
+                     spent_day=10.0, spent_month=10.0, committed=0.0)
+    assert d.launch == [] and d.probe is None
+    assert d.blocked == {1: "budget"}
+
+
+def test_no_probe_when_an_affordable_job_already_launched_this_pass():
+    q = [CloudQueued(1, 2000, 0.0, estimate=1.0), CloudQueued(2, 1000, 1.0, estimate=99.0)]
+    d = decide_cloud(q, 0, _t(max_running=4), spent_day=0.0, spent_month=0.0, committed=0.0)
+    assert d.launch == [1] and d.probe is None
+    assert d.blocked == {2: "budget"}
+
+
+def test_probing_is_off_where_the_provider_has_no_limit_of_its_own():
+    # Without a spending limit at the provider, the budget IS the limit, and spending past it is
+    # exactly the thing it exists to stop.
+    d = decide_cloud([CloudQueued(1, 1000, 0.0, estimate=99.0)], 0,
+                     _t(probe_past_budget=False),
+                     spent_day=10.0, spent_month=10.0, committed=0.0)
+    assert d.launch == [] and d.probe is None
+    assert d.blocked == {1: "budget"}
+
+
+def test_an_affordable_queue_never_sets_probe():
+    d = decide_cloud([CloudQueued(1, 1000, 0.0, estimate=1.0)], 0, _t(max_running=2),
+                     spent_day=0.0, spent_month=0.0, committed=0.0)
+    assert d.launch == [1] and d.probe is None

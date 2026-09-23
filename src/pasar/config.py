@@ -33,12 +33,17 @@ class CloudTarget:
     data_max: int = 4 * GiB
     base_image: str = ""
     rates: dict[str, float] = field(default_factory=dict)
+    # When the budget says a job is unaffordable, let one through anyway and take the provider's
+    # answer as the real one. Off by default: it is only safe where the provider has a spending
+    # limit of its own, and where it does not this budget is the only thing between a job and a
+    # bill. Turn it on for a target whose provider will refuse a launch it cannot pay for.
+    probe_past_budget: bool = False
 
 
 def _cloud_target(name: str, raw: dict) -> CloudTarget:
     known_keys = {"budget", "provider", "profile", "owner", "group", "max_running",
                   "timeout_factor", "max_runtime", "approval_ttl", "env_passthrough", "volumes",
-                  "bundle_max", "data_max", "base_image", "rates"}
+                  "bundle_max", "data_max", "base_image", "rates", "probe_past_budget"}
     unknown = sorted(set(raw) - known_keys)
     if unknown:
         raise ValueError(f"unknown config keys in cloud target {name!r}: {', '.join(unknown)}")
@@ -78,6 +83,7 @@ def _cloud_target(name: str, raw: dict) -> CloudTarget:
         data_max=parse_size(raw.get("data_max", "4GiB")),
         base_image=raw.get("base_image", ""),
         rates={k: float(v) for k, v in (raw.get("rates") or {}).items()},
+        probe_past_budget=bool(raw.get("probe_past_budget", False)),
     )
 
 
