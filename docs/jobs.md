@@ -75,6 +75,37 @@ To share, `--mem` is what your job needs; pasar adds max(2 GiB, 10%) on top. Goi
 the machine runs short of memory, then the job furthest over its limit is stopped. `--time` is used
 to plan the queue; overrunning is fine.
 
+## 6. Cloud jobs checkpoint more, not less
+
+A job submitted with `--on <target>` (see [the agent guide](../src/pasar/agents.md#cloud-jobs))
+follows everything above, with the stakes raised: it is paused when it reaches its approved run
+time, the provider can reclaim the GPU under it without warning, and every minute of lost work
+was paid for. Checkpoint on time, not on steps, and checkpoint more often than you would locally:
+
+- **Checkpoint every 10 to 15 minutes**, not every 30 as in step 2 above. A step count tuned on
+  the local GPU can be much too far apart on a faster rented one, or much too close on a slower
+  one — measure the interval in wall-clock time.
+- **Save the first checkpoint early**, within the first few minutes of useful work, so an early
+  pause or reclaim doesn't lose the time spent starting up (building the image, loading data,
+  compiling).
+- **Time your save once and double it for `--grace`.** Writes to storage outside the container
+  are usually slower than a local job's writes to local disk.
+- **Report every checkpoint and resume**, as in step 4. `progress` reports are also what pasar
+  uses to tell whether a running job is on pace to need more time than its approval bought — that
+  needs at least 3 progress reports as well as 5 minutes of them, so a job with a short approved
+  window and a slow reporting interval may hit its pause before the warning has enough to go on.
+  Reporting `progress` every minute or so keeps well clear of that.
+- **Keep only the last two checkpoints.** Stored checkpoints cost money too; a second one just
+  covers a save interrupted halfway.
+- **Test resuming locally first.** Run a few minutes on the local GPU, cancel, and resubmit. A
+  cloud run is an expensive place to find out resuming is broken.
+
+Storage that survives between attempts isn't wired up for cloud jobs yet — see
+[docs/cloud.md](cloud.md#data-checkpoints-and-outputs) for the current state — so `pasar_job.job_dir()`
+gives a cloud attempt nothing today. Follow the discipline above anyway, so a job is ready the
+moment a target can actually keep a checkpoint around; until then, check the target's own setup
+notes for where (if anywhere) it can write something durable.
+
 ## Environment
 
 | Variable | Meaning |

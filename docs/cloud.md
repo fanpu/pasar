@@ -1,10 +1,18 @@
-# Cloud jobs (design proposal)
+# Cloud jobs
 
-**Status: proposal, not implemented.** This extends [design.md](design.md) so that a job can run on
-rented cloud GPUs instead of the local GPU when someone explicitly asks for burst compute. Modal is
-the first provider. Everything provider-specific sits behind a small interface so that other GPU
-clouds (RunPod, Lambda, a SkyPilot bridge, …) can be added later without touching the daemon,
-scheduler, protocol or UI.
+This extends [design.md](design.md) so that a job can run on rented cloud GPUs instead of the
+local GPU when someone explicitly asks for burst compute. Everything provider-specific sits
+behind a small interface so that other GPU clouds (Modal, RunPod, Lambda, a SkyPilot bridge, …)
+can be added later without touching the daemon, scheduler, protocol or UI.
+
+**Status.** The guardrails, the provider-neutral core (bundle, environment spec, output pump,
+cost ledger, budget gate, run-time limits, approval and extension), and the CLI and API described
+below are implemented and tested against a fake, in-process provider (see
+[Testing](#testing)). What is still a proposal, not implemented: any real provider (Modal or
+otherwise — `server.build()` wires up none, so a configured cloud target refuses every submit
+until one is added), `--data` upload, `pasar pull`, `--resume-from`, cross-attempt persist
+storage, pace calibration, billing reconciliation with a provider's own numbers, and the web UI.
+Each of those is called out again where it comes up below.
 
 ## Goals
 
@@ -79,7 +87,7 @@ can. So the true ceiling lives at the provider (item 1), and pasar makes spendin
 | **GPU spec** | `--gpu H100`, `--gpu A100-80GB:4`. pasar parses `<type>[:<count>]`, and each provider maps types to its own names. Required for cloud jobs; there is no memory pool to size, so `--mem` is not allowed. |
 | **Bundle** | A snapshot of the job's code, taken at submit: every file `git ls-files --cached --others --exclude-standard` lists, plus the uv environment spec. Only a requeue after the provider reclaims the GPU reuses it (see [No restarts](#no-restarts)). |
 | **Environment spec** | `pyproject.toml`, `uv.lock`, `.python-version`. Its hash is the image cache key. |
-| **Persist dir** | Per-job storage that survives attempts (`$PASAR_PERSIST_DIR`), for checkpoints and outputs. |
+| **Persist dir** | Proposed, not built yet: per-job storage that would survive attempts (`$PASAR_PERSIST_DIR`), for checkpoints and outputs — see [Data, checkpoints and outputs](#data-checkpoints-and-outputs). |
 | **Wrapper** | `python -m pasar_job.run`, the entry point inside the container. It runs the command and talks to pasard through stdout. |
 
 ## Architecture
@@ -213,50 +221,42 @@ set. Cases that need more than uv (system packages) get an optional `[tool.pasar
 
 ## Data, checkpoints and outputs
 
-- **`$PASAR_PERSIST_DIR`** is a per-job directory on a provider volume (Modal: a Volume
-  `pasar-<target>` mounted at `/pasar/persist`, with a subdirectory per job). It survives attempts,
-  so checkpoint-and-resume works exactly as it does locally. `pasar_job.persist_dir()` returns it,
-  or a job-local directory when running locally, so one script can serve both.
-- **Small local data**: `--data <path>` (repeatable) uploads a file or directory from the local
-  machine, since data is usually gitignored and so not in the bundle. It lands on a shared volume at
-  `$PASAR_DATA_DIR/<name>` and is keyed by content hash, so a sweep of 20 jobs over the same
-  dataset uploads it once and later jobs reuse it. There's a cap (`data_max`, default 4 GiB);
-  anything larger belongs in a volume of its own.
-- **Large datasets**: targets can mount named volumes read-mostly (`volumes = {"/data" = "datasets"}`).
-  Filling those is out of pasar's scope; use the provider's CLI.
-- **Getting results back**: `pasar pull <id> [path] [--to DIR]` downloads from the persist dir. The
-  job detail view lists its files. Persist dirs are deleted with the job's files by the normal
-  retention policy (`cloud_retention_days`, default 14), since stored data costs money too.
+Of this section, only the config side of **large datasets** is wired up today (a target's
+`volumes` table is parsed and passed to `Provider.launch`); everything else below needs a real
+provider and is proposed, not implemented:
+
+- **`$PASAR_PERSIST_DIR`** would be a per-job directory on a provider volume (Modal: a Volume
+  `pasar-<target>` mounted at `/pasar/persist`, with a subdirectory per job), surviving attempts
+  so checkpoint-and-resume works exactly as it does locally. `pasar_job.persist_dir()` would
+  return it, or a job-local directory when running locally, so one script could serve both.
+  Neither the environment variable nor the function exists yet; today `pasar_job.job_dir()` gives
+  a cloud attempt nothing (it reads an environment variable the wrapper is never given), so a
+  cloud job's checkpoint currently has nowhere durable to be written to.
+- **Small local data**: `--data <path>` (repeatable) is accepted by `pasar submit` and would
+  upload a file or directory from the local machine, since data is usually gitignored and so not
+  in the bundle. It is refused server-side for now (every submit with `--data` fails outright); the
+  intended design lands it on a shared volume at `$PASAR_DATA_DIR/<name>`, keyed by content hash
+  so a sweep of 20 jobs over the same dataset uploads it once, with a cap (`data_max`, default
+  4 GiB).
+- **Large datasets**: targets can mount named volumes read-mostly (`volumes = {"/data" = "datasets"}`);
+  this much is parsed and passed through the executor interface. Filling those is out of pasar's
+  scope; use the provider's CLI.
+- **Getting results back**: `pasar pull <id> [path] [--to DIR]` would download from the persist
+  dir; the job detail view would list its files. There is no `pull` subcommand yet, and nothing to
+  pull from until persist dirs exist. Persist dirs would be deleted with the job's files by the
+  normal retention policy (`cloud_retention_days`, default 14), since stored data costs money too.
 
 ### Writing jobs for the cloud
 
-This guidance goes into [jobs.md](jobs.md) and the agent guide when cloud jobs ship. Locally,
-checkpointing protects against preemption. In the cloud, the job is paused when it reaches its
-approved run time, the provider can reclaim the GPU, and every minute of lost work was paid for, so
-checkpointing matters more:
+The checkpointing guidance for cloud jobs lives in [jobs.md](jobs.md#6-cloud-jobs-checkpoint-more-not-less)
+and the agent guide now, alongside the same guidance for local jobs, since that is where job
+authors look. In short: checkpoint every 10-15 minutes of wall-clock run time rather than every
+30, save the first one early, and report every checkpoint and resume.
 
-- **Checkpoint every 10 to 15 minutes of run time**, not every 30 minutes as for local jobs.
-  Measure the interval in time, not steps: a step count tuned on the local GPU can be much too far
-  apart on a faster cloud GPU, or much too close on a slower one.
-- **Save the first checkpoint early**, within the first few minutes of useful work, so an early pause
-  or reclaim doesn't lose the startup time (building the image, loading data, compiling).
-- **Save to `$PASAR_PERSIST_DIR`** (`pasar_job.persist_dir()`). Everything else in the container
-  is gone when the attempt ends.
-- **Save on SIGTERM** with `pasar_job.on_preempt(save_checkpoint)`, and make sure the save fits in
-  `--grace`. Writes to a provider volume are slower than to local disk, so time a save once and set
-  `--grace` to at least twice that.
-- **Report every checkpoint** with `pasar_job.checkpoint(step)` and every resume with
-  `pasar_job.resumed(step)`. pasar uses them to count lost time, and the approval tray flags jobs
-  it has never seen checkpoint.
-- **Keep only the last two checkpoints**, since stored checkpoints cost money too. Keep a second
-  one in case a save is interrupted halfway.
-- **Test resuming locally first**: run a few minutes on the local GPU, cancel, and resubmit. A
-  cloud run is an expensive place to find out resuming is broken.
-
-pasar checks this while the job runs: a running cloud job that has reported `progress` but no
-`checkpoint` for 20 minutes gets a warning line in its log and a **not checkpointing** badge in the
-UI and the approval tray. Its approved limit doesn't change; the badge exists so the problem gets
-noticed before the limit.
+The badge described here is a UI feature and not yet built: a running cloud job that has reported
+`progress` but no `checkpoint` for 20 minutes is meant to get a warning line in its log and a
+**not checkpointing** badge in the approval tray, without changing its approved limit, so the
+problem gets noticed before the limit does.
 
 ## What Modal does (measured)
 
@@ -287,18 +287,26 @@ The wrapper (`python -m pasar_job.run -- <command>`, in the dependency-free `pas
 the bundle's environment already has, or injected if not) is the only thing that runs in the cloud
 besides the job. It:
 
-- runs `bash -c <command>` as a child process, passing its stdout and stderr through line by line;
-- sets `PASAR_EVENTS` to a FIFO it reads, so `pasar_job.progress()` and `echo … >> $PASAR_EVENTS`
-  work unchanged, and re-emits each event as a control line;
+- relays the command's stdout and stderr through to its own stdout, one whole line at a time, so
+  a relayed job line and a control line can never interleave into something the daemon can't
+  parse;
+- sets `PASAR_EVENTS` to a plain file it tails (a background thread polls it, plus a final
+  synchronous drain right after the job exits), so `pasar_job.progress()` and
+  `echo … >> $PASAR_EVENTS` work unchanged, and re-emits each line as a control line;
 - samples `nvidia-smi --query-gpu=index,utilization.gpu,memory.used,memory.total,power.draw,temperature.gpu`
   every 5 s and emits a control line;
-- on a stop request, or when the attempt reaches its approved run time (the wrapper enforces it
-  itself), sends SIGTERM to the job's process group, then SIGKILL after `PASAR_GRACE_SECONDS`, and
-  reports which of the two it was;
-- tees everything to `$PASAR_PERSIST_DIR/.pasar/attempt-<n>.log`, so the output survives a pasard
-  restart even on providers that can't replay it;
+- on a stop request, or on running past `--limit`, sends SIGTERM to the job's process group, then
+  SIGKILL after `--grace` (`PASAR_GRACE_SECONDS`), and reports which of the two it was. `--limit`
+  is the *backstop*, not the approved run time: the daemon is what stops an attempt at the time
+  someone approved (see [Run-time limits](#run-time-limits)) and passes the wrapper the target's
+  flat `max_runtime` instead, for a container that hangs so badly the daemon's own stop request
+  never lands. Either way the wrapper reports the same reason, `time_limit`;
 - ends with a control line holding the exact exit code or signal, which is more precise than what
   most providers report.
+
+Teeing output to a persist volume, so it survives a pasard restart even on providers that can't
+replay stdout, is proposed but not built: today the daemon's own on-disk copy is the only record,
+and a provider that can't replay output after a restart has nothing to fall back on.
 
 Control lines are single stdout lines prefixed with a per-attempt random token pasard generated
 (`\x1epasar:<token> {"t":"event",…}`), so job output can't forge them by accident. Everything else
@@ -323,10 +331,12 @@ Bids still order each lane. `--preempt` isn't supported for cloud jobs: the lane
 resource to take back, and stopping someone's paid-for run to start another one wastes money.
 
 Clouds preempt too (spot reclaims, host failures). When a provider reports that it ended an attempt,
-the attempt ends `preempted` (reason `cloud_preempted`) and the job goes back to **awaiting
-approval**, showing how far it got and the estimated cost to finish. If approved, it resumes from its
-persist-dir checkpoint using the same snapshot. This is the only way a cloud job gets a second
-attempt, and it needs a person's approval and the budget gate like the first.
+the attempt ends `paused` (reason `cloud_preempted`) and the job goes back to **awaiting
+approval**, showing how far it got and the estimated cost to finish. If approved, it launches a new
+attempt from the same bundle snapshot — resuming *from its last checkpoint* is the intent, but
+needs the persist dir (see [Data, checkpoints and outputs](#data-checkpoints-and-outputs)), which
+doesn't exist yet. This is the only way a cloud job gets a second attempt, and it needs a person's
+approval and the budget gate like the first.
 
 ### Run-time limits
 
@@ -334,27 +344,41 @@ attempt, and it needs a person's approval and the budget gate like the first.
 slower. Killing a job for overrunning a wrong guess would throw away paid work just before it
 finishes, so the limit pauses instead, and pasar warns early, using the job's real pace:
 
-1. **Early warning.** Once a running cloud job has reported enough `progress` (default: 5 minutes
-   after its first report), pasar projects its total run time the same way the schedule does. If
-   that is over the approved run time, the job appears in the approval tray as **needs more time**
-   ("#52 is on pace for 2 h 40 m, approved 1 h 30 m: approve $9 more?"). Approving extends the
-   attempt's limit; the job keeps running either way.
-2. **Pause at the limit.** If no extension came in time, the wrapper sends SIGTERM at the limit and
-   the job saves a checkpoint within its grace period. The attempt ends `paused` (reason
-   `time_limit`), and the job goes back to **awaiting approval**, showing its progress and the
-   estimated cost to finish. Approving resumes it from the checkpoint, like a reclaimed job. The
-   only work lost is the restart time.
-3. **Backstop.** The provider-side timeout is the approved limit plus the grace period plus a small
-   margin, for a container that hangs so badly the wrapper can't act. Only that ends a job with
-   `cloud_timeout`.
-4. **Calibration.** pasar records each finished cloud job's measured pace against its `--time`, by
-   first tag and GPU type (and local jobs' by tag). At submit and in the approval tray it shows a
-   calibrated estimate next to the given one ("`lr-sweep` jobs ran 2.8× faster than their `--time`
-   on H100"), and the approval's cost uses the calibrated one when there are at least three
-   comparable jobs.
+1. **Early warning.** A running cloud job's own pace is judged only once it has reported enough
+   `progress`: both 5 minutes since its first report *and* at least 3 reports (`MIN_OBSERVATION`,
+   `MIN_REPORTS` in `pasar.cloud.pace`) — one report, however long ago, is a data point, not a
+   pace, and three is the smallest count that shows a cadence rather than a single event. Once
+   both hold, pasar projects the job's total run time the same way the schedule does; if that is
+   over the approved run time, `needs_more_time` (seconds of projected overrun) is non-`None` on
+   the job's `cloud` view, and the job is meant to appear in the approval tray as **needs more
+   time** ("#52 is on pace for 2 h 40 m, approved 1 h 30 m: approve $9 more?" — the tray itself is
+   part of the web UI and not yet built). A person can raise the ceiling with
+   `POST /api/jobs/{id}/approve?extend=1`, which re-reads the attempt's current pace and ceiling
+   each time, so a job extended once and still falling behind can be extended again. The job keeps
+   running either way; nothing here stops it early.
 
-A job that never reports `checkpoint` loses its attempt at the limit. The approval tray flags cloud
-jobs whose tag has no checkpoint events on record, so their limit can be set generously.
+   The two thresholds trade a job whose window is only a few multiples of its reporting interval:
+   a job approved for, say, three times how often it reports progress may not clear both
+   thresholds before it hits the hard pause below, so it pauses without ever being flagged first.
+   Reporting `progress` well inside that ratio (a job that reports every minute clears both
+   thresholds in under 5 minutes) is what keeps the warning ahead of the pause in practice.
+2. **Pause at the limit.** If no extension came in time, the daemon asks the attempt to stop at
+   the run time its approval bought, and the job saves a checkpoint within its grace period; the
+   wrapper's own `--limit` (see [the wrapper protocol](#the-wrapper-protocol)) is a backstop for
+   the same stop, only for a daemon that isn't there to ask. Either way the attempt ends `paused`
+   (reason `time_limit`), and the job goes back to **awaiting approval**, showing its progress and
+   the estimated cost to finish. Approving resumes it from the checkpoint, like a reclaimed job.
+   The only work lost is the restart time. Five such pauses without finishing and the job fails
+   instead (`pause_limit`) rather than pausing forever on hardware billed by the second; a
+   provider reclaim doesn't count toward that five, since it isn't the job's fault.
+3. **Calibration.** Proposed, not implemented: pasar would record each finished cloud job's
+   measured pace against its `--time`, by first tag and GPU type (and local jobs' by tag), and at
+   submit and in the approval tray show a calibrated estimate next to the given one
+   ("`lr-sweep` jobs ran 2.8× faster than their `--time` on H100"), using it for the approval's
+   cost once there are at least three comparable jobs.
+
+A job that never reports `checkpoint` loses its attempt at the limit. The approval tray flagging
+cloud jobs whose tag has no checkpoint events on record is part of the same not-yet-built UI.
 
 ### No restarts
 
@@ -365,10 +389,10 @@ tree is snapshotted fresh, the estimated cost is shown again, and the budget is 
 
 - `pasar restart` and `POST /api/jobs/{id}/restart` return an error for cloud jobs, which gives the
   equivalent `pasar submit` command.
-- The UI hides **restart** and **restart…** on cloud jobs and shows **copy submit command** instead.
-- A new submit gets a new persist dir. To continue from an earlier job's checkpoint, pass
-  `--resume-from <id>`: the new job's persist dir starts as a copy of the old one (on Modal, copied
-  within the Volume, so nothing is downloaded).
+- The UI hides **restart** and **restart…** on cloud jobs and shows **copy submit command** instead
+  (proposed; the web UI isn't built).
+- Continuing an earlier job's checkpoint into a new submit, with `--resume-from <id>`, is proposed
+  but not implemented: it needs a persist dir to copy from, which needs a real provider.
 
 ## Job lifecycle and records
 
@@ -399,33 +423,56 @@ Additions:
 - New table `approvals(job, attempt, time, estimated_cost, max_cost)`: who approved which attempt at
   what price, for the record.
 
-New end reasons: `image_build_error`, `no_capacity`, `time_limit` (paused at the approved run time;
-the attempt's end kind is `paused`, which counts toward lost time like a preemption),
-`cloud_timeout` (the provider's backstop),
-`cloud_error` (the provider failed the container), `cloud_preempted`, `budget` (a job over its own
-`--max-cost` is stopped). The existing `gpu_oom`, `signal` and `exit` reasons come from the log scan
-and the wrapper's exit line as usual. `kernel_oom` and `gpu_xid` don't apply.
+New end/job reasons: `time_limit` (paused at the approved run time or the wrapper's own backstop;
+the attempt's end kind is `paused`, which counts toward lost time like a preemption), `pause_limit`
+(failed after 5 `time_limit` pauses with nothing finished — a provider reclaim doesn't count
+toward the five), `cloud_preempted` (the provider reclaimed the sandbox), `price_rose` (the price
+moved above what was approved between approval and launch; back to **awaiting**, not a launch),
+`target_gone` (the job's target is no longer configured: `failed` if it was running, since its
+sandbox may still be billing at the provider, `cancelled` if it was only waiting), `rejected` and
+`approval_expired` (never approved, or approved too late). Any failure while packaging, pricing or
+launching an attempt — a build failure, no capacity, a bad bundle — is `launch_error`, the same
+reason a local job's launch failure gets; there is no separate `image_build_error`, `no_capacity`
+or `cloud_error`. A job blocked on budget or the concurrency cap while still queued is not an end
+reason at all: it stays `queued` with the lane's `blocked` value (`budget` or `concurrency`) shown
+alongside it, not written to the job. The existing `gpu_oom`, `signal` and `exit` reasons come
+from the log scan and the wrapper's exit line as usual. `kernel_oom` and `gpu_xid` don't apply.
 
-Reconciling after a pasard restart: `list_units()` returns every live handle tagged with a pasar job.
-Handles no job owns are reported as `stray_unit`, and stray cloud units are **terminated** after a
-warning, since unlike local ones they cost money.
+New machine-event kinds, alongside the existing `pressure`/`pressure_end`/`oom_kill`: `price_rise`
+(the launch-time price moved past what was approved; the job's own `price_rose` reason says the
+same thing from the job's side), `max_cost` (a pause was triggered by `--max-cost` rather than the
+approved run time, named separately from `time_limit` while it's known, since both pause the same
+way), `extended` (a person raised a running attempt's ceiling, and at what rate), `target_gone`
+(a target was removed from config, for both its running and waiting jobs), and `orphan_unit` (a
+live handle this pasard can no longer follow after a restart — the executor never adopted it back
+— which is terminated on the spot rather than left to bill unwatched).
+
+Reconciling after a pasard restart: `list_units()` returns every live handle tagged with a pasar
+job. Handles no job owns are reported as `stray_unit`, and stray cloud units are **terminated**
+after a warning, since unlike local ones they cost money.
 
 ## CLI and API
 
 ```
-pasar submit --on modal --gpu H100[:N] --time 2h [--data PATH]… [--env KEY]… [--max-cost 20] -- <command>
-pasar pull <id> [path] [--to DIR]
-pasar submit --on modal … --resume-from <id> -- <command>   # continue an earlier cloud job's checkpoints
+pasar submit --on modal --gpu H100[:N] --time 2h [--env KEY]… [--max-cost 20] -- <command>
 pasar cloud                         # targets, budget, spend today/this month, awaiting approval, rates
 ```
 
+`--data PATH` is accepted by `pasar submit` too, but refused server-side for now (see
+[Data, checkpoints and outputs](#data-checkpoints-and-outputs)). `pasar pull` and
+`--resume-from <id>` are proposed, not implemented — there is no persist dir yet for either to act
+on.
+
 `pasar submit --on …` returns right away with the job awaiting approval and prints the estimated
-and maximum cost plus the UI link. `pasar wait` keeps waiting through `awaiting`.
+and maximum cost. `pasar wait` keeps waiting through `awaiting`.
 
 `--json` works everywhere, as before. `POST /api/jobs` accepts `target`, `gpu`, `env_keys` and
-`max_cost`. `POST /api/jobs/{id}/approve` and `POST /api/jobs/{id}/reject` exist for the web UI
-only; they are left out of the CLI and the agent guide says never to call them. `GET /api/cloud` returns the targets, spend and rates. Job views include a `cloud` object
-for cloud jobs.
+`max_cost`. `POST /api/jobs/{id}/approve` (plain, or `?extend=1` to raise a *running* attempt's
+ceiling instead of admitting a new one to the queue) and `POST /api/jobs/{id}/reject` exist for
+the web UI only; they are left out of the CLI and the agent guide says never to call them.
+`GET /api/cloud` returns the targets, spend and rates. Job views include a `cloud` object for
+cloud jobs, with `needs_more_time` (seconds a running attempt's own pace projects past its
+approval, or `null`) among its fields.
 
 ## Web UI
 
@@ -471,8 +518,9 @@ data_max = "4GiB"
 # rates = { H100 = 3.95 }          # override $/GPU-hour if the provider can't report rates
 ```
 
-Provider SDKs are optional extras (`uv tool install 'pasar[modal]'`), imported only when a target
-uses them, so a local-only install stays as it is.
+Proposed: provider SDKs as optional extras (`uv tool install 'pasar[modal]'`), imported only when
+a target uses them, so a local-only install stays as it is. No provider package exists yet to
+extra-ify.
 
 ## Testing
 
@@ -480,13 +528,19 @@ uses them, so a local-only install stays as it is.
   machinery: bundle, image cache, output pump and control lines, graceful stop, phase timings, budget
   gate, hard timeout, provider preemption, reconcile and stray termination. The daemon and lane tests
   use it the way the local scheduler uses the fake executor.
-- **Provider contract tests**: one parametrised suite every provider must pass, run against the fake
-  in CI and against a real provider only when opted in (`PASAR_TEST_MODAL=1`), with a tiny CPU-only
-  job so it costs cents.
-- The wrapper and bundle builder are unit tested on their own (control-line escaping, FIFO events,
-  `.gitignore` handling, size limit, lockfile platform check).
+- **Provider contract tests** — proposed, not written yet, since there is no second provider to
+  run them against: one parametrised suite every provider must pass, run against the fake in CI
+  and against a real provider only when opted in (`PASAR_TEST_MODAL=1`), with a tiny CPU-only job
+  so it costs cents.
+- The wrapper and bundle builder are unit tested on their own (control-line escaping, the polled
+  `$PASAR_EVENTS` file, `.gitignore` handling, size limit, lockfile platform check).
 
 ## Implementation order
+
+The original plan, kept for the record; see [Status](#cloud-jobs) at the top for what has
+actually shipped — in short: all of 1; the guardrails and docs half of 2, but no `ModalProvider`;
+3 minus `pull`; the `--max-cost` half of 5, with no billing reconciliation since nothing bills
+yet; none of 4, the UI.
 
 1. Provider-neutral pieces with the fake provider: `JobSpec.target`, executor per target, the cloud
    lane and budget, the bundle builder, the wrapper and output pump.

@@ -221,12 +221,19 @@ These apply to every `pasar` command, not just `wait`:
 | `preempted` | Stopped to make room for a higher-bid job that asked to preempt. It is requeued automatically — this is not a failure. | Nothing to do. |
 | `target_gone` | Cloud only. The job's target is no longer configured here: `failed` if it was running (its sandbox may still be billing — end it at the provider), `cancelled` if it was only waiting (nothing was spent). | Put the target back and resubmit, or clean up at the provider yourself. |
 | `price_rose` | Cloud only. The job is back to `awaiting`: its price rose past what was approved between approval and launch. `summary` has the old ceiling and the new price. | Approve it again in the web UI if the new price is still fine. |
+| `cloud_preempted` | Cloud only. The provider reclaimed the machine (a spot interruption, a host failure). The job is back to `awaiting`, showing how far it got. | Approve it again in the web UI to resume it; not a failure. |
+| `pause_limit` | Cloud only. The job ran out of its approved time 5 times running without finishing — each pause on its own is not a failure, but 5 with nothing to show for them means something is wrong. | Resubmit with a longer `--time`, or check that the job actually checkpoints and resumes. |
 
 ## Cloud jobs
 
 `pasar submit --on TARGET --gpu TYPE` runs on a configured rented-GPU target instead of the
-local machine. It costs money, so it never launches on its own: it lands **awaiting** a person's
-approval in the web UI, priced at submit time, and only starts once approved there.
+local machine. It costs real money, so **only pass `--on` when the user has explicitly asked for
+cloud compute for this work** — never as your own idea, and never to dodge a busy local GPU. A
+cloud target this pasard has no provider wired up for refuses every submit outright (`pasar
+cloud` shows which targets are usable); ask before assuming `--on <target>` will work here.
+
+A cloud job never launches on its own: it lands **awaiting** a person's approval in the web UI,
+priced at submit time, and only starts once approved there.
 
     $ pasar submit --time 2h --on modal --gpu H100 --json -- .venv/bin/python train.py
     submitted #7 train (awaiting) on modal
@@ -248,8 +255,10 @@ refused too (it would spend money on whatever is in the working tree now, unseen
 gives the equivalent `pasar submit` command to run instead.
 
 **There is no `pasar approve` command, and agents must never call `POST /api/jobs/{id}/approve`
-or `/reject` directly.** Approval is a web-UI-only action, by design: a person looks at the price
-before it's spent. `pasar cloud [--json]` shows what's waiting:
+(with or without `?extend=1`) or `/reject` directly.** Approval is a web-UI-only action, by
+design: a person looks at the price before it's spent, whether that is a new job's first launch
+or a running job's request for more time (see `needs_more_time` below). `pasar cloud [--json]`
+shows what's waiting:
 
     $ pasar cloud
     TARGET  PROVIDER  RUNNING  TODAY          MONTH           RATES
@@ -260,7 +269,8 @@ before it's spent. `pasar cloud [--json]` shows what's waiting:
     7   train  awaiting  1000  H100 (~$7.90)      —    agent-3
 
 A cloud job's `state` field also passes through `awaiting` if its approved run time runs out
-before the job finishes (`reason` `time_limit`), if the provider reclaims the machine (reason
+before the job finishes (`reason` `time_limit`; after 5 such pauses without finishing it fails
+instead, `reason` `pause_limit`), if the provider reclaims the machine (reason
 `cloud_preempted`), or if its price rose past what was approved between approval and launch
 (reason `price_rose`, with the old ceiling and new price in `summary`) — in every case, it needs
 approving again in the web UI, the same as a fresh submission. `pasar wait` keeps waiting through
@@ -274,8 +284,13 @@ spent) — both ordinary terminal states with `pasar wait`'s usual exit codes.
 `target`, `gpu`, `phase`, `estimated_cost`, `max_cost` (the ceiling actually governing the job
 right now — the approved figure once launched, a live-priced one before approval), `user_capped`
 (whether that ceiling is the submitter's own `--max-cost`), `approved_seconds`/`full_seconds` (the
-run time one approval buys, and what it would buy without `--max-cost`), and `console_url` (only
-while the daemon is actively watching the attempt).
+run time one approval buys, and what it would buy without `--max-cost`), `console_url` (only
+while the daemon is actively watching the attempt), and `needs_more_time` (extra seconds a
+running attempt's own pace projects past its approved run time, or `null` when it's on pace or
+there isn't yet enough progress reported to judge — that needs both 5 minutes of observation and
+at least 3 progress reports since the attempt started). A job flagged this way keeps running
+either way; a person can raise its ceiling in the web UI (`POST /api/jobs/{id}/approve?extend=1`,
+also never for an agent to call) or let it pause at the limit and approve it again from there.
 
 ## HTTP API quick reference
 
@@ -290,13 +305,13 @@ whatever `PASAR_URL` would be (default `http://127.0.0.1:8750`).
 | `PATCH /api/jobs/{id}` | Change `bid` and/or `preempt` (bool); a field left out keeps its value. |
 | `POST /api/jobs/{id}/cancel` | Cancel a job. |
 | `POST /api/jobs/{id}/restart` | Requeue a finished job, optionally changing `mem`/`whole_gpu`/`time`/`bid`/`retries`; `preempt` (default `false`) is not carried over. |
-| `POST /api/jobs/{id}/approve` / `/reject` | Web-UI-only. **Agents must never call these** — a person approves a cloud job's cost, not code. |
+| `POST /api/jobs/{id}/approve` / `/reject` | Web-UI-only. **Agents must never call these**, including `approve?extend=1` — a person approves a cloud job's cost, and its cost overruns, not code. |
 | `GET /api/cloud` | Cloud targets: budget, spend today/this month, live rates, and jobs awaiting approval. |
 | `GET /api/jobs/{id}/logs` | A chunk of output (`?offset=N`), or an SSE stream with `?follow=true`. |
 | `GET /api/jobs/{id}/events` | The job's raw protocol events (checkpoint/resumed/progress/note). |
 | `GET /api/jobs/{id}/metrics` | Stored per-attempt metric summaries (avg/max/total). |
 | `GET /api/jobs/{id}/usage` | In-memory time series of this attempt's measured memory usage. |
-| `GET /api/status` | Pool size, reserved/free memory, pressure, blocked/waiting queue state, recent machine events. |
+| `GET /api/status` | Pool size, reserved/free memory, pressure, blocked/waiting queue state, recent machine events (`pressure`, `pressure_end`, `oom_kill` locally; `price_rise`, `max_cost`, `extended`, `target_gone`, `orphan_unit`, `stray_unit` for cloud targets). |
 | `GET /api/gpu` | GPU power/temperature/utilisation history from Prometheus, if configured. |
 | `GET /api/stream` | SSE stream of `{status, jobs}` snapshots, one per state change. |
 | `GET /llms.txt` | This guide, as `text/plain`. |

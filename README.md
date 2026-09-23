@@ -50,6 +50,22 @@ needed once, to build the web UI).
 See [docs/jobs.md](docs/jobs.md) for writing jobs that checkpoint and resume, and
 [docs/design.md](docs/design.md) for how scheduling works.
 
+## Cloud jobs
+
+Jobs can also run on rented GPUs instead of the local machine. It's off by default and costs
+real money, so it's built to be hard to trigger by accident:
+
+- A cloud target only exists if `config.toml` defines it with a `budget`, and needs its own
+  spending limit set at the provider (its dashboard, not pasar) as the real backstop.
+- Every cloud run needs a person's approval in the web UI, at its estimated cost, before it
+  launches — there is no `pasar approve` command.
+- **Agents must only submit with `--on` when the user has explicitly asked for cloud compute for
+  that work.**
+
+No provider ships yet, so as installed a cloud target accepts no submits until one is wired in;
+the machinery is exercised in tests against a fake provider. See [docs/cloud.md](docs/cloud.md)
+for the design and [`src/pasar/agents.md`](src/pasar/agents.md#cloud-jobs) for the full rules.
+
 ## For AI agents and API users
 
 Start with the agent guide, [`src/pasar/agents.md`](src/pasar/agents.md). It is a self-contained
