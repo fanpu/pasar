@@ -282,7 +282,10 @@ can reach it any more) and a waiting one ends `cancelled` (reason `target_gone`,
 spent) — both ordinary terminal states with `pasar wait`'s usual exit codes.
 
 `pasar show <id>` and `pasar ls`/`pasar show --json` carry a `cloud` object for cloud jobs:
-`target`, `gpu`, `phase`, `estimated_cost`, `max_cost` (the ceiling actually governing the job
+`target`, `gpu`, `phase` (where the *attempt* the daemon is watching has got to — `pending`,
+`starting`, `running`, `success`, `exit-code`, `stopped`, `reclaimed`, `time_limit` or `signal`
+— and `null` when there is no live attempt; where the *job* has got to is its own `state` field),
+`estimated_cost`, `max_cost` (the ceiling actually governing the job
 right now — the approved figure once launched, a live-priced one before approval), `user_capped`
 (whether that ceiling is the submitter's own `--max-cost`), `approved_seconds`/`full_seconds` (the
 run time one approval buys, and what it would buy without `--max-cost`), `console_url` (only

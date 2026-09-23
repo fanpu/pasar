@@ -173,7 +173,10 @@ def print_job(job: dict) -> None:
     if cloud is not None:
         cap_note = " (your --max-cost)" if cloud.get("user_capped") else ""
         cost = f"est {_money(cloud['estimated_cost'])}, capped at {_money(cloud['max_cost'])}{cap_note}"
-        fields.append(("cloud", f"{cloud['target']} · {cloud['gpu']} · {cloud['phase']}"))
+        # `phase` is the live attempt's own, and is absent between attempts; the job's state is
+        # already on its own line, so there is nothing to fall back to and nothing to repeat.
+        where = f" · {cloud['phase']}" if cloud["phase"] else ""
+        fields.append(("cloud", f"{cloud['target']} · {cloud['gpu']}{where}"))
         fields.append(("cost", cost))
         fields.append(("approved", _approved_run(cloud)))
         if cloud.get("needs_more_time"):

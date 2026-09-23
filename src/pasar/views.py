@@ -108,15 +108,14 @@ def cloud_view(daemon, job: Job, pace=_UNKNOWN) -> dict | None:
     for that, so that a cap (which never moves) cannot hide a rate that did. See
     `Daemon._over_the_approval`.
 
-    `phase` carries one of two different vocabularies depending on whether the daemon is
-    currently watching a live attempt for this job (i.e. `daemon.cloud_units` has an entry for
-    it): while it does, `phase` is the executor's own Phase/result string — one of `pending`,
-    `starting`, `running`, `success`, `exit-code`, `stopped`, `reclaimed`, `time_limit`, `signal`.
-    Once the attempt ends (or before one has ever started), `daemon.cloud_units` has nothing for
-    this job and `phase` falls back to the job's own `state` — `awaiting`, `queued`, `failed`,
-    `completed`, etc. A consumer switching on `phase` has to handle both vocabularies; there is no
-    separate field marking which one is in play, so treat any value not in the executor list above
-    as a job state instead.
+    `phase` is where the *attempt* the daemon is currently watching has got to, and nothing else:
+    one of the executor's own Phase/result strings — `pending`, `starting`, `running`, `success`,
+    `exit-code`, `stopped`, `reclaimed`, `time_limit`, `signal` — or `None` when there is no live
+    attempt to report on, which covers a job that has not started one yet and one whose attempt
+    has ended. Where the *job* has got to is `state`, on the job view itself; the two are
+    deliberately separate fields, because they share words (both can say `running`) while meaning
+    different things, and one field carrying whichever was available left a consumer no way to
+    tell which it had been handed.
 
     `console_url` is only ever populated while the daemon is actively polling the attempt (i.e.
     while it's the current entry in `daemon.cloud_units`); pasar doesn't persist it, so it reads
@@ -141,7 +140,7 @@ def cloud_view(daemon, job: Job, pace=_UNKNOWN) -> dict | None:
     return {
         "target": job.spec.target,
         "gpu": job.spec.gpu,
-        "phase": unit.result if unit is not None else job.state.value,
+        "phase": unit.result if unit is not None else None,
         "estimated_cost": estimated_cost,
         "max_cost": max_cost,
         "user_capped": user_capped,

@@ -287,6 +287,26 @@ def test_submit_cloud_job_returns_awaiting_with_costs(client, cloud_daemon, clou
     assert body["cloud"]["console_url"] is None  # nothing has launched yet
 
 
+def test_cloud_phase_reports_the_attempt_and_never_the_job(client, cloud_daemon, cloud_cwd,
+                                                           cloud_provider):
+    # Two vocabularies in one field, both able to say "running", is a field a consumer cannot
+    # switch on: `phase` is the live attempt's, and the job's own is `state`.
+    job_id = submit_cloud(client, cloud_cwd).json()["id"]
+    assert client.get(f"/api/jobs/{job_id}").json()["cloud"]["phase"] is None  # no attempt yet
+
+    client.post(f"/api/jobs/{job_id}/approve")
+    cloud_daemon.tick()  # launches it
+    cloud_daemon.tick()  # and the next poll is what reads the sandbox's own phase
+    body = client.get(f"/api/jobs/{job_id}").json()
+    assert body["state"] == "running" and body["cloud"]["phase"] == "pending"  # the sandbox's
+
+    handle = cloud_daemon.store.current_attempt(job_id).unit.rsplit(":", 1)[1]
+    cloud_provider.finish(handle, 0)
+    cloud_daemon.tick()
+    body = client.get(f"/api/jobs/{job_id}").json()
+    assert body["state"] == "completed" and body["cloud"]["phase"] is None  # nothing live now
+
+
 def test_local_job_has_no_cloud_object(client, tmp_path):
     r = submit(client, tmp_path)
     assert r.json()["cloud"] is None
