@@ -86,6 +86,14 @@ CREATE TABLE IF NOT EXISTS cloud_spend (
     PRIMARY KEY (target, job_id, attempt)
 );
 CREATE INDEX IF NOT EXISTS cloud_spend_day ON cloud_spend(target, day);
+CREATE TABLE IF NOT EXISTS approvals (
+    job_id INTEGER NOT NULL,
+    attempt INTEGER NOT NULL,
+    ts REAL NOT NULL,
+    estimated_cost REAL,
+    max_cost REAL,
+    PRIMARY KEY (job_id, attempt)
+);
 """
 
 _JOB_UPDATABLE = {"spec", "state", "bid", "queue_time", "retries_used", "reason", "summary",
@@ -300,6 +308,18 @@ class Store:
             " billed = COALESCE(excluded.billed, cloud_spend.billed)",
             (target, job_id, attempt, day, estimated, billed),
         )
+
+    # approvals
+    def add_approval(self, job_id: int, attempt: int, ts: float, estimated_cost: float | None,
+                     max_cost: float | None) -> None:
+        """Who let this attempt run, and at what price. One row per attempt, kept for the record:
+        a paused or reclaimed job needs approving again, so each attempt has its own."""
+        self._x("INSERT OR REPLACE INTO approvals (job_id, attempt, ts, estimated_cost, max_cost)"
+                " VALUES (?, ?, ?, ?, ?)", (job_id, attempt, ts, estimated_cost, max_cost))
+
+    def approvals(self, job_id: int) -> list[dict]:
+        rows = self._q("SELECT * FROM approvals WHERE job_id = ? ORDER BY attempt", (job_id,))
+        return [dict(r) for r in rows]
 
     def cloud_spend(self, target: str) -> list[dict]:
         rows = self._q("SELECT * FROM cloud_spend WHERE target = ?", (target,))
