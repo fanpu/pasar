@@ -948,7 +948,7 @@ def test_a_job_the_budget_refuses_still_gets_to_ask_the_provider(make_cloud, rep
     # The budget is pasar's arithmetic over estimates; the provider's refusal is the fact, and the
     # two have been seen disagreeing in both directions. With a spending limit at the provider,
     # the cheap way to settle it is to launch and find out.
-    daemon, provider = make_cloud(daily_budget=0.01, monthly_budget=0.01,
+    daemon, _provider = make_cloud(daily_budget=0.01, monthly_budget=0.01,
                                   probe_past_budget=True)
     job = daemon.submit(cloud_spec(repo))
     daemon.approve(job.id)
