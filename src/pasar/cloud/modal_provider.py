@@ -650,12 +650,12 @@ class ModalProvider:
         return len(files), total_bytes
 
     def delete_persist_files(self, job_id: int, files: list[PersistFile]) -> None:
-        """See `Provider.delete_persist_files`. Every `remove_file` here is non-recursive, the
-        directories' included: Modal refuses to remove a directory that still holds something
-        that way, so even a file that lands between the listing below and a directory's removal
-        is kept rather than swept up with it. The listing only spares that refusal for the
-        directories plainly not empty; a directory that could not be removed for any other
-        reason is logged and left, since an empty directory costs nothing to keep."""
+        """See `Provider.delete_persist_files`. A directory is removed only once the listing
+        below shows nothing left under it, and every `remove_file` here is non-recursive, the
+        directories' included: the SDK hands `recursive` to Modal's server, which is what keeps
+        a file landing between that listing and a directory's removal from being asked to go
+        with it. A directory that could not be removed is logged and left, since an empty
+        directory costs nothing to keep."""
         _check_job_id(job_id)
         root = str(job_id)
         paths = [_relative_persist_path(f"{root}/{f.path}", root) for f in files]

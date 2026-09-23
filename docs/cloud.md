@@ -283,9 +283,10 @@ deleted there, and nothing stays at the provider for good:
   a `pull_gave_up` machine event, which again names the sweep deadline; three looks that found
   nothing raise no alarm.
 - **Manual pull.** `pasar pull <id> [--to DIR] [--keep]` (or `POST /api/jobs/{id}/pull`) does the
-  same verified pull on a person's say-so, straight away. `pull_min_free` and `pull_max` do not apply, since the
-  person chose it and `--to` can point somewhere bigger; its only room check refuses files that
-  plainly cannot fit. `--keep` leaves the remote copy in place, for the sweep to delete later.
+  same verified pull on a person's say-so, straight away. `pull_min_free` and `pull_max` do not
+  apply, since the person chose it and `--to` can point somewhere bigger; its only room check
+  refuses files that plainly cannot fit. `--keep` leaves the remote copy in place, for the sweep to
+  delete later.
 - **The retention sweep deletes the only copy.** `cloud_retention_days` (default 3) after a job
   finished — counted from when it became `completed`, `failed` or `cancelled`, not from its last
   attempt — whatever is left of its persist dir at the provider is deleted, pulled or not, and a
@@ -492,34 +493,35 @@ Additions:
 
 New end/job reasons: `time_limit` (paused at the approved run time or the wrapper's own backstop;
 the attempt's end kind is `paused`, which counts toward lost time like a preemption), `pause_limit`
-(failed after its 5th `time_limit` pause, counted over its whole life, with nothing finished — a provider reclaim doesn't count
-toward the five), `cloud_preempted` (the provider reclaimed the sandbox), `price_rose` (the price
-moved above what was approved between approval and launch; back to **awaiting**, not a launch),
-`target_gone` (the job's target is no longer configured, or its provider could not be set up:
-`failed` if it was running, since its sandbox may still be billing at the provider; if it was only
-waiting, `cancelled` when the target is gone from the config, but left where it is — awaiting or
-queued, unable to be approved or launched — when only its provider failed), `rejected` and
-`approval_expired` (never approved, or approved too late). Any failure while packaging, pricing or
-launching an attempt — a build failure, no capacity, a bad bundle — is `launch_error`, the same
-reason a local job's launch failure gets; there is no separate `image_build_error`, `no_capacity`
-or `cloud_error`. A job blocked on budget or the concurrency cap while still queued is not an end
-reason at all: it stays `queued` with the lane's `blocked` value (`budget` or `concurrency`) shown
-alongside it, not written to the job. The existing `gpu_oom`, `signal` and `exit` reasons come
-from the log scan and the wrapper's exit line as usual. `kernel_oom` and `gpu_xid` don't apply.
+(failed after its 5th `time_limit` pause, counted over its whole life, with nothing finished — a
+provider reclaim doesn't count toward the five), `cloud_preempted` (the provider reclaimed the
+sandbox), `price_rose` (the price moved above what was approved between approval and launch; back to
+**awaiting**, not a launch), `target_gone` (the job's target is no longer configured, or its
+provider could not be set up: `failed` if it was running, since its sandbox may still be billing at
+the provider; if it was only waiting, `cancelled` when the target is gone from the config, but left
+where it is — awaiting or queued, unable to be approved or launched — when only its provider
+failed), `rejected` and `approval_expired` (never approved, or approved too late). Any failure while
+packaging, pricing or launching an attempt — a build failure, no capacity, a bad bundle — is
+`launch_error`, the same reason a local job's launch failure gets; there is no separate
+`image_build_error`, `no_capacity` or `cloud_error`. A job blocked on budget or the concurrency cap
+while still queued is not an end reason at all: it stays `queued` with the lane's `blocked` value
+(`budget` or `concurrency`) shown alongside it, not written to the job. The existing `gpu_oom`,
+`signal` and `exit` reasons come from the log scan and the wrapper's exit line as usual.
+`kernel_oom` and `gpu_xid` don't apply.
 
 New machine-event kinds, alongside the existing `pressure`/`pressure_end`/`oom_kill`: `price_rise`
-(the launch-time price moved past what was approved; the job's own `price_rose` reason says the
-same thing from the job's side), `max_cost` (a pause was triggered by `--max-cost` rather than the
+(the launch-time price moved past what was approved; the job's own `price_rose` reason says the same
+thing from the job's side), `max_cost` (a pause was triggered by `--max-cost` rather than the
 approved run time, named separately from `time_limit` while it's known, since both pause the same
-way), `extended` (a person raised a running attempt's ceiling, and at what rate), `target_gone`
-(a target was removed from config, or its provider could not be set up, for both its running and
-waiting jobs), and `orphan_unit` (a
-live handle this pasard can no longer follow after a restart — the executor never adopted it back
-— which is terminated on the spot rather than left to bill unwatched). For results: `pulled`,
-`pull_skipped` (an automatic pull the free-space guard or `pull_max` stopped), `pull_changed`
-(a pull landed, but the job's files changed while it ran, so the remote copy was kept), `pull_failed`,
-`pull_gave_up` (three automatic tries failed) and `swept` (the retention sweep deleted what
-nobody pulled); the skipped and gave-up events say when the sweep will delete the remote copy.
+way), `extended` (a person raised a running attempt's ceiling, and at what rate), `target_gone` (a
+target was removed from config, or its provider could not be set up, for both its running and
+waiting jobs), and `orphan_unit` (a live handle this pasard can no longer follow after a restart —
+the executor never adopted it back — which is terminated on the spot rather than left to bill
+unwatched). For results: `pulled`, `pull_skipped` (an automatic pull the free-space guard or
+`pull_max` stopped), `pull_changed` (a pull landed, but the job's files changed while it ran, so the
+remote copy was kept), `pull_failed`, `pull_gave_up` (three automatic tries failed) and `swept` (the
+retention sweep deleted what nobody pulled); the skipped and gave-up events say when the sweep will
+delete the remote copy.
 
 Reconciling after a pasard restart: `list_units()` returns every live handle tagged with a pasar
 job. Handles no job owns are reported as `stray_unit`, and stray cloud units are **terminated**

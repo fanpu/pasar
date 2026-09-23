@@ -250,8 +250,8 @@ class FakeVolume:
 
     def remove_file(self, path, recursive=False):
         """Like the real SDK's: a file, or with `recursive` a directory and everything under it.
-        A directory with anything in it is refused without `recursive` — that refusal is what
-        keeps a manifest delete from taking a file it never listed."""
+        A directory with anything in it is refused without `recursive`, as the flag promises, so
+        a test sees a provider that leans on a non-recursive remove taking only what it names."""
         path = path.rstrip("/")
         prefix = path + "/"
         dirs = self._dirs()
