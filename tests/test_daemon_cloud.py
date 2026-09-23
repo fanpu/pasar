@@ -401,7 +401,10 @@ def test_approving_a_paused_job_resumes_it_as_a_new_attempt(cloud, repo):
     assert daemon.job(job_id).state == State.RUNNING
     assert len(daemon.store.attempts(job_id)) == 2
     env = provider.boxes[handle_of(daemon, job_id)].req.env
-    assert env["PASAR_ATTEMPT"] == "2" and env["PASAR_RESUMING"] == "1"
+    # Not "1", however many attempts have run: `resuming()` means a checkpoint may be there to
+    # load, and a cloud attempt has nowhere durable to have written one yet, so saying so would
+    # send the job hunting for a file that cannot exist.
+    assert env["PASAR_ATTEMPT"] == "2" and env["PASAR_RESUMING"] == "0"
 
 
 def out_of_time(daemon, provider, job_id, attempt):

@@ -1107,8 +1107,12 @@ class Daemon:
         for k in target.env_passthrough:
             if k not in env and k in os.environ:
                 env[k] = os.environ[k]
-        env.update(PASAR_JOB_ID=str(job.id), PASAR_ATTEMPT=str(n),
-                   PASAR_RESUMING="1" if n > 1 else "0",
+        # Always "0", unlike a local attempt's: `resuming()` means "a checkpoint may be there to
+        # load", and a cloud attempt has nowhere durable to have written one (see the persist dir
+        # in docs/cloud.md, which doesn't exist yet). Telling a job to look would send it hunting
+        # for a file that cannot be there, or worse, skipping its own initialisation on the
+        # strength of it. This becomes `n > 1` when a persist dir does.
+        env.update(PASAR_JOB_ID=str(job.id), PASAR_ATTEMPT=str(n), PASAR_RESUMING="0",
                    PASAR_GRACE_SECONDS=str(job.spec.grace))
         return env
 
