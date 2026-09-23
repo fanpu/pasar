@@ -145,10 +145,51 @@ def test_pulls_round_trip_and_the_latest_is_what_is_read(store):
     # What landed is asked for separately: a later refusal (a bad --to, say) must not hide it.
     landed = store.last_pull(1, landed=True)
     assert landed == {"job_id": 1, "ts": 20.0, "dest": "/p/1", "files": 2, "bytes": 99,
-                      "remote_deleted": True, "error": None, "auto": True}
+                      "remote_deleted": True, "error": None, "auto": True,
+                      "remote_files": None, "remote_bytes": None}
     # Finding nothing is not landing: a volume listed too early reads empty too.
     assert store.last_pull(2)["files"] == 0 and store.last_pull(2, landed=True) is None
     assert store.count_pulls(1) == 3 and store.count_pulls(1, auto=True) == 2
+
+
+def test_a_pull_records_what_the_provider_held_even_when_nothing_landed(store):
+    # A pull skipped for want of room measured what it would have fetched: that measurement is
+    # the only record of how much is still sitting (and billing) at the provider.
+    store.add_pull(1, 10.0, "/p/1", None, None, False, "no room", auto=True,
+                   remote_files=3, remote_bytes=5000)
+    store.add_pull(2, 10.0, "/p/2", None, None, False, "not empty")
+    assert store.last_pull(1)["remote_files"] == 3 and store.last_pull(1)["remote_bytes"] == 5000
+    assert store.last_pull(2)["remote_bytes"] is None  # refused before anything was measured
+
+
+def test_held_remote_is_the_latest_measurement_of_each_job_not_yet_gone(store):
+    store.add_pull(1, 10.0, "/p/1", None, None, False, "no room", auto=True,
+                   remote_files=3, remote_bytes=5000)
+    store.add_pull(1, 20.0, "/x", None, None, False, "not empty")  # measured nothing
+    store.add_pull(2, 10.0, "/p/2", 1, 7, True, None, remote_files=1, remote_bytes=7)
+    store.add_pull(3, 10.0, "/p/3", 1, 9, False, None, remote_files=1, remote_bytes=9)  # --keep
+    store.add_pull(4, 10.0, "/p/4", None, None, False, "no room", remote_files=1, remote_bytes=4)
+    store.mark_cloud_swept(4, 20.0, 1, 4)
+    store.add_pull(5, 10.0, "/p/5", 0, 0, False, None, remote_files=0, remote_bytes=0)
+    # 2 pulled and deleted, 4 swept, 5 empty: only 1 and 3 still hold anything.
+    assert store.held_remote() == {1: 5000, 3: 9}
+
+
+def test_an_older_pulls_table_gains_the_measurement_columns(tmp_path):
+    import sqlite3
+    path = tmp_path / "pasar.db"
+    db = sqlite3.connect(path)
+    db.execute("CREATE TABLE pulls (id INTEGER PRIMARY KEY AUTOINCREMENT, job_id INTEGER NOT "
+               "NULL, ts REAL NOT NULL, dest TEXT, files INTEGER, bytes INTEGER, remote_deleted "
+               "INTEGER NOT NULL DEFAULT 0, error TEXT, auto INTEGER NOT NULL DEFAULT 0)")
+    db.execute("INSERT INTO pulls (job_id, ts, dest, files, bytes) VALUES (1, 5.0, '/p', 1, 2)")
+    db.commit()
+    db.close()
+    store = Store(path)
+    assert store.last_pull(1)["remote_bytes"] is None
+    store.add_pull(1, 10.0, "/p", None, None, False, "no room", remote_files=1, remote_bytes=2)
+    assert store.last_pull(1)["remote_bytes"] == 2
+    Store(path)  # and opening it again is harmless
 
 
 def test_when_a_cloud_job_finished_is_stamped_once(store):

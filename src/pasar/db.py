@@ -104,7 +104,9 @@ CREATE TABLE IF NOT EXISTS pulls (
     bytes INTEGER,
     remote_deleted INTEGER NOT NULL DEFAULT 0,
     error TEXT,
-    auto INTEGER NOT NULL DEFAULT 0
+    auto INTEGER NOT NULL DEFAULT 0,
+    remote_files INTEGER,
+    remote_bytes INTEGER
 );
 CREATE INDEX IF NOT EXISTS pulls_job ON pulls(job_id);
 CREATE TABLE IF NOT EXISTS cloud_finished (
@@ -131,6 +133,15 @@ class Store:
         self._db.row_factory = sqlite3.Row
         self._db.execute("PRAGMA journal_mode=WAL")
         self._db.executescript(SCHEMA)
+        self._add_columns("pulls", {"remote_files": "INTEGER", "remote_bytes": "INTEGER"})
+
+    def _add_columns(self, table: str, columns: dict[str, str]) -> None:
+        """Add columns a newer schema gave an existing table: `CREATE TABLE IF NOT EXISTS`
+        leaves a table made by an older pasard exactly as it was."""
+        have = {r["name"] for r in self._db.execute(f"PRAGMA table_info({table})")}
+        for name, kind in columns.items():
+            if name not in have:
+                self._db.execute(f"ALTER TABLE {table} ADD COLUMN {name} {kind}")
 
     def _q(self, sql: str, args: tuple = ()) -> list[sqlite3.Row]:
         with self._lock:
@@ -394,15 +405,20 @@ class Store:
     # pulls
     def add_pull(self, job_id: int, ts: float, dest: str | None, files: int | None,
                  size: int | None, remote_deleted: bool, error: str | None,
-                 auto: bool = False) -> None:
+                 auto: bool = False, remote_files: int | None = None,
+                 remote_bytes: int | None = None) -> None:
         """One outcome of one pull of a cloud job's persist dir, `auto` for the automatic one.
         `files` and `size` (the `bytes` column) are what landed locally, verified — NULL when
         nothing did, which is how a refusal or a failure reads; 0 and 0 when the provider showed
         nothing to pull. `error` may be set on a row that did land: a verified local copy whose
-        remote one could not then be deleted."""
-        self._x("INSERT INTO pulls (job_id, ts, dest, files, bytes, remote_deleted, error, auto)"
-                " VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-                (job_id, ts, dest, files, size, int(remote_deleted), error, int(auto)))
+        remote one could not then be deleted. `remote_files`/`remote_bytes` are what the
+        provider said it held when the pull measured it, before fetching anything — recorded
+        whether or not anything then landed, since a pull skipped for want of room is exactly
+        the one whose results stay at the provider; NULL when it was refused before measuring."""
+        self._x("INSERT INTO pulls (job_id, ts, dest, files, bytes, remote_deleted, error, auto,"
+                " remote_files, remote_bytes) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (job_id, ts, dest, files, size, int(remote_deleted), error, int(auto),
+                 remote_files, remote_bytes))
 
     @staticmethod
     def _pull(row: sqlite3.Row) -> dict:
@@ -426,6 +442,19 @@ class Store:
         rows = self._q(f"SELECT * FROM pulls WHERE job_id = ?{where} ORDER BY id DESC LIMIT 1",
                        (job_id,))
         return self._pull(rows[0]) if rows else None
+
+    def held_remote(self) -> dict[int, int]:
+        """Bytes each finished cloud job is known to still hold at its provider: its latest
+        pull's measurement, for every job whose remote copy that pull did not delete and no
+        sweep has since. Records only, never the provider — so a floor: a job no pull has
+        measured (a running or paused one, whose checkpoint is live) is not in it at all."""
+        rows = self._q(
+            "SELECT p.job_id, p.remote_bytes FROM pulls p JOIN"
+            " (SELECT job_id, MAX(id) AS id FROM pulls WHERE remote_bytes IS NOT NULL"
+            "  GROUP BY job_id) latest ON p.id = latest.id"
+            " WHERE p.remote_deleted = 0 AND p.remote_bytes > 0"
+            " AND p.job_id NOT IN (SELECT job_id FROM cloud_swept)")
+        return {r["job_id"]: r["remote_bytes"] for r in rows}
 
     def count_pulls(self, job_id: int, auto: bool | None = None) -> int:
         """How many pulls of this job were recorded; `auto=True` counts only the automatic ones,

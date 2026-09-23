@@ -930,12 +930,31 @@ class Daemon:
                      auto: bool) -> None:
         self.store.add_pull(job_id, self.clock(), landed.get("dest", str(dest)),
                             landed.get("files"), landed.get("bytes"),
-                            landed.get("deleted", False), error, auto=auto)
+                            landed.get("deleted", False), error, auto=auto,
+                            remote_files=landed.get("remote_files"),
+                            remote_bytes=landed.get("remote_bytes"))
+
+    def sweeps_at(self, job_id: int) -> float | None:
+        """When the retention sweep may delete whatever a finished cloud job left at its
+        provider: `cloud_retention_days` after it finished. `None` for a job not stamped as
+        finished, whose persist dir is still live and never swept."""
+        ended = self.store.cloud_finished_at(job_id)
+        return None if ended is None else ended + self._retention()
+
+    def _sweep_deadline(self, job_id: int) -> str:
+        """`sweeps_at` said for a message about results a pull left at the provider, so that
+        "it is left there" cannot read as if it stays there for good."""
+        at = self.sweeps_at(job_id)
+        days = f"cloud_retention_days ({self.cfg.cloud_retention_days}) after the job finished"
+        if at is None:
+            return days
+        return f"{time.strftime('%Y-%m-%d %H:%M', time.localtime(at))}, {days}"
 
     def _check_room(self, job: Job, dest: Path, files: int, size: int, auto: bool) -> None:
         """Refuse, before a byte is fetched, a pull that should not happen. See `pull`."""
         job_id = job.id
-        where = (f"it is left at {job.spec.target}; pull it by hand with "
+        where = (f"it is left at {job.spec.target} until the retention sweep deletes it there "
+                 f"after {self._sweep_deadline(job_id)}; pull it by hand before then with "
                  f"`pasar pull {job_id} --to <dir>`")
         if auto and self.cfg.pull_max and size > self.cfg.pull_max:
             raise PullSkipped(
@@ -968,6 +987,7 @@ class Daemon:
                                "merge with whatever is already there and make verification "
                                "meaningless — pick another --to, or clear it out first")
         files, size = provider.persist_usage(job_id)
+        landed.update(remote_files=files, remote_bytes=size)
         if files == 0 and size == 0:
             # Not an error: a job that never wrote a checkpoint is common, and there is nothing
             # to delete at the provider either.
@@ -1136,8 +1156,9 @@ class Daemon:
         self.store.add_machine_event(
             self.clock(), "pull_gave_up",
             f"job {job_id}'s automatic pull failed {AUTO_PULL_TRIES} times and will not be tried "
-            f"again; its results are still at {target} — pull them by hand with `pasar pull "
-            f"{job_id} --to <dir>`"
+            f"again; its results are still at {target} until the retention sweep deletes them "
+            f"there after {self._sweep_deadline(job_id)} — pull them by hand before then with "
+            f"`pasar pull {job_id} --to <dir>`"
             + (f". Partial downloads left from those tries, safe to delete once it is pulled: "
                f"{', '.join(staged)}" if staged else ""))
 

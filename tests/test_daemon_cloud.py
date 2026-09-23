@@ -8,6 +8,7 @@ saying so, and never leaves a sandbox running that nothing owns.
 import json
 import logging
 import subprocess
+import time
 from dataclasses import replace
 from pathlib import Path
 
@@ -21,7 +22,7 @@ from pasar.db import Store
 from pasar.executor.base import UnitState
 from pasar.models import EndKind, JobSpec, State
 from pasar.units import GiB
-from pasar.views import cloud_view
+from pasar.views import cloud_status_view, cloud_view
 from tests.fakes_cloud import FakeProvider, launch_request, run_now
 
 
@@ -2089,6 +2090,124 @@ def test_the_pull_retry_window_is_cloud_retention_days(make_cloud, repo, clock):
 
     assert provider.deleted_persist == [job_id]
     assert daemon.store.last_pull(job_id, landed=True)["files"] == 1
+
+
+# ---- what a job left behind, and when it goes
+
+def deadline(daemon, job_id):
+    """The sweep deadline as a message says it: local time, to the minute."""
+    at = daemon.store.cloud_finished_at(job_id) + retention(daemon)
+    return time.strftime("%Y-%m-%d %H:%M", time.localtime(at))
+
+
+def persist_of(daemon, job_id):
+    return cloud_view(daemon, daemon.job(job_id))["persist"]
+
+
+def test_a_skipped_pull_says_when_the_results_are_deleted_at_the_provider(cloud, repo):
+    # "left at the provider; pull it by hand" with no date reads as if it stays there for good.
+    daemon, provider = cloud
+    job_id = left_unpulled(daemon, provider, repo)
+    [event] = events_of(daemon, "pull_skipped")
+    assert deadline(daemon, job_id) in event and "cloud_retention_days" in event
+    assert deadline(daemon, job_id) in daemon.store.last_pull(job_id)["error"]
+
+
+def test_giving_up_says_when_the_results_are_deleted_at_the_provider(cloud, repo, clock):
+    daemon, provider = cloud
+    roomy(daemon)
+    job_id = start(daemon, repo)
+    provider.persist(job_id, "checkpoint.pt", b"weights")
+    provider.fail_download.add(job_id)
+    provider.finish(handle_of(daemon, job_id), 0)
+    daemon.tick()
+    for _ in range(2):
+        clock.advance(3600)
+        daemon.housekeep()
+    [event] = events_of(daemon, "pull_gave_up")
+    assert deadline(daemon, job_id) in event and "cloud_retention_days" in event
+
+
+def test_a_pull_records_what_the_provider_held_even_when_it_pulls_nothing(cloud, repo):
+    daemon, provider = cloud
+    job_id = left_unpulled(daemon, provider, repo, b"w" * 4096)
+    row = daemon.store.last_pull(job_id)
+    assert row["files"] is None  # nothing landed...
+    assert row["remote_files"] == 1 and row["remote_bytes"] == 4096  # ...but it was measured
+
+
+def test_persist_is_only_on_a_finished_cloud_job(cloud, repo):
+    daemon, _ = cloud
+    job = daemon.submit(cloud_spec(repo))
+    assert cloud_view(daemon, job)["persist"] is None  # awaiting: its checkpoint is live
+    daemon.approve(job.id)
+    daemon.tick()
+    assert persist_of(daemon, job.id) is None  # running
+
+
+def test_persist_says_where_a_pulled_job_landed_and_that_nothing_is_left(cloud, repo, clock):
+    daemon, provider = cloud
+    roomy(daemon)
+    job_id = start(daemon, repo)
+    provider.persist(job_id, "checkpoint.pt", b"weights")
+    provider.persist(job_id, "metrics.json", b"{}")
+    provider.finish(handle_of(daemon, job_id), 0)
+    daemon.tick()
+
+    assert persist_of(daemon, job_id) == {
+        "files": 2, "bytes": len(b"weights{}"), "pulled_at": clock.t,
+        "pulled_to": str(daemon.data_dir / "pulls" / str(job_id)), "remote_deleted": True,
+        "remote_bytes": 0, "swept_at": None, "swept_bytes": None, "sweeps_at": None,
+        "last_error": None,
+    }
+
+
+def test_persist_says_what_is_still_at_the_provider_and_when_it_goes(cloud, repo, clock):
+    daemon, provider = cloud
+    job_id = left_unpulled(daemon, provider, repo, b"w" * 4096)
+    finished = daemon.store.cloud_finished_at(job_id)
+
+    view = persist_of(daemon, job_id)
+    assert view["files"] is None and view["pulled_to"] is None and not view["remote_deleted"]
+    assert view["remote_bytes"] == 4096
+    assert view["sweeps_at"] == finished + retention(daemon)
+    assert "pull_min_free" in view["last_error"]
+
+    clock.advance(retention(daemon))
+    daemon.housekeep()  # nobody pulled it: swept
+    view = persist_of(daemon, job_id)
+    assert view["swept_at"] == clock.t and view["swept_bytes"] == 4096
+    assert view["sweeps_at"] is None and view["remote_bytes"] == 0
+
+
+def test_persist_of_a_kept_pull_still_counts_down_to_the_sweep(cloud, repo, tmp_path):
+    daemon, provider = cloud
+    job_id = finish(daemon, provider, repo)
+    provider.persist(job_id, "checkpoint.pt", b"weights")
+    daemon.pull(job_id, dest=tmp_path / "out", keep=True)
+
+    view = persist_of(daemon, job_id)
+    assert view["files"] == 1 and view["pulled_to"] == str(tmp_path / "out")
+    assert not view["remote_deleted"] and view["remote_bytes"] == len(b"weights")
+    assert view["sweeps_at"] == daemon.store.cloud_finished_at(job_id) + retention(daemon)
+
+
+def test_the_cloud_status_counts_what_is_known_to_be_stored_per_target(cloud, repo, clock):
+    daemon, provider = cloud
+    left = left_unpulled(daemon, provider, repo, b"w" * 4096)
+    left_unpulled(daemon, provider, repo, b"x" * 1000)
+    roomy(daemon)
+    job_id = start(daemon, repo)
+    provider.persist(job_id, "checkpoint.pt", b"pulled")
+    provider.finish(handle_of(daemon, job_id), 0)
+    daemon.tick()  # pulled whole, remote copy deleted: holds nothing
+
+    [target] = cloud_status_view(daemon, clock.t, {})["targets"]
+    assert target["known_stored_bytes"] == 5096 and target["known_stored_jobs"] == 2
+
+    daemon.store.mark_cloud_swept(left, clock.t, 1, 4096)
+    [target] = cloud_status_view(daemon, clock.t, {})["targets"]
+    assert target["known_stored_bytes"] == 1000 and target["known_stored_jobs"] == 1
 
 
 # ---- the per-job lifetime cap

@@ -87,6 +87,46 @@ _UNKNOWN = object()
 already has an answer has to be distinguishable from one that has none."""
 
 
+def persist_view(daemon, job: Job) -> dict | None:
+    """What a finished cloud job left in its persist dir, where it went, and when what is still
+    at the provider goes; `None` until the job is `TERMINAL`, while that dir is still the live
+    checkpoint an attempt resumes from. From pasard's own records only — the pulls, the sweep,
+    when the job finished — and never the provider, which a view must not wait on.
+
+    `files`/`bytes`/`pulled_at`/`pulled_to`/`remote_deleted` are the latest pull that landed
+    anything (all `None`, and `False`, when none has). `remote_bytes` is what the provider held
+    when a pull last measured it — 0 once a pull deleted it or the sweep did, `None` when no
+    pull has measured it. `swept_at`/`swept_bytes` say the retention sweep ran and what it
+    deleted (0 bytes when a pull had already emptied it). `sweeps_at` is when that sweep may
+    delete what is left — `cloud_retention_days` after the job finished — and is `None` once
+    nothing is (the landed pull deleted the remote copy, or the sweep already ran).
+    `last_error` is the latest pull's own error, if it had one: why a pull was skipped or failed,
+    or that a verified pull could not then delete the remote copy."""
+    if job.state not in TERMINAL:
+        return None
+    pulls = daemon.store.pulls(job.id)
+    # The same rows `Store.last_pull` reads, taken in one query rather than one per question.
+    landed = next((p for p in reversed(pulls) if p["files"]), {})
+    last = pulls[-1] if pulls else {}
+    measured = next((p for p in reversed(pulls) if p["remote_bytes"] is not None), None)
+    swept = daemon.store.cloud_swept(job.id)
+    remote_deleted = bool(landed.get("remote_deleted"))
+    gone = remote_deleted or swept is not None
+    remote_bytes = 0 if gone else measured and measured["remote_bytes"]
+    return {
+        "files": landed.get("files"),
+        "bytes": landed.get("bytes"),
+        "pulled_at": landed.get("ts"),
+        "pulled_to": landed.get("dest"),
+        "remote_deleted": remote_deleted,
+        "remote_bytes": remote_bytes,
+        "swept_at": swept["ts"] if swept else None,
+        "swept_bytes": swept["bytes"] if swept else None,
+        "sweeps_at": None if gone else daemon.sweeps_at(job.id),
+        "last_error": last.get("error"),
+    }
+
+
 def cloud_view(daemon, job: Job, pace=_UNKNOWN) -> dict | None:
     """The `cloud` object embedded in a cloud job's view; `None` for a job that ran locally.
 
@@ -125,7 +165,9 @@ def cloud_view(daemon, job: Job, pace=_UNKNOWN) -> dict | None:
 
     `console_url` is only ever populated while the daemon is actively polling the attempt (i.e.
     while it's the current entry in `daemon.cloud_units`); pasar doesn't persist it, so it reads
-    as `None` once an attempt has ended, even if the provider's own console still works."""
+    as `None` once an attempt has ended, even if the provider's own console still works.
+
+    `persist` is what the job left behind once it finished: see `persist_view`."""
     if job.spec.target == LOCAL:
         return None
     attempts = daemon.store.attempts(job.id)
@@ -163,6 +205,7 @@ def cloud_view(daemon, job: Job, pace=_UNKNOWN) -> dict | None:
         # — there is nothing to reset by hand. A caller that has already asked (and filtered on
         # the answer) passes it in rather than paying for the same handful of queries twice.
         "needs_more_time": daemon.needs_more_time(job) if pace is _UNKNOWN else pace,
+        "persist": persist_view(daemon, job),
     }
 
 
@@ -254,7 +297,18 @@ def cloud_status_view(daemon, now: float, projection: dict) -> dict:
     every job currently waiting on a person to approve it, and every *running* job whose own pace
     projects it past its approved run time (`needs_time`) — a different tray from `awaiting`,
     because these jobs are not paused and do not need to be: they keep running on the time they
-    already have unless a person extends them (`POST /api/jobs/{id}/approve?extend=1`)."""
+    already have unless a person extends them (`POST /api/jobs/{id}/approve?extend=1`).
+
+    `known_stored_bytes`/`known_stored_jobs` are what finished jobs are known to have left on the
+    target's volume: the last measurement a pull took of each whose remote copy neither a pull
+    nor the retention sweep has deleted yet. A floor from pasard's records, not a live size:
+    running and paused jobs' checkpoints are there too, uncounted, and a provider bills storage
+    whether or not anything is running."""
+    held: dict[str, list[int]] = {}
+    for job_id, size in daemon.store.held_remote().items():
+        job = daemon.store.get_job(job_id)
+        if job is not None:
+            held.setdefault(job.spec.target, []).append(size)
     targets = []
     for name, target in sorted(daemon.cfg.clouds.items()):
         committed = daemon.ledger.committed(name)
@@ -272,6 +326,8 @@ def cloud_status_view(daemon, now: float, projection: dict) -> dict:
             "max_job_cost": target.max_job_cost,
             "running": running,
             "rates": daemon.cloud_rates(target),
+            "known_stored_bytes": sum(held.get(name, [])),
+            "known_stored_jobs": len(held.get(name, [])),
         })
     awaiting = [job_view(daemon, j, now, projection)
                 for j in daemon.store.list_jobs([State.AWAITING])]

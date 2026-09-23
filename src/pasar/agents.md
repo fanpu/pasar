@@ -267,8 +267,8 @@ before it's spent, whether that is a new job's first launch or a running job's r
 time (see `needs_more_time` below). `pasar cloud [--json]` shows what's waiting:
 
     $ pasar cloud
-    TARGET  PROVIDER  RUNNING  TODAY          MONTH           RATES
-    modal   modal     1/2      $7.90 / $50.00 $7.90 / $300.00 gpu_hour_cost_h100=$3.95, ...
+    TARGET  PROVIDER  RUNNING  TODAY           MONTH            JOB CAP  STORED              RATES
+    modal   modal     1/2      $7.90 / $50.00  $7.90 / $300.00  $10.00   0.0 GiB (0 job(s))  gpu_hour_cost_h100=$3.95, ...
 
     1 job(s) awaiting approval:
     ID  NAME   STATE     BID   MEMORY            TIME  BY
@@ -289,14 +289,14 @@ If the target stops being configured on this pasard, a running cloud job ends `f
 can reach it any more) and a waiting one ends `cancelled` (reason `target_gone`, nothing was
 spent) — both ordinary terminal states with `pasar wait`'s usual exit codes.
 
-Whatever a cloud job wrote under `pasar_job.persist_dir()` stays on the provider's volume once
-the job is finished — nothing copies it back or deletes it on its own. `pasar pull <id> [--to
-DIR] [--keep]` fetches it to local disk (default `<pull_dir>/<id>/` on the daemon), verifies the
-file count and byte total against what the provider reports, and only then deletes the remote
-copy (`--keep` leaves it in place instead). Refused for a job that hasn't finished yet (its
-checkpoint is still live and the next attempt may resume from it), a local job (there is nothing
-on a provider to pull), or a destination that already has something in it. A job that never
-wrote anything reports that and exits `0` — not an error.
+What a cloud job wrote under `pasar_job.persist_dir()` is pulled into `<pull_dir>/<id>/` when it
+finishes and deleted at the provider. A pull skipped for disk space, or given up on, leaves it
+there only until `cloud.persist.sweeps_at`, when it is deleted for good. `pasar pull <id> [--to
+DIR] [--keep]` fetches it by hand, verifies the file count and byte total against what the
+provider reports, and only then deletes the remote copy (`--keep` leaves it, for the sweep).
+Refused for a job that hasn't finished yet (its checkpoint is still live and the next attempt may
+resume from it), a local job (there is nothing on a provider to pull), or a destination that
+already has something in it. A job that never wrote anything reports that and exits `0`.
 
 `pasar show <id>` and `pasar ls`/`pasar show --json` carry a `cloud` object for cloud jobs:
 `target`, `gpu`, `phase` (where the *attempt* the daemon is watching has got to — `pending`,
@@ -312,6 +312,9 @@ there isn't yet enough progress reported to judge — that needs both 5 minutes 
 at least 3 progress reports since the attempt started). A job flagged this way keeps running
 either way; a person can raise its ceiling in the web UI (`POST /api/jobs/{id}/approve?extend=1`,
 also never for an agent to call) or let it pause at the limit and approve it again from there.
+`persist` (`null` until the job finishes) says what it left behind: `files`/`bytes`/`pulled_at`/
+`pulled_to` of the last pull that landed, `remote_deleted`, `remote_bytes` (still at the provider,
+as last measured), `sweeps_at`, `swept_at`/`swept_bytes` and `last_error`.
 
 ## HTTP API quick reference
 
@@ -328,12 +331,12 @@ whatever `PASAR_URL` would be (default `http://127.0.0.1:8750`).
 | `POST /api/jobs/{id}/restart` | Requeue a finished job, optionally changing `mem`/`whole_gpu`/`time`/`bid`/`retries`; `preempt` (default `false`) is not carried over. |
 | `POST /api/jobs/{id}/pull` | Cloud only. Fetch a finished job's persist dir to local disk and delete the remote copy once verified. Body: `to` (absolute path, default `<pull_dir>/{id}/`), `keep` (bool, default `false`, leaves the remote copy in place). |
 | `POST /api/jobs/{id}/approve` / `/reject` | Web-UI-only. **Agents must never call these**, including `approve?extend=1` — a person approves a cloud job's cost, and its cost overruns, not code. |
-| `GET /api/cloud` | Cloud targets: budget, spend today/this month, live rates, and jobs awaiting approval. |
+| `GET /api/cloud` | Cloud targets: budget, spend today/this month, live rates, `known_stored_bytes`/`known_stored_jobs` (what finished jobs are known to still hold there — a floor, not a live size), and jobs awaiting approval. |
 | `GET /api/jobs/{id}/logs` | A chunk of output (`?offset=N`), or an SSE stream with `?follow=true`. |
 | `GET /api/jobs/{id}/events` | The job's raw protocol events (checkpoint/resumed/progress/note). |
 | `GET /api/jobs/{id}/metrics` | Stored per-attempt metric summaries (avg/max/total). |
 | `GET /api/jobs/{id}/usage` | In-memory time series of this attempt's measured memory usage. |
-| `GET /api/status` | Pool size, reserved/free memory, pressure, blocked/waiting queue state, recent machine events (`pressure`, `pressure_end`, `oom_kill` locally; `price_rise`, `max_cost`, `extended`, `target_gone`, `orphan_unit`, `stray_unit` for cloud targets). |
+| `GET /api/status` | Pool size, reserved/free memory, pressure, blocked/waiting queue state, recent machine events (`pressure`, `pressure_end`, `oom_kill` locally; `price_rise`, `max_cost`, `extended`, `target_gone`, `orphan_unit`, `stray_unit`, `pulled`, `pull_skipped`, `pull_failed`, `pull_gave_up`, `swept` for cloud targets). |
 | `GET /api/gpu` | GPU power/temperature/utilisation history from Prometheus, if configured. |
 | `GET /api/stream` | SSE stream of `{status, jobs}` snapshots, one per state change. |
 | `GET /llms.txt` | This guide, as `text/plain`. |

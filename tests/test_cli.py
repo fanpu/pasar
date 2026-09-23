@@ -1,4 +1,5 @@
 import json
+import time
 
 import httpx
 import pytest
@@ -8,6 +9,7 @@ from pasar.api import create_app
 from pasar.cli import ApiError, base_url, call, main, wait_code
 from pasar.cloud.executor import parse_unit
 from pasar.cloud.pace import MIN_REPORTS
+from pasar.units import GiB
 
 
 @pytest.fixture
@@ -529,3 +531,72 @@ def test_submit_past_the_job_cap_is_refused_with_the_reason(client, capsys, clou
     code, out = run(client, capsys, "submit", "--time", "3h", "--on", "fake", "--gpu", "H100",
                     "--", "python", "-c", "pass")
     assert code == 70 and "$15.83" in out.err and "max_job_cost" in out.err
+
+
+def test_show_says_where_a_cloud_jobs_results_landed(client, capsys, cloud_daemon,
+                                                     cloud_provider, cloud_cwd, tmp_path,
+                                                     monkeypatch):
+    job_id = _run_cloud_job_to_completion(client, capsys, cloud_daemon, cloud_provider,
+                                          cloud_cwd, monkeypatch)
+    cloud_provider.persist(job_id, "checkpoint.pt", b"weights")
+    dest = tmp_path / "out"
+    run(client, capsys, "pull", str(job_id), "--to", str(dest))
+
+    code, out = run(client, capsys, "show", str(job_id))
+    assert code == 0
+    assert f"1 file(s), 0.0 GiB to {dest}" in out.out and "remote copy deleted" in out.out
+    assert "sweep" not in out.out  # nothing left at the provider to sweep
+
+
+def test_show_says_what_is_left_at_the_provider_and_when_it_goes(client, capsys, cloud_daemon,
+                                                                 cloud_provider, cloud_cwd,
+                                                                 tmp_path, monkeypatch):
+    job_id = _run_cloud_job_to_completion(client, capsys, cloud_daemon, cloud_provider,
+                                          cloud_cwd, monkeypatch)
+    cloud_daemon.store.add_pull(job_id, cloud_daemon.clock(), str(tmp_path / "out"), None, None,
+                                False, "not enough room", auto=True, remote_files=1,
+                                remote_bytes=GiB // 2)
+    at = cloud_daemon.sweeps_at(job_id)
+
+    code, out = run(client, capsys, "show", str(job_id))
+    assert code == 0 and "pulled" not in out.out
+    assert "0.5 GiB still at fake" in out.out
+    assert time.strftime("%Y-%m-%d %H:%M", time.localtime(at)) in out.out
+    assert f"pasar pull {job_id}" in out.out and "not enough room" in out.out
+
+    cloud_daemon.store.mark_cloud_swept(job_id, at, 1, GiB // 2)
+    code, out = run(client, capsys, "show", str(job_id))
+    assert "nobody pulled it: 0.5 GiB deleted from fake" in out.out
+    assert "still at" not in out.out and "not enough room" not in out.out
+
+
+def test_show_says_a_kept_remote_copy_is_still_swept(client, capsys, cloud_daemon,
+                                                     cloud_provider, cloud_cwd, tmp_path,
+                                                     monkeypatch):
+    job_id = _run_cloud_job_to_completion(client, capsys, cloud_daemon, cloud_provider,
+                                          cloud_cwd, monkeypatch)
+    cloud_provider.persist(job_id, "checkpoint.pt", b"weights")
+    run(client, capsys, "pull", str(job_id), "--to", str(tmp_path / "out"), "--keep")
+    at = cloud_daemon.sweeps_at(job_id)
+
+    code, out = run(client, capsys, "show", str(job_id))
+    assert code == 0 and "remote copy kept" in out.out and "still at fake" in out.out
+    assert time.strftime("%Y-%m-%d %H:%M", time.localtime(at)) in out.out
+
+
+def test_cloud_shows_what_is_known_to_be_stored_per_target(client, capsys, cloud_daemon,
+                                                           cloud_provider, cloud_cwd, tmp_path,
+                                                           monkeypatch):
+    job_id = _run_cloud_job_to_completion(client, capsys, cloud_daemon, cloud_provider,
+                                          cloud_cwd, monkeypatch)
+    # What a skipped pull measured, recorded without shipping half a GiB through a test.
+    cloud_daemon.store.add_pull(job_id, cloud_daemon.clock(), str(tmp_path / "out"), None, None,
+                                False, "no room", auto=True, remote_files=1,
+                                remote_bytes=GiB // 2)
+
+    code, out = run(client, capsys, "cloud")
+    assert code == 0 and "STORED" in out.out and "0.5 GiB" in out.out
+    assert "at least" in out.out  # a floor, not a live size: running jobs are not counted
+    code, out = run(client, capsys, "cloud", "--json")
+    [target] = json.loads(out.out)["targets"]
+    assert target["known_stored_bytes"] == GiB // 2 and target["known_stored_jobs"] == 1

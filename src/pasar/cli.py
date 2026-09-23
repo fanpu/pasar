@@ -171,6 +171,36 @@ def _time_line(job: dict) -> str:
     return f"{ran} of ~{fmt_duration(job['est_runtime'])}"
 
 
+def _clock(ts: float) -> str:
+    return time.strftime("%Y-%m-%d %H:%M", time.localtime(ts))
+
+
+def _persist_fields(job_id: int, target: str, persist: dict) -> list[tuple[str, str]]:
+    """What a finished cloud job left behind: where a pull put it, what is still at the provider
+    and when the retention sweep deletes it there, and what the sweep already did. Said with a
+    date, because results left at a provider do not stay there for good."""
+    fields = []
+    if persist["files"]:
+        kept = "remote copy deleted" if persist["remote_deleted"] else "remote copy kept"
+        pulled = (f"{persist['files']} file(s), {fmt_gib(persist['bytes'])} to "
+                  f"{persist['pulled_to']} at {_clock(persist['pulled_at'])} ({kept})")
+        fields.append(("pulled", pulled))
+    held = persist["remote_bytes"]
+    if persist["sweeps_at"] is not None and held != 0:
+        what = "whatever it left is" if held is None else f"{fmt_gib(held)} still"
+        line = (f"{what} at {target}, deleted there by the retention sweep after "
+                f"{_clock(persist['sweeps_at'])}")
+        if not persist["files"]:
+            line += f"; pull it before then: pasar pull {job_id} --to <dir>"
+        fields.append(("remote", line))
+        fields.append(("last pull", persist["last_error"]))
+    if persist["swept_at"] is not None and persist["swept_bytes"]:
+        swept = (f"nobody pulled it: {fmt_gib(persist['swept_bytes'])} deleted from {target} "
+                 f"at {_clock(persist['swept_at'])}")
+        fields.append(("swept", swept))
+    return fields
+
+
 def print_job(job: dict) -> None:
     attempts = job["attempts"]
     cloud = job.get("cloud")
@@ -202,6 +232,8 @@ def print_job(job: dict) -> None:
             fields.append(("pace", pace))
         if cloud["console_url"]:
             fields.append(("console", cloud["console_url"]))
+        if cloud.get("persist"):
+            fields += _persist_fields(job["id"], cloud["target"], cloud["persist"])
     for k, v in fields:
         if v not in ("", None):
             print(f"{k:>9}  {v}")
@@ -212,18 +244,23 @@ def print_cloud(body: dict) -> None:
     if not targets:
         print("no cloud targets configured")
     else:
-        rows = [("TARGET", "PROVIDER", "RUNNING", "TODAY", "MONTH", "JOB CAP", "RATES")]
+        rows = [("TARGET", "PROVIDER", "RUNNING", "TODAY", "MONTH", "JOB CAP", "STORED",
+                 "RATES")]
         for t in targets:
             today = f"{_money(t['spent_today'])} / {_money(t['daily_budget'])}"
             month = f"{_money(t['spent_month'])} / {_money(t['monthly_budget'])}"
             running = f"{t['running']}/{t['max_running']}"
             rates = ", ".join(f"{k}={_money(v)}" for k, v in sorted(t["rates"].items())) or "none"
             name = t["name"] + ("" if t["configured"] else " (no provider)")
+            stored = f"{fmt_gib(t['known_stored_bytes'])} ({t['known_stored_jobs']} job(s))"
             rows.append((name, t["provider"], running, today, month,
-                         _money(t.get("max_job_cost")), rates))
+                         _money(t.get("max_job_cost")), stored, rates))
         widths = [max(len(r[i]) for r in rows) for i in range(len(rows[0]))]
         for r in rows:
             print("  ".join(c.ljust(w) for c, w in zip(r, widths)).rstrip())
+        print("STORED is at least what finished jobs left at the provider, as a pull last "
+              "measured it;\nrunning and paused jobs' checkpoints are not counted. Storage is "
+              "billed even when nothing runs.")
     awaiting = body["awaiting"]
     print()
     if awaiting:
