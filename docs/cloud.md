@@ -40,9 +40,10 @@ pasar can't be a hard security boundary: agents run as the same user and can rea
 can. So the true ceiling lives at the provider (item 1), and pasar makes spending by accident hard.
 
 1. **A spending limit at the provider.** Setup requires a workspace spending limit at the provider
-   (on Modal, in the workspace's usage settings), set to the most you're willing to lose. It's the
-   one limit nothing on this machine can raise. The docs say so, and `pasar cloud` warns if the
-   provider exposes the limit and it isn't set.
+   (on Modal, in the dashboard's billing settings), set to the most you're willing to lose. It's the
+   one limit nothing on this machine can raise. Modal's SDK doesn't expose it, so pasar can't check
+   it: the setup docs make it a step, and `pasar cloud` shows month-to-date spend from the
+   provider's own billing summary so the real number is always in view.
 2. **Off by default.** A cloud target exists only if `config.toml` defines it, and it can't be
    enabled without a `budget`.
 3. **Human approval of every attempt.** A cloud job is submitted into **awaiting approval** and does
@@ -179,20 +180,29 @@ provider.
 - **At submit**, for a cloud job pasar:
   1. finds the git repository containing `--cwd`;
   2. requires `pyproject.toml` and `uv.lock` in the uv project that contains `--cwd`, and checks
-     that the lock is universal: it must contain wheels or sdists for `linux x86_64`, not just the
-     local aarch64;
+     that the lock resolves for the target platform by running
+     `uv sync --frozen --dry-run --python-platform x86_64-manylinux_2_28 --no-install-project`.
+     That runs offline against the lock in about a second, honours the project's own package
+     indexes (a plain `uv export` does not, which makes a custom torch index look unsatisfiable),
+     and fails before anything is paid for;
   3. writes `jobs/<id>/bundle.tar.zst`: the files git lists (tracked, plus untracked-but-not-ignored),
      with a size limit (`bundle_max`, default 256 MiB) and a clear error naming the largest files if
      it's exceeded. The git commit and diff are recorded as for local jobs.
 
   Submit fails fast on any of these, so a mistake costs nothing.
-- **Image**: base image (configurable, default a CUDA runtime image with uv) + `uv sync --frozen`
-  of the environment spec. On Modal this is `Image.uv_sync()`, which Modal caches by content, so the
-  first job for a lockfile pays the build (minutes, mostly torch) and later jobs start fast. pasar
-  records the image ref per environment hash and shows "building image" as its own start-up phase.
+- **Image**: base image (configurable, default a CUDA runtime image with uv) + the environment spec
+  copied in + `uv sync --frozen --no-install-project`. pasar runs uv itself rather than using a
+  provider's own helper: Modal's `Image.uv_sync()` refuses uv workspaces (pasar's own repo is one),
+  and running plain uv keeps every provider on the same path. Providers cache image layers by
+  content, so the first job for a lockfile pays the build (minutes, mostly torch) and later jobs
+  start fast. pasar records the image ref per environment hash and shows "building image" as its
+  own start-up phase.
 - **In the container**, the bundle is unpacked at `/pasar/work/<repo name>`, the working directory is
   the same path relative to the repository root as locally, and the project's `.venv` is a symlink to
-  the image's environment. So `.venv/bin/python train.py` and `uv run train.py` both just work.
+  the image's environment. So `.venv/bin/python train.py` and `uv run train.py` both just work. The
+  project itself is not installed into the environment (`--no-install-project`, so a code change
+  doesn't invalidate the image), so the wrapper puts the project root on `PYTHONPATH`, as an editable
+  install would.
 - **Frozen at submit.** A cloud job runs the code as it was when it was submitted, even if it waits
   in the queue while you edit. Local jobs, by contrast, run whatever the working tree holds when
   each attempt starts.
@@ -242,6 +252,23 @@ pasar checks this while the job runs: a running cloud job that has reported `pro
 `checkpoint` for 20 minutes gets a warning line in its log and a **not checkpointing** badge in the
 UI and the approval tray. Its approved limit doesn't change; the badge exists so the problem gets
 noticed before the limit.
+
+## What Modal does (measured)
+
+Checked against Modal 1.5.5 with short sandboxes on 2026-09-22, since the design leans on these:
+
+| Question | Answer |
+|---|---|
+| Longest job | Sandbox `timeout` must be between 10 s and 24 h. `max_runtime` therefore can't exceed 24 h, and a job that needs longer must pause and resume (which it does anyway). |
+| Can output be re-read after pasard restarts? | Yes. A fresh `Sandbox.from_id` replays stdout from the start, so the pump can resume by counting bytes. The persist-dir tee stays as a backstop for providers that can't. |
+| Graceful stop | `Sandbox.exec("bash", "-c", "kill -TERM 1")` reaches the wrapper: a trap ran, the grace sleep completed, and the sandbox exited 143. |
+| Finding jobs after a restart | `Sandbox.list(tags={"pasar_job": …})` returns live sandboxes with their tags. |
+| Telling a provider kill from our own | Not from the exit code: a terminated sandbox reports 137 either way, and `terminate(wait=True)` returns it. pasar relies on its own record of whether it asked, so an unexplained 137 is a reclaim (`cloud_preempted`). |
+| Rates | `Workspace.from_context().billing.rates()` gives per-hour prices, e.g. `gpu_hour_cost_l40s` and `mem_gib_hour_cost_sandbox`, so cost estimates come from live prices rather than a config table. |
+| Billed cost | `workspace.billing.report(start=…, resolution="h", tag_names=["*"])` per object, and `billing.summary()` gives month-to-date cost, which is what the monthly budget meter should use. (The module-level `modal.billing.workspace_billing_report` is deprecated.) |
+| Spending limit | Not in the SDK: `settings.valid_settings()` lists only `default-environment` and `image-builder-version`. So pasar can't read or verify a workspace spending limit; setup docs must tell you to set one in the Modal dashboard. |
+| Environment build | A container-side `uv sync --frozen --no-install-project` over a copied lockfile works and is cached across runs (a rebuild with warm layers took ~6 s). `Image.uv_sync()` raises "uv workspaces are not supported". |
+| GPUs | **Blocked on this account**: `Please add a payment method to use T4 GPU sandboxes.` Everything above was measured on CPU sandboxes; the GPU path (`nvidia-smi` sampling, real GPU cost) is still unverified. |
 
 ## The wrapper protocol
 
@@ -424,7 +451,7 @@ budget = { daily = 50.0, monthly = 300.0 }   # USD; required to enable the targe
 approval_ttl = "24h"
 max_running = 4
 timeout_factor = 1.5
-max_runtime = "24h"
+max_runtime = "24h"          # Modal's own ceiling; can't be raised
 env_passthrough = ["WANDB_API_KEY", "HF_TOKEN"]
 volumes = { "/data" = "datasets" }
 bundle_max = "256MiB"
