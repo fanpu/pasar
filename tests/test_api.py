@@ -408,6 +408,17 @@ def test_lower_max_cost_becomes_the_enforced_ceiling(client, cloud_daemon, cloud
     assert row["max_cost"] == pytest.approx(6.00)
 
 
+def test_a_capped_job_shows_the_shorter_run_its_cap_buys(client, cloud_daemon, cloud_cwd):
+    # Capping dollars costs time — the daemon pauses the attempt when the cap is spent — so the
+    # view has to say how much time, not just repeat the dollar figure back.
+    capped = submit_cloud(client, cloud_cwd, max_cost=6.00).json()["cloud"]
+    assert capped["full_seconds"] == 5400        # a 1h estimate x the target's 1.5 timeout factor
+    assert capped["approved_seconds"] == 4092    # what $6 buys at $5.278/h
+    assert capped["user_capped"] is True
+    plain = submit_cloud(client, cloud_cwd).json()["cloud"]
+    assert plain["approved_seconds"] == plain["full_seconds"] == 5400
+
+
 def test_price_rise_above_the_users_cap_bounces_to_awaiting(client, cloud_daemon, cloud_provider,
                                                              cloud_cwd, monkeypatch, clock):
     # --max-cost of $9 does not bind at approval (the automatic ceiling, ~$7.92, is lower), so

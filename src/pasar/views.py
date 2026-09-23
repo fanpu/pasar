@@ -91,9 +91,17 @@ def cloud_view(daemon, job: Job) -> dict | None:
     `awaiting` (reason `price_rose`) and it needs approving again. In the `price_rose` case the
     old ceiling that was breached is still in `job.summary`, alongside the new price. `max_cost`
     is the *effective* ceiling: when the submitter's own `--max-cost` is lower than the ceiling
-    the target's rates would otherwise buy, `max_cost` is that lower figure (and `user_capped` is
-    `True`) — never the bigger, uncapped number, which would misstate what a price rise is
-    actually compared against.
+    the target's rates would otherwise buy, `max_cost` is that lower figure and `user_capped` is
+    `True`.
+
+    `approved_seconds`/`full_seconds` are how long one approval buys and how long it would buy
+    without `--max-cost`: a dollar cap is enforced as a shorter run (the daemon pauses the attempt
+    when the cap's dollars are spent), so a capped job gets less time, and these two say how much
+    less. They are priced live, like `max_cost`, so they say what the daemon would do now.
+
+    A price rise is *not* measured against `max_cost` — the approvals row keeps the hourly rate
+    for that, so that a cap (which never moves) cannot hide a rate that did. See
+    `Daemon._over_the_approval`.
 
     `phase` carries one of two different vocabularies depending on whether the daemon is
     currently watching a live attempt for this job (i.e. `daemon.cloud_units` has an entry for
@@ -122,6 +130,8 @@ def cloud_view(daemon, job: Job) -> dict | None:
         estimated_cost, max_cost = live if live else (None, None)
     user_capped = (job.spec.max_cost is not None and max_cost is not None
                   and abs(max_cost - job.spec.max_cost) < 1e-6)
+    window = daemon.cloud_window(job)
+    approved_seconds, full_seconds = window if window else (None, None)
     unit = daemon.cloud_units.get(job.id)
     return {
         "target": job.spec.target,
@@ -130,6 +140,8 @@ def cloud_view(daemon, job: Job) -> dict | None:
         "estimated_cost": estimated_cost,
         "max_cost": max_cost,
         "user_capped": user_capped,
+        "approved_seconds": approved_seconds,
+        "full_seconds": full_seconds,
         "console_url": unit.console_url if unit is not None else None,
     }
 

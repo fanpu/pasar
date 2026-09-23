@@ -316,6 +316,22 @@ def test_submit_on_cloud_notes_the_users_cap_when_it_binds(client, capsys, cloud
     assert "capped at $6.00 (your --max-cost)" in out.out
 
 
+def test_show_says_how_much_run_time_a_cap_costs(client, capsys, cloud_daemon, cloud_cwd,
+                                                 monkeypatch):
+    monkeypatch.chdir(cloud_cwd)
+    code, out = run(client, capsys, "submit", "--time", "1h", "--on", "fake", "--gpu", "H100",
+                    "--max-cost", "6", "--", "python", "-c", "pass")
+    assert code == 0 and "paused after 1h08m instead of 1h30m" in out.out
+    code, out = run(client, capsys, "show", "1")
+    assert code == 0
+    assert "1h08m of run time (your --max-cost cuts it from 1h30m)" in out.out
+    # and an uncapped job just says what it bought, with nothing cut from it
+    run(client, capsys, "submit", "--time", "1h", "--on", "fake", "--gpu", "H100", "--",
+        "python", "-c", "pass")
+    code, out = run(client, capsys, "show", "2")
+    assert code == 0 and "1h30m of run time" in out.out and "cuts it" not in out.out
+
+
 def test_cloud_command_text_and_json(client, capsys, cloud_daemon, cloud_cwd, monkeypatch):
     monkeypatch.chdir(cloud_cwd)
     code, out = run(client, capsys, "cloud")

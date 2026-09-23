@@ -96,6 +96,20 @@ def _mem(job: dict) -> str:
     return fmt_gib(job["mem_request"])
 
 
+def _approved_run(cloud: dict) -> str:
+    """How much run time one approval buys, and — when `--max-cost` is what limits it — how much
+    time that cap is costing. A dollar cap is enforced by pausing the job early, which is not what
+    somebody who capped dollars expects to have bought, so it is said plainly rather than left to
+    be discovered when the job pauses."""
+    approved, full = cloud.get("approved_seconds"), cloud.get("full_seconds")
+    if not approved:
+        return ""
+    if full and approved < full:
+        return (f"{fmt_duration(approved)} of run time"
+                f" (your --max-cost cuts it from {fmt_duration(full)})")
+    return f"{fmt_duration(approved)} of run time"
+
+
 def _expected(job: dict) -> str:
     """Expected total run time, e.g. `~48m`; `~48m*` when projected from progress reports."""
     total = job["expected_runtime"]
@@ -158,6 +172,7 @@ def print_job(job: dict) -> None:
         cost = f"est {_money(cloud['estimated_cost'])}, capped at {_money(cloud['max_cost'])}{cap_note}"
         fields.append(("cloud", f"{cloud['target']} · {cloud['gpu']} · {cloud['phase']}"))
         fields.append(("cost", cost))
+        fields.append(("approved", _approved_run(cloud)))
         if cloud["console_url"]:
             fields.append(("console", cloud["console_url"]))
     for k, v in fields:
@@ -225,9 +240,10 @@ def build_parser() -> Parser:
                    help="cloud only: pass this environment variable through by name "
                         "(repeatable); local jobs already capture the whole environment")
     s.add_argument("--max-cost", type=float,
-                   help="cloud only: refuse to submit if the estimate already exceeds this; "
-                        "also caps the per-attempt ceiling a price rise is held to, if lower "
-                        "than the target's own automatic ceiling")
+                   help="cloud only: dollars one attempt may spend. Refuses the submit if the "
+                        "estimate already exceeds it, and otherwise pauses the job once it has "
+                        "spent that much — which is sooner than --time x the target's timeout "
+                        "factor, so a cap buys fewer hours as well as fewer dollars")
     s.add_argument("command", nargs=argparse.REMAINDER, help="-- command to run")
 
     ls = add("ls", "list jobs")
@@ -294,6 +310,9 @@ def run(args, client: httpx.Client) -> int:
             print(f"submitted #{job['id']} {job['name']} ({_state(job)}) on {c['target']}")
             print(f"  estimated {_money(c['estimated_cost'])}, "
                   f"capped at {_money(c['max_cost'])}{cap_note} for this run")
+            if c.get("full_seconds") and (c.get("approved_seconds") or 0) < c["full_seconds"]:
+                print(f"  it will be paused after {fmt_duration(c['approved_seconds'])}"
+                      f" instead of {fmt_duration(c['full_seconds'])}, to stay under that cap")
             print("  approve it in the web UI to let it launch")
         else:
             print(f"submitted #{job['id']} {job['name']} ({_state(job)})")

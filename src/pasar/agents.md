@@ -241,7 +241,7 @@ Extra flags, cloud jobs only:
 | `--gpu TYPE` | **Required** for a cloud job, e.g. `H100` or `H100:4`. |
 | `--env KEY` | Repeatable. Pass this environment variable through to the sandbox by name (unlike a local job, a cloud job's environment is *not* captured wholesale). |
 | `--data PATH` | Not wired up yet — rejected with an error. A cloud job's input data has to arrive with the provider work (e.g. a volume mount in the target's config), not through `pasar submit`. |
-| `--max-cost` | Refuses the submit outright if the estimate already exceeds it; otherwise caps the ceiling each attempt is approved and held to, when it is lower than the target's own automatic ceiling. |
+| `--max-cost` | Dollars one attempt may spend. Refuses the submit outright if the estimate already exceeds it; otherwise the daemon pauses the job once it has spent that much and sends it back for approval — so a cap that bites buys fewer hours too (`pasar show` prints the shortened run time). |
 
 `--mem`, `--retries` and `--preempt` are refused for a cloud job, and `pasar restart` on one is
 refused too (it would spend money on whatever is in the working tree now, unseen): the error
@@ -272,8 +272,10 @@ spent) — both ordinary terminal states with `pasar wait`'s usual exit codes.
 
 `pasar show <id>` and `pasar ls`/`pasar show --json` carry a `cloud` object for cloud jobs:
 `target`, `gpu`, `phase`, `estimated_cost`, `max_cost` (the ceiling actually governing the job
-right now — the approved figure once launched, a live-priced one before approval), and
-`console_url` (only while the daemon is actively watching the attempt).
+right now — the approved figure once launched, a live-priced one before approval), `user_capped`
+(whether that ceiling is the submitter's own `--max-cost`), `approved_seconds`/`full_seconds` (the
+run time one approval buys, and what it would buy without `--max-cost`), and `console_url` (only
+while the daemon is actively watching the attempt).
 
 ## HTTP API quick reference
 
@@ -318,8 +320,8 @@ string or seconds), `cwd` (absolute path), `mem` (size string or bytes; omit for
 (a `{string: string}` map to give the job, or omit/`null` to give it none), and, for a cloud job,
 `target` (default `"local"`), `gpu` (required once `target` isn't `"local"`), `env_keys` (list of
 names to pass through), `data` (not wired up yet — a non-empty list is rejected), `max_cost`
-(refuses the submit if the estimate already exceeds it; otherwise caps the per-attempt ceiling
-when it is lower than the target's own automatic figure).
+(dollars one attempt may spend: refuses the submit if the estimate already exceeds it, otherwise
+pauses the job once it has spent that much).
 
 A non-2xx response body is `{"detail": "..."}`: `404` job not found, `409` conflicting state (e.g.
 already cancelled), `422` bad input (e.g. unparsable `time`).
