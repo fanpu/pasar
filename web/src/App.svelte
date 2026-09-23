@@ -6,6 +6,7 @@
   import { mascot } from "./lib/mascot.svelte";
   import { transitions, type Transition } from "./lib/transitions";
   import { AllJobs } from "./lib/alljobs.svelte";
+  import { Sparks } from "./lib/sparks.svelte";
   import {
     effectiveSort, filterToSearch, isActive, knownValues, matches, parseFilter, sortJobs, stateCounts,
     type Filter,
@@ -22,6 +23,7 @@
 
   const live = new Live();
   const allJobs = new AllJobs();
+  const sparks = new Sparks();
 
   // The filter lives in the URL (see router.svelte.ts) so back/forward and bookmarks work, and it
   // survives opening a job. While it's active, the full job history (past and present) is kept
@@ -58,6 +60,13 @@
   const tableJobs = $derived(
     filterActive ? sortJobs(source.filter((j) => matches(j, filter)), effectiveSort(filter)) : (live.snapshot?.jobs ?? []),
   );
+  // Row sparklines follow whatever's actually on screen, so filtering to a sweep fetches that
+  // sweep's curves. `untrack` for the same reason as `allJobs.update` above: the call writes the
+  // store's own state, and the effect must only re-run when the visible rows change.
+  $effect(() => {
+    const ids = tableJobs.map((j) => j.id);
+    untrack(() => sparks.update(ids));
+  });
 
   function setFilter(f: Filter, replace = false): void {
     router.setSearch(filterToSearch(f), replace);
@@ -207,6 +216,7 @@
       counts={filterCounts}
       known={filterKnown}
       sourceJobs={source}
+      sparks={sparks.data}
       onfilter={setFilter}
     />
   {/if}

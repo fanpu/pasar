@@ -10,7 +10,10 @@ import { job, jobDetail, status } from "./fixtures";
 
 vi.mock("../lib/api", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../lib/api")>();
-  return { ...actual, getGpu: vi.fn(), getMascot: vi.fn(), getAllJobs: vi.fn(), getJob: vi.fn() };
+  return {
+    ...actual, getGpu: vi.fn(), getMascot: vi.fn(), getAllJobs: vi.fn(), getJob: vi.fn(),
+    getSparks: vi.fn(),
+  };
 });
 
 class FakeEventSource {
@@ -32,8 +35,12 @@ describe("App", () => {
     vi.mocked(api.getMascot).mockReset().mockResolvedValue({});
     vi.mocked(api.getAllJobs).mockReset().mockResolvedValue([]);
     vi.mocked(api.getJob).mockReset();
+    vi.mocked(api.getSparks).mockReset().mockResolvedValue({});
     vi.stubGlobal("EventSource", FakeEventSource);
     history.pushState({}, "", "/");
+    // The router is a singleton, and pushState alone doesn't tell it anything — without this a
+    // filter set by an earlier test stays active and quietly filters the next test's rows away.
+    dispatchEvent(new PopStateEvent("popstate"));
     // Reset the shared mascot singleton so an earlier test's loaded manifest doesn't leak in.
     mascot.manifest = {};
     mascot.loaded = false;
@@ -81,6 +88,26 @@ describe("App", () => {
     });
     expect(await within(table).findByText("match-me")).toBeInTheDocument();
     expect(within(table).queryByText("not-me")).toBeNull();
+  });
+
+  it("fetches sparklines for the rows on screen and draws them in the table", async () => {
+    vi.mocked(api.getSparks).mockResolvedValue({
+      7: { key: "loss", points: [[1, 0.9], [2, 0.412]], latest: 0.412 },
+    });
+    const { container } = render(App);
+    FakeEventSource.last!.emit({
+      status: status(),
+      jobs: [job({ id: 7, name: "sweep-lr", state: "running", start_time: 1000, run_time: 30 })],
+    });
+
+    await waitFor(() => expect(api.getSparks).toHaveBeenCalledWith([7]));
+    const table = await waitFor(() => {
+      const t = container.querySelector("table");
+      expect(t).not.toBeNull();
+      return t!;
+    });
+    expect(await within(table).findByText("loss")).toBeInTheDocument();
+    expect(within(table).getByText("0.412")).toBeInTheDocument();
   });
 
   it("doesn't spin forever when live jobs repeatedly overlap the all-jobs cache while filtered (regression for effect_update_depth_exceeded)", async () => {
