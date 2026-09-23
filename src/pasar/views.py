@@ -82,7 +82,12 @@ def attempt_view(a: Attempt) -> dict:
     return d
 
 
-def cloud_view(daemon, job: Job) -> dict | None:
+_UNKNOWN = object()
+"""Default for the `pace` argument below: `None` is a real answer ("on pace"), so a caller that
+already has an answer has to be distinguishable from one that has none."""
+
+
+def cloud_view(daemon, job: Job, pace=_UNKNOWN) -> dict | None:
     """The `cloud` object embedded in a cloud job's view; `None` for a job that ran locally.
 
     `estimated_cost`/`max_cost` show the ceiling that actually governs the job right now: the
@@ -147,12 +152,13 @@ def cloud_view(daemon, job: Job) -> dict | None:
         # past what was approved; `None` while running on pace or before enough of it has been
         # observed. Recomputed fresh on every view rather than stored, so it clears itself the
         # moment either the pace recovers or a person extends the ceiling far enough to cover it
-        # — there is nothing to reset by hand.
-        "needs_more_time": daemon.needs_more_time(job),
+        # — there is nothing to reset by hand. A caller that has already asked (and filtered on
+        # the answer) passes it in rather than paying for the same handful of queries twice.
+        "needs_more_time": daemon.needs_more_time(job) if pace is _UNKNOWN else pace,
     }
 
 
-def job_view(daemon, job: Job, now: float, projection: dict) -> dict:
+def job_view(daemon, job: Job, now: float, projection: dict, pace=_UNKNOWN) -> dict:
     atts = daemon.store.attempts(job.id)
     cur = atts[-1] if atts else None
     limit = daemon.limit(job)
@@ -206,7 +212,7 @@ def job_view(daemon, job: Job, now: float, projection: dict) -> dict:
         "projected": [list(s) for s in projection.get(job.id, [])],
         "spans": [[a.start_time, a.end_time, a.end_kind.value if a.end_kind else None]
                   for a in atts],
-        "cloud": cloud_view(daemon, job),
+        "cloud": cloud_view(daemon, job, pace),
     }
 
 
@@ -259,7 +265,12 @@ def cloud_status_view(daemon, now: float, projection: dict) -> dict:
         })
     awaiting = [job_view(daemon, j, now, projection)
                 for j in daemon.store.list_jobs([State.AWAITING])]
-    needs_time = [job_view(daemon, j, now, projection)
-                  for j in daemon.store.list_jobs([State.RUNNING])
-                  if daemon.needs_more_time(j) is not None]
+    # One `needs_more_time` per running job, not two: it is several queries deep (the approvals
+    # row, the attempts, the attempt's progress events), the filter and the view want the same
+    # answer, and this view is what `pasar cloud` polls.
+    needs_time = []
+    for j in daemon.store.list_jobs([State.RUNNING]):
+        pace = daemon.needs_more_time(j)
+        if pace is not None:
+            needs_time.append(job_view(daemon, j, now, projection, pace))
     return {"targets": targets, "awaiting": awaiting, "needs_time": needs_time}

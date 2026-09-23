@@ -15,7 +15,7 @@ from pasar.cloud.executor import parse_unit
 from pasar.cloud.pace import MIN_OBSERVATION, MIN_REPORTS, needs_more_time
 from pasar.daemon import Conflict
 from pasar.models import JobSpec, State
-from pasar.views import job_view
+from pasar.views import cloud_status_view, job_view
 
 
 def emit(daemon, job_id, **event):
@@ -173,6 +173,25 @@ def test_needs_more_time_view_field_matches_the_daemon(cloud_daemon, cloud_provi
     v = job_view(daemon, daemon.job(job_id), clock(), {})
     assert v["cloud"]["needs_more_time"] == pytest.approx(
         daemon.needs_more_time(daemon.job(job_id)))
+
+
+def test_the_cloud_status_view_asks_each_job_for_its_pace_once(cloud_daemon, cloud_cwd, clock,
+                                                                monkeypatch):
+    # `pasar cloud` and the approval tray poll this view. Each `needs_more_time` is several
+    # queries deep (the approvals row, the attempts, the attempt's progress events), and the
+    # filter and the job view want the same answer, so it is asked once and passed along.
+    daemon = cloud_daemon
+    job_id = start(daemon, cloud_cwd)
+    lag_the_job(daemon, clock, job_id)
+    asked = []
+    real = daemon.needs_more_time
+    monkeypatch.setattr(daemon, "needs_more_time",
+                        lambda job: (asked.append(job.id), real(job))[1])
+
+    view = cloud_status_view(daemon, clock(), {})
+    assert [j["id"] for j in view["needs_time"]] == [job_id]
+    assert view["needs_time"][0]["cloud"]["needs_more_time"] == pytest.approx(1100)
+    assert asked == [job_id]
 
 
 def test_extending_raises_the_limit_and_the_job_is_not_paused_at_the_old_one(
