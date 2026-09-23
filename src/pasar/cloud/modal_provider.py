@@ -23,6 +23,7 @@ from pathlib import Path, PurePosixPath
 from pasar.cloud.base import Capabilities, CloudLaunch, CloudStatus, Phase
 from pasar.cloud.bundle import EnvSpec
 from pasar.cloud.container import BUNDLE, ENV, LIB, PERSIST, WORK, container_env, entry_script
+from pasar.cloud.modal_profile import credentials
 from pasar.config import CloudTarget
 
 log = logging.getLogger(__name__)
@@ -93,6 +94,14 @@ class ModalProvider:
         # no cloud target configured must not need it installed.
         self.sdk = sdk if sdk is not None else importlib.import_module("modal")
         self.target = target
+        # One client per account, built from the profile the target names. Every call below
+        # passes it: with several accounts live in one process, a call that leaves `client` out
+        # silently uses whichever profile is active in ~/.modal.toml — that is somebody else's
+        # credit, spent without their job running.
+        self.client = None
+        if target.profile:
+            token_id, token_secret = credentials(target.profile)
+            self.client = self.sdk.Client.from_credentials(token_id, token_secret)
         self.state_dir = Path(state_dir)
         self.clock = clock
         # Injected alongside the clock, and always used with it: a caller that freezes `clock`
@@ -255,13 +264,15 @@ class ModalProvider:
         # from waking up during shutdown and creating a sandbox nobody would ever follow.
         while self._pause_before_create.is_set() and not self._closing:
             time.sleep(0.005)
-        return self.sdk.Sandbox.create("bash", "-c", entry_script(req), **kwargs)
+        return self.sdk.Sandbox.create("bash", "-c", entry_script(req), client=self.client,
+                                       **kwargs)
 
     def _modal_app(self):
         with self._lock:
             if self._app is not None:
                 return self._app
-        app = self.sdk.App.lookup(f"pasar-{self.target.name}", create_if_missing=True)
+        app = self.sdk.App.lookup(f"pasar-{self.target.name}", create_if_missing=True,
+                                  client=self.client)
         with self._lock:
             self._app = self._app or app
         return self._app
@@ -271,14 +282,14 @@ class ModalProvider:
         with self._lock:
             if key in self._volumes:
                 return self._volumes[key]
-        volume = self.sdk.Volume.from_name(name, create_if_missing=create)
+        volume = self.sdk.Volume.from_name(name, create_if_missing=create, client=self.client)
         with self._lock:
             return self._volumes.setdefault(key, volume)
 
     def _find(self, handle: str):
         """The sandbox carrying this handle in its tags, or None if Modal has forgotten it."""
         for sb in self.sdk.Sandbox.list(app_id=self._modal_app().app_id,
-                                        tags={HANDLE_TAG: handle}):
+                                        tags={HANDLE_TAG: handle}, client=self.client):
             return sb
         return None
 
@@ -499,7 +510,7 @@ class ModalProvider:
         sandbox that has already ended is not a stray anybody needs to go and terminate."""
         found = []
         for sb in self.sdk.Sandbox.list(app_id=self._modal_app().app_id,
-                                        tags={TARGET_TAG: self.target.name}):
+                                        tags={TARGET_TAG: self.target.name}, client=self.client):
             tags = sb.get_tags()
             handle = tags.get(HANDLE_TAG)
             if handle and sb.poll() is None:
@@ -521,7 +532,7 @@ class ModalProvider:
         return self._fetch_rates()
 
     def _fetch_rates(self) -> dict[str, float]:
-        raw = dict(self.sdk.Workspace.from_context().billing.rates())
+        raw = dict(self.sdk.Workspace.from_context(client=self.client).billing.rates())
         rates = _aliased({k: float(v) for k, v in raw.items()})
         with self._lock:
             self._rates, self._rates_at = rates, self.clock()

@@ -414,6 +414,58 @@ def test_rates_are_aliased_so_a_gpu_spelt_with_a_dash_is_priced(provider, tmp_pa
     assert rates["gpu_hour_cost_a100_80gb"] == 2.5
 
 
+# ---- one client per account
+def test_the_provider_passes_its_own_client_to_every_call(tmp_path, monkeypatch):
+    """Four accounts in one process: a call that forgets the client runs on whichever profile
+    happens to be active in ~/.modal.toml, and bills the wrong person."""
+    config = tmp_path / "modal.toml"
+    config.write_text('[alice]\ntoken_id = "alice"\ntoken_secret = "alice-secret"\n')
+    monkeypatch.setenv("MODAL_CONFIG_PATH", str(config))
+    sdk = FakeSDK()
+    target = _target(profile="alice")
+    p = ModalProvider(target, tmp_path / "s", sdk=sdk)
+    try:
+        p.prepare_image(EnvSpec({}, "img"))
+        req = launch_request(tmp_path)
+        req.tags["pasar_target"] = "modal"
+        p.launch(req)
+        box = sdk.wait_for_sandbox()
+        assert box.kwargs["client"] is sdk.clients["alice"]
+        assert sdk.app_clients == [sdk.clients["alice"]]
+        assert all(c is sdk.clients["alice"] for c in sdk.volume_clients)
+        p.rates()
+        assert sdk.workspace_clients == [sdk.clients["alice"]]
+    finally:
+        p.close()
+
+
+def test_a_target_with_no_profile_passes_no_client(provider, tmp_path):
+    """Single-account setups are unchanged: no `profile` means no client, which is what the SDK
+    does on its own when the argument is left out entirely."""
+    p, sdk = provider
+    p.prepare_image(EnvSpec({}, "img"))
+    p.launch(launch_request(tmp_path))
+    box = sdk.wait_for_sandbox()
+    assert box.kwargs["client"] is None
+    assert sdk.app_clients == [None]
+
+
+def test_persist_usage_asks_for_the_volume_with_the_target_client(tmp_path, monkeypatch):
+    """persist_usage, download_persist and delete_persist all go through `_volume`, so this one
+    stands in for all three: whichever volume they fetch has to carry the target's client too."""
+    config = tmp_path / "modal.toml"
+    config.write_text('[alice]\ntoken_id = "alice"\ntoken_secret = "alice-secret"\n')
+    monkeypatch.setenv("MODAL_CONFIG_PATH", str(config))
+    sdk = FakeSDK()
+    target = _target(profile="alice")
+    p = ModalProvider(target, tmp_path / "s", sdk=sdk)
+    try:
+        assert p.persist_usage(1) == (0, 0)
+        assert sdk.volume_clients == [sdk.clients["alice"]]
+    finally:
+        p.close()
+
+
 def test_upload_says_it_is_not_built(provider):
     p, _ = provider
     with pytest.raises(NotImplementedError):

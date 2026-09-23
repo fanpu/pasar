@@ -155,6 +155,15 @@ class _FakeStream:
             yield chunk
 
 
+class FakeClient:
+    """Stands in for `modal.Client`: a value distinct per (token_id, token_secret), so a test
+    can tell which account's client a call carried."""
+
+    def __init__(self, token_id, token_secret):
+        self.token_id = token_id
+        self.token_secret = token_secret
+
+
 class FakeApp:
     app_id = "ap-1"
 
@@ -256,7 +265,19 @@ class FakeSDK:
                             "mem_gib_hour_cost_sandbox": 0.024}
         self.create_error = None
         self.created = threading.Event()
+        # Keyed by token_id, not by profile name: this fake never sees a profile, only the
+        # credentials modal_profile.credentials() read out of it. A test that wants
+        # `sdk.clients["alice"]` to mean something gives "alice" as the profile's token_id.
+        self.clients: dict[str, FakeClient] = {}
+        self.app_clients = []
+        self.volume_clients = []
+        self.workspace_clients = []
         sdk = self
+
+        class Client:
+            @staticmethod
+            def from_credentials(token_id, token_secret):
+                return sdk.clients.setdefault(token_id, FakeClient(token_id, token_secret))
 
         class Sandbox:
             @staticmethod
@@ -269,7 +290,7 @@ class FakeSDK:
                 return box
 
             @staticmethod
-            def list(*, app_id=None, tags=None):
+            def list(*, app_id=None, tags=None, client=None):
                 for box in sdk.sandboxes:
                     if tags and any(box.tags.get(k) != v for k, v in tags.items()):
                         continue
@@ -277,19 +298,23 @@ class FakeSDK:
 
         class App:
             @staticmethod
-            def lookup(name, create_if_missing=False):
+            def lookup(name, create_if_missing=False, client=None):
+                sdk.app_clients.append(client)
                 return FakeApp()
 
         class Volume:
             @staticmethod
-            def from_name(name, *, create_if_missing=False, **kw):
+            def from_name(name, *, create_if_missing=False, client=None, **kw):
                 vol = FakeVolume(name, create_if_missing)
                 sdk.volumes.append(vol)
+                sdk.volume_clients.append(client)
                 return vol
 
         class Workspace:
             @staticmethod
-            def from_context():
+            def from_context(*, client=None):
+                sdk.workspace_clients.append(client)
+
                 class _W:
                     billing = type("B", (), {"rates": staticmethod(lambda: dict(sdk.rates_value))})
                 return _W()
@@ -297,6 +322,7 @@ class FakeSDK:
         class Types:
             FileEntryType = FileEntryType
 
+        self.Client = Client
         self.Sandbox = Sandbox
         self.App = App
         self.Volume = Volume
