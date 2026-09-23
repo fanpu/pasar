@@ -217,8 +217,13 @@ set. Cases that need more than uv (system packages) get an optional `[tool.pasar
   `pasar-<target>` mounted at `/pasar/persist`, with a subdirectory per job). It survives attempts,
   so checkpoint-and-resume works exactly as it does locally. `pasar_job.persist_dir()` returns it,
   or a job-local directory when running locally, so one script can serve both.
-- **Datasets**: targets can mount named volumes read-mostly (`volumes = {"/data" = "datasets"}`).
-  Uploading them is out of pasar's scope; use the provider's CLI.
+- **Small local data**: `--data <path>` (repeatable) uploads a file or directory from the local
+  machine, since data is usually gitignored and so not in the bundle. It lands on a shared volume at
+  `$PASAR_DATA_DIR/<name>` and is keyed by content hash, so a sweep of 20 jobs over the same
+  dataset uploads it once and later jobs reuse it. There's a cap (`data_max`, default 4 GiB);
+  anything larger belongs in a volume of its own.
+- **Large datasets**: targets can mount named volumes read-mostly (`volumes = {"/data" = "datasets"}`).
+  Filling those is out of pasar's scope; use the provider's CLI.
 - **Getting results back**: `pasar pull <id> [path] [--to DIR]` downloads from the persist dir. The
   job detail view lists its files. Persist dirs are deleted with the job's files by the normal
   retention policy (`cloud_retention_days`, default 14), since stored data costs money too.
@@ -402,7 +407,7 @@ warning, since unlike local ones they cost money.
 ## CLI and API
 
 ```
-pasar submit --on modal --gpu H100[:N] --time 2h [--env KEY]… [--max-cost 20] -- <command>
+pasar submit --on modal --gpu H100[:N] --time 2h [--data PATH]… [--env KEY]… [--max-cost 20] -- <command>
 pasar pull <id> [path] [--to DIR]
 pasar submit --on modal … --resume-from <id> -- <command>   # continue an earlier cloud job's checkpoints
 pasar cloud                         # targets, budget, spend today/this month, awaiting approval, rates
@@ -455,6 +460,7 @@ max_runtime = "24h"          # Modal's own ceiling; can't be raised
 env_passthrough = ["WANDB_API_KEY", "HF_TOKEN"]
 volumes = { "/data" = "datasets" }
 bundle_max = "256MiB"
+data_max = "4GiB"
 # base_image = "nvidia/cuda:12.8.1-runtime-ubuntu24.04"
 # rates = { H100 = 3.95 }          # override $/GPU-hour if the provider can't report rates
 ```
