@@ -70,6 +70,9 @@ describe("CloudCard", () => {
     expect(row(res, 222).textContent).toContain("nothing saved");
     expect(row(res, 223).textContent).toContain("at modal-a until Sep 24 · pulling…");
     expect(within(row(res, 220)).getByText("completed")).toBeInTheDocument();
+    // Failed before it ever started a sandbox: nothing ran, so nothing was left to pull or
+    // sweep, not "at modal-a until ... · pulling…".
+    expect(row(res, 224).textContent).toContain("nothing saved");
   });
 
   it("keeps an approved job that hasn't launched yet in view, saying it waits to launch and why", () => {

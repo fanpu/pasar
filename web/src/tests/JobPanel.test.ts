@@ -503,6 +503,9 @@ describe("JobPanel", () => {
           "pulling…",
         ],
         ["nothing", cloudPersist(), "nothing saved", ""],
+        // Failed before it ever started a sandbox (launch_error): the daemon records the
+        // attempt, but nothing ever ran at the target to leave anything there.
+        ["never-launched", cloudPersist({ remote_bytes: 0, sweeps_at: null }), "nothing saved", ""],
         [
           "errored",
           cloudPersist({ sweeps_at: NOW + 6 * 86400, last_error: "network timeout" }),

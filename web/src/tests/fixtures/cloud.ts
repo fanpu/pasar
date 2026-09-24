@@ -312,7 +312,30 @@ const recentAtTarget = cloudJobView(
   { phase: null, job_spent: 1.9, persist: cloudPersist({ sweeps_at: NOW + 3 * 86400 }) },
 );
 
-export const recent: JobView[] = [recentAtTarget, recentCompleted, recentFailed, recentCancelled];
+/** Failed before it ever started a sandbox (`launch_error`): its one attempt is recorded, but
+ * nothing was ever running at the target to save anything. */
+const recentNeverLaunched = cloudJobView(
+  {
+    id: 224,
+    name: "sweep-wd-5",
+    state: "failed",
+    reason: "launch_error",
+    summary: "pasar_job is not importable in the target's environment",
+    submitter: "agent-3",
+    submit_time: NOW - 2000,
+    queue_time: NOW - 2000,
+    start_time: NOW - 1900,
+    end_time: NOW - 1900,
+    run_time: 0,
+    est_runtime: 3600,
+    attempts: 1,
+  },
+  { phase: null, job_spent: 0, persist: cloudPersist({ remote_bytes: 0, sweeps_at: null }) },
+);
+
+export const recent: JobView[] = [
+  recentAtTarget, recentCompleted, recentFailed, recentCancelled, recentNeverLaunched,
+];
 
 export function cloudBlock(overrides: Partial<CloudBlock> = {}): CloudBlock {
   return {
