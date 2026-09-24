@@ -2,6 +2,7 @@
 // (serve-cloud.sh / fake_cloud.py): approving here launches nothing real and spends nothing.
 import { expect, test, type APIRequestContext, type Page } from "@playwright/test";
 import { fileURLToPath } from "node:url";
+import path from "node:path";
 
 // A cloud submit bundles its working directory, which must be a git checkout with a lockfile:
 // this repository is one.
@@ -17,6 +18,13 @@ async function submitCloud(request: APIRequestContext, name: string): Promise<nu
 
 async function stateOf(request: APIRequestContext, id: number): Promise<string> {
   return (await (await request.get(`/api/jobs/${id}`)).json()).state;
+}
+
+async function jobIdByName(request: APIRequestContext, name: string): Promise<number> {
+  const jobs: { id: number; name: string }[] = await (await request.get("/api/jobs?all=true")).json();
+  const job = jobs.find((j) => j.name === name);
+  if (job === undefined) throw new Error(`no job named ${name} in the seeded fixture`);
+  return job.id;
 }
 
 function awaitingRow(page: Page, id: number) {
@@ -69,4 +77,29 @@ test("reject asks first, and Keep it keeps the job waiting", async ({ page, requ
   await expect(ask).toBeHidden();
   await expect(row).toHaveCount(0);
   expect(await stateOf(request, id)).toBe("cancelled");
+});
+
+test.describe("phone width", () => {
+  // Same width JobTable's own mobile card view kicks in at; deviceScaleFactor matches a real
+  // phone's for the mockup screenshot below.
+  test.use({ viewport: { width: 390, height: 844 }, deviceScaleFactor: 3 });
+
+  test("a recent result's status text keeps a full-width line, not a squeezed column", async ({ page, request }) => {
+    await page.goto("/");
+    // Seeded by fake_cloud.py: finished with a nonzero exit, its results held at the target
+    // (pull_settle) so its row reads "at modal-a until ... · pulling…" — the long status text
+    // that used to be squeezed into a one-word column on a narrow screen.
+    const id = await jobIdByName(request, "grid-search-3");
+    const row = page.getByRole("region", { name: "Cloud" }).locator(`[data-section="recent"] [data-job="${id}"]`);
+    await expect(row).toBeVisible({ timeout: 15_000 });
+    const status = row.locator(".money .cap");
+    await expect(status).toContainText("pulling");
+    const box = await status.boundingBox();
+    expect(box).not.toBeNull();
+    expect(box!.width).toBeGreaterThanOrEqual(150);
+
+    await page.getByRole("region", { name: "Cloud" }).screenshot({
+      path: path.join(REPO_ROOT, "private/mockups/cloud-mobile.png"),
+    });
+  });
 });
