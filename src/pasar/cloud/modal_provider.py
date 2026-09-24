@@ -41,6 +41,7 @@ log = logging.getLogger(__name__)
 HANDLE_TAG = "pasar_handle"
 TARGET_TAG = "pasar_target"  # how list() tells this target's sandboxes from another target's
 RATE_TTL = 300          # seconds a price list is served from memory before a thread refreshes it
+RATE_RETRY = 30         # seconds after a failed price-list fetch before another is started
 EXIT_WAIT = 120         # seconds to keep asking for an exit code after the output stream ends
 EXIT_POLL = 1.0         # seconds between those asks
 JOIN_TIMEOUT = 10       # seconds close() waits for every watcher thread, in total
@@ -178,6 +179,7 @@ class ModalProvider:
         self._rates: dict[str, float] = {}
         self._rates_at = 0.0
         self._rates_loaded = False  # see `rates_ready`
+        self._rates_failed_at: float | None = None  # the last fetch, while fetches keep failing
         self._rates_thread: threading.Thread | None = None
         self._closing = False
         # (why, when) for the last launch this account refused as an account; see `health`.
@@ -620,11 +622,13 @@ class ModalProvider:
         read on the daemon's tick. The provider starts fetching it on a thread when it is built;
         until that lands, or while every fetch fails, this is an empty table, which callers read
         as "can't price it right now" (and a fresh fetch is started). A table older than
-        `RATE_TTL` is still served while a thread refreshes it."""
+        `RATE_TTL` is still served while a thread refreshes it. While fetches keep failing, a
+        new one starts at most every `RATE_RETRY` seconds, not on every tick."""
         now = self.clock()
         with self._lock:
             cached, age = dict(self._rates), now - self._rates_at
-        if not cached or age >= RATE_TTL:
+            failed = self._rates_failed_at
+        if (not cached or age >= RATE_TTL) and (failed is None or now - failed >= RATE_RETRY):
             self._refresh_rates_soon()
         return cached
 
@@ -653,10 +657,21 @@ class ModalProvider:
     def _refresh_rates(self) -> None:
         try:
             self._fetch_rates()
-        except Exception:
+        except Exception as e:
             # The stale list stays in place: an estimate a few minutes old is much better than
-            # refusing to price a job at all, which is what an empty table does.
-            log.exception("could not refresh %s's rates", self.target.name)
+            # refusing to price a job at all, which is what an empty table does. One line per
+            # failed fetch, and a traceback only for the first of a run of them.
+            with self._lock:
+                first = self._rates_failed_at is None
+                self._rates_failed_at = self.clock()
+            if first:
+                log.exception("could not refresh %s's rates; trying again every %ds",
+                              self.target.name, RATE_RETRY)
+            else:
+                log.warning("could not refresh %s's rates, still: %s", self.target.name, e)
+        else:
+            with self._lock:
+                self._rates_failed_at = None
 
     def credit(self) -> Credit | None:
         """This account's billing summary for the current cycle, as Modal's own books have it.

@@ -1,5 +1,6 @@
 """ModalProvider against a fake SDK: no network, no credentials, no money."""
 
+import logging
 import threading
 import time
 from datetime import UTC, datetime
@@ -519,6 +520,40 @@ def test_the_first_rates_call_never_waits_on_the_network(tmp_path):
     finally:
         gate.set()
         p.close()
+
+
+def test_a_failing_price_list_is_fetched_again_at_most_every_rate_retry(tmp_path, caplog):
+    """Every tick reads `rates()`, and an empty table used to start a fetch each time: while
+    Modal's billing API was down that was a thread, and a traceback in the log, every tick."""
+    sdk = FakeSDK()
+    now = [1000.0]
+    calls: list[int] = []
+
+    def down(*, client=None):
+        calls.append(1)
+        raise RuntimeError("billing is down")
+
+    sdk.Workspace.from_context = staticmethod(down)
+    with caplog.at_level(logging.WARNING, logger=modal_provider.log.name):
+        p = ModalProvider(_target(), tmp_path / "state", sdk=sdk, clock=lambda: now[0])
+        try:
+            assert _wait(lambda: calls and not p._rates_thread.is_alive())
+            for _ in range(20):
+                assert p.rates() == {}
+            now[0] += modal_provider.RATE_RETRY - 1
+            assert p.rates() == {}
+            assert not p._rates_thread.is_alive() and len(calls) == 1
+            now[0] += 1
+            assert p.rates() == {}
+            assert _wait(lambda: len(calls) == 2 and not p._rates_thread.is_alive())
+            assert not p.rates_ready()
+        finally:
+            p.close()
+    failures = [r for r in caplog.records if "could not refresh" in r.getMessage()]
+    assert len(failures) == 2
+    assert failures[0].exc_info is not None      # the first of the run, with its traceback
+    assert failures[1].exc_info is None          # and after that one line each
+    assert "billing is down" in failures[1].getMessage()
 
 
 def _fresh_rates(p):
