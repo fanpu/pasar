@@ -130,18 +130,19 @@ describe("CloudCard", () => {
   });
 
   it("confirming approves (not extend), closes and tells the app", async () => {
-    vi.mocked(api.approve).mockResolvedValue(awaitingFresh);
+    // The daemon prices it afresh when it approves: the toast says what it agreed to.
+    vi.mocked(api.approve).mockResolvedValue({ ...awaitingFresh, state: "queued", cloud: { ...awaitingFresh.cloud!, max_cost: 7.9 } });
     const onnotice = vi.fn();
     render(CloudCard, { cloud: cloudBlock(), jobs: running, now: NOW, onnotice });
     await fireEvent.click(screen.getAllByRole("button", { name: "Approve…" })[0]);
     await fireEvent.click(screen.getByRole("button", { name: "Approve · up to $8.00" }));
     await waitFor(() => expect(api.approve).toHaveBeenCalledWith(201, false));
     await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
-    expect(onnotice).toHaveBeenCalledWith("#201 approved · up to $8.00");
+    expect(onnotice).toHaveBeenCalledWith("#201 approved · up to $7.90");
   });
 
   it("Give more time opens the dialog in extend mode and approves with extend", async () => {
-    vi.mocked(api.approve).mockResolvedValue(needsTime[0]);
+    vi.mocked(api.approve).mockResolvedValue({ ...needsTime[0], cloud: { ...needsTime[0].cloud!, max_cost: 9.95 } });
     const onnotice = vi.fn();
     render(CloudCard, { cloud: cloudBlock(), jobs: running, now: NOW, onnotice });
     await fireEvent.click(screen.getByRole("button", { name: "Give more time…" }));
@@ -151,7 +152,7 @@ describe("CloudCard", () => {
     await fireEvent.click(within(dialog).getByRole("button", { name: "Give more time · up to $1.30 more" }));
     await waitFor(() => expect(api.approve).toHaveBeenCalledWith(212, true));
     await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
-    expect(onnotice).toHaveBeenCalledWith("#212 got more time");
+    expect(onnotice).toHaveBeenCalledWith("#212 got more time · up to $9.95");
   });
 
   it("shows the server's refusal inline and keeps the dialog open", async () => {
@@ -184,6 +185,28 @@ describe("CloudCard", () => {
     await waitFor(() => expect(api.reject).toHaveBeenCalledWith(202));
     await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
     expect(onnotice).toHaveBeenCalledWith("#202 rejected");
+  });
+
+  it("reads the job live while the dialog is open: a new price shows on the button", async () => {
+    const { rerender } = render(CloudCard, { cloud: cloudBlock(), jobs: running, now: NOW });
+    await fireEvent.click(screen.getAllByRole("button", { name: "Approve…" })[0]);
+    expect(screen.getByRole("button", { name: "Approve · up to $8.00" })).toBeEnabled();
+    const repriced = { ...awaitingFresh, cloud: { ...awaitingFresh.cloud!, max_cost: 8.8 } };
+    await rerender({ cloud: cloudBlock({ awaiting: [repriced, awaitingReapproval] }), jobs: running, now: NOW });
+    expect(screen.getByRole("button", { name: "Approve · up to $8.80" })).toBeEnabled();
+    expect(screen.queryByRole("button", { name: "Approve · up to $8.00" })).toBeNull();
+  });
+
+  it("says so, and won't approve, once the job has left the awaiting list", async () => {
+    const { rerender } = render(CloudCard, { cloud: cloudBlock(), jobs: running, now: NOW });
+    await fireEvent.click(screen.getAllByRole("button", { name: "Approve…" })[0]);
+    await rerender({ cloud: cloudBlock({ awaiting: [awaitingReapproval] }), jobs: running, now: NOW });
+    const dialog = screen.getByRole("dialog", { name: "Approve #201 sweep-wd-3?" });
+    expect(dialog.textContent).toContain("#201 isn't waiting for approval any more");
+    const confirm = within(dialog).getByRole("button", { name: "Approve · up to $8.00" });
+    expect(confirm).toBeDisabled();
+    await fireEvent.click(confirm);
+    expect(api.approve).not.toHaveBeenCalled();
   });
 
   it("won't close the approve dialog while its request is in flight", async () => {

@@ -11,11 +11,14 @@
     target: CloudTarget | null;
     // Give a *running* job more time (`?extend=1`) rather than approve an awaiting one.
     extend?: boolean;
+    // Why the job can't be acted on any more (it left the list this dialog was opened from), or
+    // null while it still can.
+    gone?: string | null;
     onclose: () => void;
     // Called once the server has agreed, with a line fit for a toast.
     ondone?: (message: string) => void;
   }
-  let { job, target, extend = false, onclose, ondone = () => {} }: Props = $props();
+  let { job, target, extend = false, gone = null, onclose, ondone = () => {} }: Props = $props();
 
   // Every job handed to this dialog is a cloud job; the fallback only keeps the types honest.
   const c = $derived(job.cloud!);
@@ -46,12 +49,14 @@
   }
 
   async function confirm(): Promise<void> {
-    if (busy || unpriced) return;
+    if (busy || unpriced || gone) return;
     busy = true;
     error = null;
     try {
-      await api.approve(job.id, extend);
-      ondone(extend ? `#${job.id} got more time` : `#${job.id} approved · up to ${money(c.max_cost)}`);
+      // The toast says what the daemon agreed to, from its answer, not what this dialog showed.
+      const after = await api.approve(job.id, extend);
+      const ceiling = money(after.cloud?.max_cost);
+      ondone(extend ? `#${job.id} got more time · up to ${ceiling}` : `#${job.id} approved · up to ${ceiling}`);
       onclose();
     } catch (e) {
       error = e instanceof Error ? e.message : String(e);
@@ -107,10 +112,11 @@
     <p class="mnote">Results it saves come home to pasar's pull directory when it finishes.</p>
   {/if}
 
+  {#if gone && !busy}<p class="err" role="status">{gone}</p>{/if}
   {#if error}<p class="err" role="alert">{error}</p>{/if}
   <div class="macts">
     <button class="btn" type="button" disabled={busy} onclick={leave}>Cancel</button>
-    <button class="btn primary" type="button" disabled={busy || unpriced} onclick={confirm}>{label}</button>
+    <button class="btn primary" type="button" disabled={busy || unpriced || gone !== null} onclick={confirm}>{label}</button>
   </div>
 </Modal>
 

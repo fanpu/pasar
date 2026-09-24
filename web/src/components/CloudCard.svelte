@@ -66,7 +66,28 @@
     return job.state === "running" && job.cloud?.needs_more_time != null;
   }
 
-  let approving = $state<{ job: JobView; extend: boolean } | null>(null);
+  // Which job the approve dialog is for, never a copy of it: the dialog reads the job live from
+  // the snapshot on every render, so the price it confirms is the one the daemon holds now.
+  let approving = $state<{ id: number; extend: boolean } | null>(null);
+  // The last live copy, shown (confirm disabled) only if the job leaves its list while the dialog
+  // is open — approved or rejected elsewhere, expired, finished — rather than vanishing mid-read.
+  let lastSeen: JobView | null = null;
+  const approvingLive = $derived.by(() => {
+    if (approving === null) return null;
+    const { id, extend } = approving;
+    if (!extend) return cloud.awaiting.find((j) => j.id === id) ?? null;
+    return running.find((j) => j.id === id && j.state === "running") ?? null;
+  });
+  const approvingJob = $derived.by(() => {
+    if (approvingLive !== null) lastSeen = approvingLive;
+    return approving !== null && lastSeen?.id === approving.id ? lastSeen : null;
+  });
+  const approvingGone = $derived.by(() => {
+    if (approving === null || approvingLive !== null) return null;
+    return approving.extend
+      ? `#${approving.id} isn't running any more.`
+      : `#${approving.id} isn't waiting for approval any more: it was approved, rejected or expired elsewhere.`;
+  });
   let rejecting = $state<JobView | null>(null);
   let rejectBusy = $state(false);
   let rejectError = $state<string | null>(null);
@@ -150,7 +171,7 @@
               {#if why}<div class="reason">{why}</div>{/if}
             </div>
             <div class="racts">
-              <button class="btn primary small" type="button" onclick={() => (approving = { job, extend: false })}>Approve…</button>
+              <button class="btn primary small" type="button" onclick={() => (approving = { id: job.id, extend: false })}>Approve…</button>
               <button class="btn quiet small" type="button" onclick={() => askReject(job)}>Reject</button>
             </div>
           </div>
@@ -195,7 +216,7 @@
                 <a class="dash" href={c.console_url} target="_blank" rel="noopener noreferrer">Modal ↗</a>
               {/if}
               {#if flag}
-                <button class="btn small" type="button" onclick={() => (approving = { job, extend: true })}>Give more time…</button>
+                <button class="btn small" type="button" onclick={() => (approving = { id: job.id, extend: true })}>Give more time…</button>
               {/if}
             </div>
           </div>
@@ -223,11 +244,12 @@
   </section>
 {/if}
 
-{#if approving}
+{#if approving && approvingJob}
   <ApproveDialog
-    job={approving.job}
-    target={targetOf(approving.job)}
+    job={approvingJob}
+    target={targetOf(approvingJob)}
     extend={approving.extend}
+    gone={approvingGone}
     onclose={() => (approving = null)}
     ondone={onnotice}
   />
