@@ -276,7 +276,11 @@ class Daemon:
         enforcement deadline for exactly one tick and back.
 
         A failure is cached too, so a provider that is down is asked once every few seconds
-        rather than once per job per tick."""
+        rather than once per job per tick — but only from a provider that has produced its first
+        price list (`Provider.rates_ready`). Before that, an empty table is only "not loaded
+        yet", and holding it for the TTL would have this pasard read "can't price it" for ten
+        seconds after the table had landed; a provider answers `rates()` from memory, so asking
+        again on every call until then costs nothing."""
         now = self.clock()
         cached = self._rates.get(target.name)
         if cached is not None and now - cached[0] < CLOUD_RATE_TTL:
@@ -284,15 +288,32 @@ class Daemon:
         else:
             ex = self.executors.get(target.name)
             rates = {}
+            # Asked before the rates, not after: a table that lands in between is then one call
+            # late, never an empty one held as if it were the provider's answer.
+            loading = self._rates_loading(target.name)
             if ex is not None:
                 try:
                     rates = dict(ex.provider.rates())
                 except Exception:
                     log.exception("%s could not report its rates", target.name)
-            self._rates[target.name] = (now, dict(rates))
+            if not loading:
+                self._rates[target.name] = (now, dict(rates))
         ex = self.executors.get(target.name)
         names = getattr(ex.provider, "gpu_names", {}) if isinstance(ex, CloudExecutor) else {}
         return price_list(rates, target.rates, names)
+
+    def _rates_loading(self, name: str) -> bool:
+        """True while account `name`'s provider has not produced its first price list yet
+        (`Provider.rates_ready`): what it cannot price then says nothing about the account. False
+        for a name with no provider here, which is `_unreachable`'s question, not this one."""
+        ex = self.executors.get(name)
+        if not isinstance(ex, CloudExecutor):
+            return False
+        try:
+            return not ex.provider.rates_ready()
+        except Exception:
+            log.exception("%s could not say whether its rates have loaded", name)
+            return False
 
     def cloud_credit(self, target: CloudTarget) -> Credit | None:
         """What `target`'s provider says the account has used this billing cycle, or None when

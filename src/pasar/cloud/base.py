@@ -247,6 +247,12 @@ class Provider(Protocol):
         daemon's tick, so it answers from memory; an empty (or partial) table is a provider that
         cannot price something right now, never a reason to wait."""
 
+    def rates_ready(self) -> bool:
+        """Whether `rates()` has produced this provider's first real price list. Until it has,
+        an empty or partial table means only "not loaded yet", not "this account cannot price
+        that": the daemon neither caches it nor moves a job, fails one or refuses a submit over
+        it. Read from memory on the daemon's tick, like `rates()`."""
+
     def gpus(self, rates: dict[str, float]) -> list[GpuRow]:
         """This target's GPUs as clean rows, built from `rates` — typically a caller's own
         already-fetched price list, not a fresh call to `rates()`: `Daemon.cloud_gpus` passes its

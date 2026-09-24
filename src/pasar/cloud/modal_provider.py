@@ -177,6 +177,7 @@ class ModalProvider:
         self._lock = threading.Lock()
         self._rates: dict[str, float] = {}
         self._rates_at = 0.0
+        self._rates_loaded = False  # see `rates_ready`
         self._rates_thread: threading.Thread | None = None
         self._closing = False
         # (why, when) for the last launch this account refused as an account; see `health`.
@@ -632,7 +633,13 @@ class ModalProvider:
         rates = aliased({k: float(v) for k, v in raw.items()}, GPU_NAMES)
         with self._lock:
             self._rates, self._rates_at = rates, self.clock()
+            self._rates_loaded = True
         return rates
+
+    def rates_ready(self) -> bool:
+        """Whether a fetch of the price list has ever succeeded; see `Provider.rates_ready`."""
+        with self._lock:
+            return self._rates_loaded
 
     def _refresh_rates_soon(self) -> None:
         with self._lock:

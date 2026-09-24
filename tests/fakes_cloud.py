@@ -88,6 +88,9 @@ class FakeProvider:
         self.short_download: set[int] = set()
         self.fail_download: set[int] = set()
         self.rates_calls = 0
+        # Clear to stand in for a provider whose first price list has not landed yet: `rates()`
+        # answers an empty table until a test sets it again, as Modal's does while it warms up.
+        self.ready = True
         # What its own books say this account has used. Only read when a test turns
         # `caps.credit` on (`with_credit`), like a provider that can report it.
         self.credit_value: Credit | None = None
@@ -145,8 +148,13 @@ class FakeProvider:
 
     def rates(self) -> dict[str, float]:
         self.rates_calls += 1
+        if not self.ready:
+            return {}
         return {"gpu_hour_cost_h100": 3.95, "cpu_hour_cost_sandbox": 0.14,
                 "mem_gib_hour_cost_sandbox": 0.024}
+
+    def rates_ready(self) -> bool:
+        return self.ready
 
     def gpus(self, rates: dict[str, float]) -> list[GpuRow]:
         # No memory table of its own: this fake stands in for a provider pasar has never taught

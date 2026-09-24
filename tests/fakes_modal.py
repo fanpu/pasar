@@ -5,6 +5,7 @@ machine with no modal installed, no credentials and no bill.
 """
 
 import threading
+import time
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from decimal import Decimal
@@ -434,3 +435,14 @@ class FakeSDK:
     def wait_for_sandbox(self, timeout=5.0):
         assert self.created.wait(timeout), "no sandbox was created"
         return self.sandboxes[-1]
+
+
+def wait_until(predicate, timeout=5.0) -> bool:
+    """Poll `predicate` until it is true or `timeout` seconds pass; whether it came true. For
+    what the provider does on a thread of its own, such as warming its price list."""
+    end = time.time() + timeout
+    while time.time() < end:
+        if predicate():
+            return True
+        time.sleep(0.01)
+    return False

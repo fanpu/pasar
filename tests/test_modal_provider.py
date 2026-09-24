@@ -14,6 +14,7 @@ from pasar.cloud.modal_provider import HANDLE_TAG, ModalProvider
 from pasar.config import CloudTarget
 from tests.fakes_cloud import launch_request
 from tests.fakes_modal import FakeSDK, FileEntryType, billing_summary
+from tests.fakes_modal import wait_until as _wait
 
 
 def _target(**kw):
@@ -27,15 +28,6 @@ def provider(tmp_path):
     p = ModalProvider(_target(), tmp_path / "state", sdk=sdk)
     yield p, sdk
     p.close()
-
-
-def _wait(predicate, timeout=5.0):
-    end = time.time() + timeout
-    while time.time() < end:
-        if predicate():
-            return True
-        time.sleep(0.01)
-    return False
 
 
 def _running(p, sdk, tmp_path, **kw):
@@ -518,9 +510,11 @@ def test_the_first_rates_call_never_waits_on_the_network(tmp_path):
     p = ModalProvider(_target(), tmp_path / "state", sdk=sdk)
     try:
         assert p.rates() == {}
+        assert not p.rates_ready()  # so that empty table is "not loaded yet", nothing more
         assert threading.current_thread().name not in callers
         gate.set()
         assert _wait(lambda: p.rates().get("gpu_hour_cost_t4") == 0.59)
+        assert p.rates_ready()
         assert threading.current_thread().name not in callers
     finally:
         gate.set()

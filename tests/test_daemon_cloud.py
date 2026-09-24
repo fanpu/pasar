@@ -33,7 +33,7 @@ from pasar.models import Attempt, EndKind, JobSpec, State
 from pasar.units import GiB
 from pasar.views import cloud_status_view, cloud_view
 from tests.fakes_cloud import FakeProvider, launch_request, run_now
-from tests.fakes_modal import FakeSDK, billing_summary
+from tests.fakes_modal import FakeSDK, billing_summary, wait_until
 
 
 class StubMetrics:
@@ -252,6 +252,21 @@ def test_cloud_gpus_reuses_the_same_cached_rates_cloud_rates_already_fetched(mak
     assert len(calls) == 1
     daemon.cloud_gpus(target)
     assert len(calls) == 1  # cloud_gpus read the cache cloud_rates just filled, not a new call
+
+
+def test_an_empty_table_from_a_provider_still_loading_is_not_cached(make_cloud):
+    """Held for `CLOUD_RATE_TTL`, the empty table a provider answers before its first price list
+    lands would have pasard read "can't price H100" for ten seconds after it had."""
+    daemon, provider = make_cloud()
+    target = daemon.cfg.clouds["fake"]
+    provider.ready = False
+    assert daemon.cloud_rates(target) == {}
+    assert daemon.cloud_rates(target) == {}
+    assert provider.rates_calls == 2  # asked again, not served the empty answer from memory
+    provider.ready = True             # the table lands, within the same tick
+    assert daemon.cloud_rates(target)["gpu_hour_cost_h100"] == 3.95
+    assert daemon.cloud_rates(target)["gpu_hour_cost_h100"] == 3.95
+    assert provider.rates_calls == 3  # and once it has, the answer is held as before
 
 
 def test_cloud_gpus_is_empty_not_an_error_when_rates_fail(make_cloud, monkeypatch):
@@ -2734,6 +2749,7 @@ def test_the_job_cap_refusal_names_each_gpu_the_way_pasar_cloud_does(make_cloud,
                                monthly_budget=300.0)
     provider = ModalProvider(modal_target, tmp_path / "modal-state", sdk=sdk)
     try:
+        assert wait_until(provider.rates_ready)  # warmed on a thread when the provider was built
         daemon, _ = make_cloud(provider=provider)
         with pytest.raises(ValueError) as excinfo:
             daemon.submit(cloud_spec(repo, est_runtime=3 * 3600))
@@ -2754,6 +2770,9 @@ def modal_daemon(make_cloud, tmp_path, live, **target_kw):
     sdk.rates_value = live
     target = CloudTarget(name="fake", provider="modal", daily_budget=50.0, monthly_budget=300.0)
     provider = ModalProvider(target, tmp_path / "modal-state", sdk=sdk)
+    # Warmed on a thread when the provider was built; these tests are about the table, not
+    # about the moment before it lands.
+    assert wait_until(provider.rates_ready)
     daemon, _ = make_cloud(provider=provider, **target_kw)
     return daemon, provider
 
