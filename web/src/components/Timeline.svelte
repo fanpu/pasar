@@ -283,7 +283,6 @@
       return box;
     });
   });
-  const lanesTop = $derived(height + LANES_GAP);
   const svgHeight = $derived(laneBoxes.length ? laneBoxes[laneBoxes.length - 1].bottom + 2 : height);
   const laidOut = $derived(layout(shown, pool, now, t0, t1));
   const isEmpty = $derived(laidOut.length === 0);
@@ -494,9 +493,9 @@
       {#if now >= t0 && now <= t1}
         <line x1={x(now)} x2={x(now)} y1={T - 4} y2={height - B} class="nowline" />
         <circle cx={x(now)} cy={T - 4} r="3.5" class="nowdot" />
-        {#if laneBoxes.length}
-          <line x1={x(now)} x2={x(now)} y1={lanesTop + LANE_HEAD - 2} y2={svgHeight - 2} class="nowline" />
-        {/if}
+        {#each laneBoxes as { lane, top, bottom } (lane.target)}
+          <line x1={x(now)} x2={x(now)} y1={top + LANE_HEAD - 2} y2={bottom + 2} class="nowline" />
+        {/each}
       {/if}
     </svg>
   </div>

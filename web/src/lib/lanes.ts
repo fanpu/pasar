@@ -67,13 +67,19 @@ export function cloudLanes(jobs: JobView[], now: number, t0: number, t1: number)
 
 /** Puts each bar on the lowest row where it overlaps nothing already there (a running attempt
  * reaches to the end of its dashed window), earliest start first, so the layout does not depend
- * on the order jobs arrive in. */
+ * on the order jobs arrive in. A job's later attempt keeps its earlier one's row when that is
+ * free, so a pause reads as a gap in one line. */
 function pack(bars: LaneBar[]): { placed: LaneBar[]; rows: number } {
   const ordered = [...bars].sort((a, b) => a.start - b.start || a.id - b.id || a.attempt - b.attempt);
   const rowEnds: number[] = [];
+  const lastRow = new Map<number, number>();
   const placed = ordered.map((b) => {
-    let row = rowEnds.findIndex((e) => e <= b.start);
+    const prev = lastRow.get(b.id);
+    let row = prev !== undefined && rowEnds[prev] <= b.start
+      ? prev
+      : rowEnds.findIndex((e) => e <= b.start);
     if (row === -1) row = rowEnds.push(0) - 1;
+    lastRow.set(b.id, row);
     rowEnds[row] = Math.max(b.end, b.until ?? b.end);
     return { ...b, row };
   });

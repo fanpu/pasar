@@ -57,6 +57,14 @@ describe("cloudLanes", () => {
     ]);
   });
 
+  it("keeps a resumed attempt on its earlier attempt's row when that row is free", () => {
+    const [lane] = cloudLanes([
+      cloudJobView({ id: 1, state: "completed", spans: [[NOW - 5000, NOW - 3000, "completed"]] }),
+      cloudJobView({ id: 2, state: "running", spans: [[NOW - 4500, NOW - 4000, "paused" as EndKind], [NOW - 2000, null, null]] }, { approved_seconds: 3600 }),
+    ], NOW, T0, T1);
+    expect(lane.bars.map((b) => [b.id, b.attempt, b.row])).toEqual([[1, 1, 0], [2, 1, 1], [2, 2, 1]]);
+  });
+
   it("puts attempts that run at once on the same account on separate rows", () => {
     const [lane] = cloudLanes([
       cloudJobView({ id: 1, state: "running", spans: [[NOW - 3000, null, null]] }, { approved_seconds: 3600 }),
