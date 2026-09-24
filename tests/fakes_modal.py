@@ -5,6 +5,9 @@ machine with no modal installed, no credentials and no bill.
 """
 
 import threading
+from dataclasses import dataclass, field
+from datetime import UTC, datetime
+from decimal import Decimal
 
 
 class NotFoundError(Exception):
@@ -273,6 +276,27 @@ class FakeVolume:
         self.dirs.discard(path)
 
 
+@dataclass(frozen=True)
+class FakeBillingSummary:
+    """The shape of modal's `WorkspaceBillingSummary`: `Decimal` costs and UTC datetimes, the
+    cycle being the calendar month (as measured on real accounts)."""
+    start: datetime = datetime(2026, 9, 1, tzinfo=UTC)
+    end: datetime = datetime(2026, 10, 1, tzinfo=UTC)
+    metered_cost: Decimal = Decimal(0)
+    metered_cost_breakdown: dict[str, Decimal] = field(default_factory=dict)
+    adjustments: dict[str, Decimal] = field(default_factory=dict)
+    billed_cost: Decimal = Decimal(0)
+
+
+def billing_summary(metered=0.0, billed=0.0, breakdown=None) -> FakeBillingSummary:
+    """A summary whose free credit has covered everything but `billed`: the adjustment is what
+    zeroes a free tier, so it is `billed - metered`."""
+    return FakeBillingSummary(
+        metered_cost=Decimal(str(metered)), billed_cost=Decimal(str(billed)),
+        metered_cost_breakdown={k: Decimal(str(v)) for k, v in (breakdown or {}).items()},
+        adjustments={"Credits": Decimal(str(billed)) - Decimal(str(metered))})
+
+
 class FakeSDK:
     """Assembled to look like the `modal` module: `sdk.Sandbox.create(...)` and friends."""
 
@@ -283,6 +307,8 @@ class FakeSDK:
                             "cpu_hour_cost_sandbox": 0.1419,
                             "mem_gib_hour_cost_sandbox": 0.024}
         self.create_error = None
+        self.billing_summary = billing_summary()
+        self.billing_error: str | None = None
         self.created = threading.Event()
         # Keyed by token_id, not by profile name: this fake never sees a profile, only the
         # credentials modal_profile.credentials() read out of it. A test that wants
@@ -340,8 +366,14 @@ class FakeSDK:
             def from_context(*, client=None):
                 sdk.workspace_clients.append(client)
 
+                def summary(cycle=None):
+                    if sdk.billing_error:
+                        raise RuntimeError(sdk.billing_error)
+                    return sdk.billing_summary
+
                 class _W:
-                    billing = type("B", (), {"rates": staticmethod(lambda: dict(sdk.rates_value))})
+                    billing = type("B", (), {"rates": staticmethod(lambda: dict(sdk.rates_value)),
+                                             "summary": staticmethod(summary)})
                 return _W()
 
         class Types:

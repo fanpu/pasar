@@ -18,14 +18,21 @@ from pasar.cloud.cost import estimate, hourly_rate
 from pasar.cloud.executor import parse_unit
 from pasar.cloud.modal_provider import ModalProvider
 from pasar.config import CloudTarget, Config
-from pasar.daemon import CLOUD_RATE_TTL, PAUSE_LIMIT, PULL_SETTLE, Conflict, Daemon
+from pasar.daemon import (
+    CLOUD_CREDIT_TTL,
+    CLOUD_RATE_TTL,
+    PAUSE_LIMIT,
+    PULL_SETTLE,
+    Conflict,
+    Daemon,
+)
 from pasar.db import Store
 from pasar.executor.base import UnitState
 from pasar.models import EndKind, JobSpec, State
 from pasar.units import GiB
 from pasar.views import cloud_status_view, cloud_view
 from tests.fakes_cloud import FakeProvider, launch_request, run_now
-from tests.fakes_modal import FakeSDK
+from tests.fakes_modal import FakeSDK, billing_summary
 
 
 class StubMetrics:
@@ -2944,3 +2951,135 @@ def test_a_group_with_no_reachable_account_says_so_rather_than_blaming_money(mak
     msg = str(e.value)
     assert "modal-a" in msg and "modal-b" in msg
     assert "configured but its provider could not be set up" in msg
+
+
+# ---- the provider's own credit figure
+
+
+def test_credit_is_read_once_and_reused_until_it_is_stale(make_cloud, clock):
+    daemon, provider = make_cloud(FakeProvider().with_credit(used=7.5))
+    target = daemon.cfg.clouds["fake"]
+    assert daemon.cloud_credit(target).used == 7.5
+    provider.credit_value = replace(provider.credit_value, used=9.0)
+    assert daemon.cloud_credit(target).used == 7.5
+    assert provider.credit_calls == 1
+    clock.advance(CLOUD_CREDIT_TTL)
+    assert daemon.cloud_credit(target).used == 9.0
+
+
+def test_credit_is_read_off_the_tick_and_only_once_at_a_time(make_cloud):
+    """A billing summary is a network call; the tick and every view read the cached answer."""
+    daemon, provider = make_cloud(FakeProvider().with_credit(used=7.5))
+    target = daemon.cfg.clouds["fake"]
+    pending = []
+    daemon.credit_background = pending.append
+    assert daemon.cloud_credit(target) is None  # not read yet: unknown, not zero
+    assert daemon.cloud_credit(target) is None
+    assert len(pending) == 1 and provider.credit_calls == 0
+    pending.pop()()
+    assert daemon.cloud_credit(target).used == 7.5
+
+
+def test_credit_that_cannot_be_read_is_cached_as_unknown(make_cloud, caplog):
+    daemon, provider = make_cloud(FakeProvider().with_credit(used=7.5))
+    provider.credit_error = "503"
+    target = daemon.cfg.clouds["fake"]
+    assert daemon.cloud_credit(target) is None
+    assert daemon.cloud_credit(target) is None
+    assert provider.credit_calls == 1  # a billing API that is down is not asked every tick
+    assert "could not report its credit" in caplog.text
+
+
+def test_a_provider_that_cannot_report_credit_is_never_asked(cloud):
+    daemon, provider = cloud
+    assert daemon.cloud_credit(daemon.cfg.clouds["fake"]) is None
+    assert provider.credit_calls == 0
+
+
+def test_credit_for_a_cycle_that_has_ended_is_unknown(make_cloud, clock):
+    """Last month's exhausted account is this month's fresh one."""
+    daemon, provider = make_cloud(FakeProvider().with_credit(exhausted=True,
+                                                             cycle_end=clock() + 60))
+    target = daemon.cfg.clouds["fake"]
+    assert daemon.cloud_credit(target).exhausted is True
+    clock.advance(60)
+    provider.credit_value = replace(provider.credit_value, exhausted=False,
+                                    cycle_end=clock() + 86400)
+    assert daemon.cloud_credit(target).exhausted is False  # read again, not held for the TTL
+
+
+def test_the_tick_keeps_every_accounts_credit_warm(make_cloud):
+    """So the first group submit after a restart already sees the provider's figure."""
+    daemon, provider = make_cloud(FakeProvider().with_credit(used=1.0))
+    daemon.tick()
+    assert provider.credit_calls == 1
+
+
+def test_modal_credit_reaches_the_daemon(make_cloud, tmp_path):
+    sdk = FakeSDK()
+    sdk.billing_summary = billing_summary(metered=3.0)
+    target = CloudTarget(name="fake", provider="modal", daily_budget=50.0, monthly_budget=300.0)
+    provider = ModalProvider(target, tmp_path / "state", sdk=sdk)
+    try:
+        daemon, _ = make_cloud(provider)
+        assert daemon.cloud_credit(daemon.cfg.clouds["fake"]).used == 3.0
+    finally:
+        provider.close()
+
+
+def test_a_group_submit_skips_an_account_its_provider_says_is_spent(grouped, repo):
+    """The ledger thinks modal-a is untouched; its owner spent it on something pasar never saw."""
+    grouped.executors["modal-a"].provider.with_credit(used=29.0)
+    job = grouped.submit(cloud_spec(repo, target="modal", est_runtime=600))
+    assert job.spec.target == "modal-b"
+
+
+def test_a_group_refusal_names_the_account_its_provider_says_is_out_of_credit(grouped, repo):
+    grouped.executors["modal-a"].provider.with_credit(exhausted=True)
+    spent(grouped, "modal-b", 29.9)
+    with pytest.raises(Conflict) as e:
+        grouped.submit(cloud_spec(repo, target="modal", est_runtime=3600))
+    line = next(x for x in str(e.value).splitlines() if "modal-a" in x)
+    assert "$0.00 left" in line and "out of credit" in line
+
+
+def test_a_reclaim_on_an_account_out_of_credit_fails_rather_than_pausing(make_cloud, repo,
+                                                                         clock):
+    """With a $0 spending limit, running out of credit mid-attempt looks exactly like a spot
+    reclaim. Pausing would ask a person to approve an attempt the provider will only refuse."""
+    daemon, provider = make_cloud(FakeProvider().with_credit(used=1.0))
+    job_id = start(daemon, repo)
+    provider.credit_value = replace(provider.credit_value, used=31.0, exhausted=True)
+    clock.advance(CLOUD_CREDIT_TTL)
+    provider.reclaim(handle_of(daemon, job_id))
+    daemon.tick()
+    job = daemon.job(job_id)
+    assert job.state == State.FAILED and job.reason == "out_of_credit"
+    assert "credit" in job.summary and "fake" in job.summary
+    assert "not because of anything the job did" in job.summary
+    assert daemon.store.attempts(job_id)[0].end_kind == EndKind.FAILED
+
+
+def test_a_reclaim_with_credit_left_still_pauses_and_rereads_the_books(make_cloud, repo):
+    """A reclaim is also what running out looks like, so the account's figure is read again at
+    once rather than when the cached one expires: the next reclaim, or the next group submit,
+    then knows."""
+    daemon, provider = make_cloud(FakeProvider().with_credit(used=1.0))
+    job_id = start(daemon, repo)
+    calls = provider.credit_calls
+    provider.credit_value = replace(provider.credit_value, exhausted=True)
+    provider.reclaim(handle_of(daemon, job_id))
+    daemon.tick()
+    job = daemon.job(job_id)
+    assert job.state == State.AWAITING and job.reason == "cloud_preempted"  # the cache said fine
+    assert provider.credit_calls == calls + 1
+    assert daemon.cloud_credit(daemon.cfg.clouds["fake"]).exhausted is True
+
+
+def test_a_reclaim_with_credit_unknown_pauses(make_cloud, repo):
+    daemon, provider = make_cloud(FakeProvider().with_credit(used=1.0))
+    provider.credit_error = "503"
+    job_id = start(daemon, repo)
+    provider.reclaim(handle_of(daemon, job_id))
+    daemon.tick()
+    assert daemon.job(job_id).reason == "cloud_preempted"

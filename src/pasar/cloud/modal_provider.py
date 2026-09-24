@@ -24,6 +24,7 @@ from pasar.cloud.base import (
     Capabilities,
     CloudLaunch,
     CloudStatus,
+    Credit,
     GpuRow,
     PersistFile,
     Phase,
@@ -120,7 +121,7 @@ class _Box:
 
 class ModalProvider:
     name = "modal"
-    caps = Capabilities(graceful_stop=True, replay_output=True, billing=False)
+    caps = Capabilities(graceful_stop=True, replay_output=True, billing=False, credit=True)
     gpu_names = GPU_NAMES
 
     def __init__(self, target: CloudTarget, state_dir: Path, sdk=None, clock=time.time,
@@ -589,6 +590,30 @@ class ModalProvider:
             # The stale list stays in place: an estimate a few minutes old is much better than
             # refusing to price a job at all, which is what an empty table does.
             log.exception("could not refresh %s's rates", self.target.name)
+
+    def credit(self) -> Credit | None:
+        """This account's billing summary for the current cycle, as Modal's own books have it.
+
+        A network call, and not cached here: `Daemon.cloud_credit` holds the answer and only
+        ever asks for a fresh one off the tick.
+
+        `exhausted` is `billed_cost > 0`: free credit arrives as an adjustment that zeroes the
+        bill, and it stops applying the moment it is used up, so a positive bill is the one
+        signal here that does not depend on anybody's arithmetic. `used` is the larger of
+        `metered_cost` and the sum of its own breakdown, because on a real account the two
+        disagreed and nothing yet shows which one GPU time lands in; counting too much only
+        makes a group pick a different account, counting too little bills somebody."""
+        try:
+            s = self.sdk.Workspace.from_context(client=self.client).billing.summary()
+            used = max(float(s.metered_cost),
+                       sum(float(v) for v in s.metered_cost_breakdown.values()))
+            return Credit(used=used, limit=None, exhausted=float(s.billed_cost) > 0,
+                          cycle_start=s.start.timestamp(), cycle_end=s.end.timestamp())
+        except Exception:
+            # The ledger's own figure still gates every launch; this only adds what pasar could
+            # not see. A billing API that is down is not a reason to stop running jobs.
+            log.exception("could not read %s's billing summary", self.target.name)
+            return None
 
     def gpus(self, rates: dict[str, float]) -> list[GpuRow]:
         """This target's GPUs as clean rows, built from `rates` (a caller's own price list, not

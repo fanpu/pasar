@@ -495,7 +495,9 @@ New end/job reasons: `time_limit` (paused at the approved run time or the wrappe
 the attempt's end kind is `paused`, which counts toward lost time like a preemption), `pause_limit`
 (failed after its 5th `time_limit` pause, counted over its whole life, with nothing finished — a
 provider reclaim doesn't count toward the five), `cloud_preempted` (the provider reclaimed the
-sandbox), `price_rose` (the price moved above what was approved between approval and launch; back to
+sandbox), `out_of_credit` (the provider ended an attempt on an account its own billing says is
+out of free credit: `failed` rather than paused, since approving it again would only be refused),
+`price_rose` (the price moved above what was approved between approval and launch; back to
 **awaiting**, not a launch), `target_gone` (the job's target is no longer configured, or its
 provider could not be set up: `failed` if it was running, since its sandbox may still be billing at
 the provider; if it was only waiting, `cancelled` when the target is gone from the config, but left

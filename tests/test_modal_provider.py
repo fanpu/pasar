@@ -2,6 +2,7 @@
 
 import threading
 import time
+from datetime import UTC, datetime
 
 import pytest
 
@@ -12,7 +13,7 @@ from pasar.cloud.bundle import EnvSpec
 from pasar.cloud.modal_provider import HANDLE_TAG, ModalProvider
 from pasar.config import CloudTarget
 from tests.fakes_cloud import launch_request
-from tests.fakes_modal import FakeSDK, FileEntryType
+from tests.fakes_modal import FakeSDK, FileEntryType, billing_summary
 
 
 def _target(**kw):
@@ -475,6 +476,48 @@ def test_gpus_sort_by_price(provider, tmp_path):
     assert [r.hourly_rate for r in rows] == sorted(r.hourly_rate for r in rows)
 
 
+# ---- credit(): the account's own books
+def test_modal_says_it_can_report_credit(provider):
+    p, _ = provider
+    assert p.caps.credit is True
+
+
+def test_credit_reads_the_workspace_billing_summary(provider):
+    p, sdk = provider
+    sdk.billing_summary = billing_summary(metered=7.5, billed=0.0)
+    c = p.credit()
+    assert c.used == 7.5 and c.exhausted is False and c.limit is None
+    assert c.cycle_start == datetime(2026, 9, 1, tzinfo=UTC).timestamp()
+    assert c.cycle_end == datetime(2026, 10, 1, tzinfo=UTC).timestamp()
+
+
+def test_a_positive_billed_cost_means_the_free_credit_is_gone(provider):
+    """The adjustment that zeroes a free tier stops applying the moment it is used up, so this
+    is the one signal that does not depend on pasar's arithmetic at all."""
+    p, sdk = provider
+    sdk.billing_summary = billing_summary(metered=32.0, billed=2.0)
+    assert p.credit().exhausted is True
+
+
+def test_credit_counts_the_breakdown_when_it_says_more_than_the_metered_total(provider):
+    """Measured on a real account: `metered_cost` was not the sum of its own breakdown, and
+    nothing yet shows which one GPU time lands in. Over-counting is the safe direction."""
+    p, sdk = provider
+    sdk.billing_summary = billing_summary(metered=0.5, breakdown={"Volumes": 0.5, "GPU": 4.0})
+    assert p.credit().used == pytest.approx(4.5)
+    sdk.billing_summary = billing_summary(metered=6.0, breakdown={"Volumes": 0.5})
+    assert p.credit().used == pytest.approx(6.0)
+
+
+def test_credit_that_cannot_be_read_is_unknown_not_zero(provider, caplog):
+    """A billing API that is down must not stop jobs running; it only stops them being checked
+    against anything but the ledger."""
+    p, sdk = provider
+    sdk.billing_error = "503"
+    assert p.credit() is None
+    assert "billing summary" in caplog.text
+
+
 # ---- one client per account
 def test_the_provider_passes_its_own_client_to_every_call(tmp_path, monkeypatch):
     """Four accounts in one process: a call that forgets the client runs on whichever profile
@@ -496,6 +539,8 @@ def test_the_provider_passes_its_own_client_to_every_call(tmp_path, monkeypatch)
         assert all(c is sdk.clients["alice"] for c in sdk.volume_clients)
         p.rates()
         assert sdk.workspace_clients == [sdk.clients["alice"]]
+        p.credit()  # whose credit it reads is the whole point of reading it
+        assert sdk.workspace_clients == [sdk.clients["alice"]] * 2
         # Listing too: a `_find` that dropped the client would look in the wrong account, find
         # nothing, and settle a live job as lost — which then gets pulled and deleted under it.
         assert p.list() == [(handle, box.tags)]

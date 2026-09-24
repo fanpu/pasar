@@ -150,10 +150,24 @@ class CloudStatus:
 
 
 @dataclass(frozen=True)
+class Credit:
+    """What a provider's own books say one account has used this billing cycle.
+
+    pasar's ledger only knows what pasar spent; this also counts what it could not see — an image
+    build, a sandbox somebody started by hand, a collaborator's own work on the same account."""
+    used: float            # spent this cycle, by anyone, from the provider's own books
+    limit: float | None    # the provider's own allowance, None if it does not say
+    exhausted: bool        # the provider says this account is past its free allowance
+    cycle_start: float     # unix time this billing cycle began
+    cycle_end: float
+
+
+@dataclass(frozen=True)
 class Capabilities:
     graceful_stop: bool = True
     replay_output: bool = True
     billing: bool = False
+    credit: bool = False   # implements `Provider.credit`
 
 
 class Provider(Protocol):
@@ -260,3 +274,8 @@ class Provider(Protocol):
 
     def billed_cost(self, handles: list[str], since: float) -> dict[str, float] | None:
         """Return actual billed cost per handle since the given time, or None if unsupported."""
+
+    def credit(self) -> Credit | None:
+        """Optional (`caps.credit`): what the provider itself says this account has used, or
+        None if it cannot say right now. A network call: `Daemon.cloud_credit` caches it and
+        only ever calls it off the tick."""

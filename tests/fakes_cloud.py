@@ -7,6 +7,7 @@ from pasar.cloud.base import (
     Capabilities,
     CloudLaunch,
     CloudStatus,
+    Credit,
     GpuRow,
     PersistFile,
     Phase,
@@ -81,6 +82,11 @@ class FakeProvider:
         self.short_download: set[int] = set()
         self.fail_download: set[int] = set()
         self.rates_calls = 0
+        # What its own books say this account has used. Only read when a test turns
+        # `caps.credit` on (`with_credit`), like a provider that can report it.
+        self.credit_value: Credit | None = None
+        self.credit_error: str | None = None
+        self.credit_calls = 0
 
     # --- provider interface
     def prepare_image(self, env: EnvSpec) -> str:
@@ -186,7 +192,22 @@ class FakeProvider:
     def billed_cost(self, handles, since):
         return None
 
+    def credit(self) -> Credit | None:
+        self.credit_calls += 1
+        if self.credit_error:
+            raise RuntimeError(self.credit_error)
+        return self.credit_value
+
     # --- test helpers
+    def with_credit(self, used: float = 0.0, exhausted: bool = False,
+                    cycle_end: float = 4_102_444_800.0) -> "FakeProvider":
+        """Report `used` this cycle from the account's own books, as Modal can. The cycle ends
+        in 2100 unless a test says otherwise."""
+        self.caps = Capabilities(credit=True)
+        self.credit_value = Credit(used=used, limit=None, exhausted=exhausted, cycle_start=0.0,
+                                   cycle_end=cycle_end)
+        return self
+
     def start(self, handle: str) -> None:
         self.boxes[handle].phase = Phase.RUNNING
 

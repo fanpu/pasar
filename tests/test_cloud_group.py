@@ -2,6 +2,7 @@
 
 import pytest
 
+from pasar.cloud.base import Credit
 from pasar.cloud.cost import Ledger
 from pasar.cloud.group import choose, headroom, shortfall
 from pasar.config import CloudTarget
@@ -13,6 +14,11 @@ from tests.fakes import FakeClock
 def _target(name, monthly, owner="", max_running=2):
     return CloudTarget(name=name, provider=name, daily_budget=monthly, monthly_budget=monthly,
                        owner=owner, max_running=max_running)
+
+
+def _credit(used, exhausted=False):
+    """What a provider's own books say: `used` this cycle, and whether the free tier is gone."""
+    return Credit(used=used, limit=None, exhausted=exhausted, cycle_start=0.0, cycle_end=1.0)
 
 
 def _spec():
@@ -75,6 +81,29 @@ def test_headroom_never_goes_below_zero(store, ledger, clock):
     assert headroom(ledger, target) == 0.0
 
 
+def test_headroom_uses_whichever_figure_is_larger(store, ledger, clock):
+    """Over-counting is the safe direction: the alternative is a launch that bills somebody.
+    The provider sees what pasar could not (an image build, a hand-started sandbox); pasar sees
+    what is promised but not yet billed. Neither contains the other."""
+    target = _target("a", monthly=30.0)
+    _run(store, ledger, clock, "a", 5.0)
+    _settle_all(store, clock)
+    assert headroom(ledger, target, credit=_credit(used=12.0)) == pytest.approx(18.0)
+    assert headroom(ledger, target, credit=_credit(used=2.0)) == pytest.approx(25.0)
+
+
+def test_an_exhausted_account_has_no_headroom_whatever_the_ledger_says(ledger):
+    target = _target("a", monthly=30.0)
+    assert headroom(ledger, target, credit=_credit(used=0.0, exhausted=True)) == 0.0
+
+
+def test_headroom_with_no_provider_figure_is_the_ledgers(store, ledger, clock):
+    """A provider that cannot say (or a billing API that is down) leaves the ledger in charge."""
+    target = _target("a", monthly=30.0)
+    _run(store, ledger, clock, "a", 5.0)
+    assert headroom(ledger, target, credit=None) == pytest.approx(25.0)
+
+
 # ---- choose
 
 
@@ -116,6 +145,15 @@ def test_choose_is_deterministic_on_a_tie(ledger):
     assert choose([b, a], ledger, need=1.0, running=lambda _: 0).name == "b"  # config order
 
 
+def test_choose_counts_what_the_provider_says_an_account_has_used(ledger):
+    """An account the ledger thinks is untouched, but whose owner has spent it elsewhere."""
+    a, b = _target("a", 30.0), _target("b", 30.0)
+    books = {"a": _credit(used=28.0), "b": None}
+    assert choose([a, b], ledger, need=4.0, running=lambda _: 0, credit=books.get).name == "b"
+    books["b"] = _credit(used=0.0, exhausted=True)
+    assert choose([a, b], ledger, need=4.0, running=lambda _: 0, credit=books.get) is None
+
+
 # ---- shortfall
 
 
@@ -126,3 +164,9 @@ def test_shortfall_reports_every_account_with_its_owner(store, ledger, clock):
     rows = shortfall([a], ledger)
     assert rows[0].name == "a" and rows[0].owner == "First Owner"
     assert rows[0].left == pytest.approx(0.4) and rows[0].budget == 30.0
+
+
+def test_shortfall_reports_what_the_provider_says_is_left(ledger):
+    a = _target("a", 30.0)
+    rows = shortfall([a], ledger, credit={"a": _credit(used=29.0)}.get)
+    assert rows[0].left == pytest.approx(1.0)

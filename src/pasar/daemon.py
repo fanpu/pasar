@@ -14,7 +14,7 @@ from dataclasses import replace
 from pathlib import Path
 
 from pasar import gitinfo
-from pasar.cloud.base import GpuRow, parse_gpu, price_list
+from pasar.cloud.base import Credit, GpuRow, parse_gpu, price_list
 from pasar.cloud.bundle import Bundle, BundleError, EnvSpec, build_bundle, check_platform
 from pasar.cloud.cost import Ledger, estimate, hourly_rate
 from pasar.cloud.executor import CloudExecutor
@@ -45,6 +45,9 @@ PAUSE_LIMIT = 5  # times a cloud job may run out of its approved time before it 
 PRICE_TOLERANCE = 1e-6  # dollars of float noise, which is not a price rise
 JOB_CAP_FLOOR = 0.01  # dollars: less than a cent left under a job's lifetime cap is nothing left
 CLOUD_RATE_TTL = 10  # seconds a target's price list is reused before the provider is asked again
+# Seconds a provider's own credit figure is reused before it is read again. It moves by the
+# minute at most, and a read is a billing API call: not worth one per tick.
+CLOUD_CREDIT_TTL = 600
 EXTENSION_MARGIN = 1.1  # buffer added to a projected overrun so one extension does not get
                         # immediately re-flagged by ordinary noise in the next progress report
 USAGE_HISTORY = 1800  # samples per job (an hour at the default 2s tick), current attempt only
@@ -146,6 +149,14 @@ class Daemon:
         self.cloud_decisions: dict[str, CloudDecision] = {}
         self.ledger = Ledger(store, clock)
         self._rates: dict[str, tuple[float, dict]] = {}
+        # Each target's own credit figure from its provider, as (read at, Credit or None for
+        # unknown), and the targets being read right now, under `_credit_lock`: a read is a
+        # network call and runs on `credit_background`, never on the tick. A seam of its own
+        # rather than `background`, which tests replace to hold pulls back.
+        self._credit: dict[str, tuple[float, Credit | None]] = {}
+        self._credit_reading: set[str] = set()
+        self._credit_lock = threading.Lock()
+        self.credit_background = background
         # Injectable because it shells out to uv: tests hand in a stub rather than pay for a
         # real resolve on every cloud submit.
         self.platform_check = platform_check
@@ -279,6 +290,70 @@ class Daemon:
         ex = self.executors.get(target.name)
         names = getattr(ex.provider, "gpu_names", {}) if isinstance(ex, CloudExecutor) else {}
         return price_list(rates, target.rates, names)
+
+    def cloud_credit(self, target: CloudTarget) -> Credit | None:
+        """What `target`'s provider says the account has used this billing cycle, or None when
+        it cannot say — a provider without `caps.credit`, a read not made yet or that failed, or
+        a figure for a cycle that has since ended. None is unknown, never zero: every caller
+        falls back to the ledger alone, which still gates every launch.
+
+        Never a network call. Answered from memory; a figure older than `CLOUD_CREDIT_TTL` (or
+        from a cycle that has ended) starts a fresh read on `credit_background` and is served,
+        or not, in the meantime. A failed read is cached like any other, as unknown, so a
+        billing API that is down is asked once per TTL rather than once per tick."""
+        if self._credit_provider(target.name) is None:
+            return None
+        now = self.clock()
+        with self._credit_lock:
+            cached = self._credit.get(target.name)
+        # A figure read before its cycle ended is re-read at once; one read after it (a clock
+        # that disagrees with the provider's) waits out the TTL like any other, rather than
+        # costing a billing call every tick.
+        if cached is None or now - cached[0] >= CLOUD_CREDIT_TTL or (
+                cached[1] is not None and cached[0] < cached[1].cycle_end <= now):
+            self._read_credit(target.name)
+            with self._credit_lock:
+                cached = self._credit.get(target.name)
+        if cached is None or cached[1] is None or now >= cached[1].cycle_end:
+            return None
+        return cached[1]
+
+    def _credit_named(self, name: str) -> Credit | None:
+        target = self.cfg.clouds.get(name)
+        return None if target is None else self.cloud_credit(target)
+
+    def _credit_provider(self, name: str):
+        ex = self.executors.get(name)
+        if isinstance(ex, CloudExecutor) and getattr(ex.provider.caps, "credit", False):
+            return ex.provider
+        return None
+
+    def _read_credit(self, name: str) -> None:
+        """Start one fresh read of `name`'s credit off the tick, unless one is under way."""
+        provider = self._credit_provider(name)
+        if provider is None:
+            return
+        with self._credit_lock:
+            if name in self._credit_reading:
+                return
+            self._credit_reading.add(name)
+
+        def read() -> None:
+            try:
+                credit = provider.credit()
+            except Exception:
+                log.exception("%s could not report its credit", name)
+                credit = None
+            with self._credit_lock:
+                self._credit[name] = (self.clock(), credit)
+                self._credit_reading.discard(name)
+
+        try:
+            self.credit_background(read)
+        except Exception:
+            with self._credit_lock:
+                self._credit_reading.discard(name)
+            log.exception("could not start reading %s's credit", name)
 
     def _hourly(self, target: CloudTarget, gpu: str) -> float:
         """Dollars per hour for one attempt of `gpu` on `target`, at today's rates."""
@@ -824,7 +899,7 @@ class Daemon:
         # The largest ceiling of any candidate, so the one chosen can afford the run at whichever
         # candidate's prices: a price difference can only make the choice more conservative.
         need = max(self._submit_ceiling(t, spec) for t in fits)
-        chosen = choose(fits, self.ledger, need, self._running_on)
+        chosen = choose(fits, self.ledger, need, self._running_on, credit=self._credit_named)
         if chosen is None:
             raise Conflict(self._no_account(group, members, fits, need))
         return replace(spec, target=chosen.name, group=group)
@@ -847,12 +922,14 @@ class Daemon:
         every account, whose it is, what it has left, and how to queue for one regardless."""
         candidates = {t.name for t in fits}
         lines = []
-        for r in shortfall(members, self.ledger):
+        for r in shortfall(members, self.ledger, credit=self._credit_named):
             line = (f"  {r.name}  ({r.owner or 'no owner set'})  ${r.left:.2f} left of "
                     f"${r.budget:.2f} this month")
             if r.name not in candidates:
                 line += ("  (no provider on this pasard)" if r.name not in self.executors
                          else "  (the run is over its max_job_cost)")
+            elif (credit := self._credit_named(r.name)) is not None and credit.exhausted:
+                line += "  (out of credit, its provider says)"
             lines.append(line)
         return (f"no {group} account can afford this job (it needs up to ${need:.2f}):\n"
                 + "\n".join(lines)
@@ -1441,6 +1518,10 @@ class Daemon:
         self._drop_unreachable(now)
         self._expire_awaiting(now)
         self._release_settled(now)
+        for name, _ in self._cloud_executors():
+            # Only starts a read, off the tick, for a figure that has gone stale: a group submit
+            # or a reclaim then finds the provider's figure already here.
+            self.cloud_credit(self.cfg.clouds[name])
         for _, ex in self._cloud_executors():
             # Before the statuses are read: an attempt that ended between two ticks left its own
             # account of why on stdout, and that beats whatever the provider says.
@@ -1670,8 +1751,20 @@ class Daemon:
             kind, reason = EndKind.PAUSED, "time_limit"
             summary = "paused at its approved run time; approve it again to carry on"
         elif st.result == "reclaimed":
-            kind, reason = EndKind.PAUSED, "cloud_preempted"
-            summary = "the provider took the machine back; approve it again to carry on"
+            # With a $0 spending limit, an account running out of credit mid-attempt ends it
+            # exactly as a reclaim does. Pausing that would ask a person to approve an attempt
+            # the provider will only refuse, so an account its provider says is out of credit
+            # fails the job instead, saying why.
+            credit = self._credit_named(job.spec.target)
+            if credit is not None and credit.exhausted:
+                kind, reason = EndKind.FAILED, "out_of_credit"
+                summary = self._out_of_credit(job, credit)
+            else:
+                kind, reason = EndKind.PAUSED, "cloud_preempted"
+                summary = "the provider took the machine back; approve it again to carry on"
+                # The cached figure may be minutes old, and this is what running out looks
+                # like: read the books now, so the next reclaim or group submit knows.
+                self._read_credit(job.spec.target)
         elif st.exit_code == 0 and st.signal is None:
             kind, reason, summary = EndKind.COMPLETED, None, ""
         else:
@@ -1741,6 +1834,22 @@ class Daemon:
             # The metrics recorder summarises this machine's GPU over the attempt's window,
             # which has nothing to do with a job that ran somewhere else.
             self.metrics.record(job_id, att.n, att.start_time, now)
+
+    def _out_of_credit(self, job: Job, credit: Credit) -> str:
+        """Why a job whose attempt the provider ended on an account out of credit has failed:
+        whose account, that it was not the job's fault, and where it can run instead."""
+        target = self.cfg.clouds[job.spec.target]
+        whose = f" ({target.owner}'s account)" if target.owner else ""
+        resets = time.strftime("%Y-%m-%d", time.gmtime(credit.cycle_end))
+        where = (f"`--on {job.spec.group}` picks an account in the group that has some"
+                 if job.spec.group else "on another account")
+        return (f"{target.name}{whose} is out of credit: its provider says this cycle's free "
+                f"allowance is used up (${credit.used:.2f} spent) and ended the attempt — not "
+                "because of anything the job did. Approving it again would only be refused, so "
+                f"it has failed rather than waited for approval. Submit it again with credit "
+                f"left ({where}), or on {target.name} once its next cycle starts on {resets} "
+                "UTC. A new job starts over from scratch; this one's checkpoint is pulled home "
+                f"now it has ended (automatically, or `pasar pull {job.id}`)")
 
     def _settle_spend(self, job: Job, att, now: float) -> None:
         """Write what a cloud attempt really cost, now that its run time is known.
