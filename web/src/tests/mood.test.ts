@@ -134,18 +134,18 @@ describe("mood", () => {
     expect(m.banner).toBeNull();
   });
 
-  it("4.5. sums up-to cost over every awaiting job, skipping ones with an unknown max_cost", () => {
+  it("4.5. sums up-to cost over every priced awaiting job, and says how many it couldn't price", () => {
     const awaiting1 = cloudJobView({ id: 201, state: "awaiting" }, { max_cost: 8 });
     const awaiting2 = cloudJobView({ id: 202, state: "awaiting" }, { max_cost: 3.5 });
     const awaiting3 = cloudJobView({ id: 203, state: "awaiting" }, { max_cost: null });
     const m = mood({ status: status(), jobs: [awaiting1, awaiting2, awaiting3], tempC: null, recent: null, now: NOW });
-    expect(m.sub).toBe("3 awaiting · up to $11.50");
+    expect(m.sub).toBe("3 awaiting · up to $11.50 (1 unpriced)");
   });
 
-  it("4.5. omits the cost when no awaiting job has a known max_cost", () => {
+  it("4.5. says so rather than giving a cost when no awaiting job has a known max_cost", () => {
     const awaiting1 = cloudJobView({ id: 201, state: "awaiting" }, { max_cost: null });
     const m = mood({ status: status(), jobs: [awaiting1], tempC: null, recent: null, now: NOW });
-    expect(m.sub).toBe("1 awaiting");
+    expect(m.sub).toBe("1 awaiting (unpriced)");
   });
 
   it("4.5. memory pressure/hot alarms still win over an awaiting cloud job", () => {

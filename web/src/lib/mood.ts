@@ -152,9 +152,14 @@ export function mood(input: {
     const knownCosts = awaiting
       .map((j) => j.cloud?.max_cost)
       .filter((c): c is number => c !== null && c !== undefined);
-    const costSub = knownCosts.length > 0
-      ? ` · up to $${knownCosts.reduce((a, b) => a + b, 0).toFixed(2)}`
-      : "";
+    // An unpriced job's worst case is unknown, so the total must not read as the whole of it.
+    const unpriced = awaiting.length - knownCosts.length;
+    let costSub = "";
+    if (knownCosts.length === 0) costSub = " (unpriced)";
+    else {
+      costSub = ` · up to $${knownCosts.reduce((a, b) => a + b, 0).toFixed(2)}`;
+      if (unpriced > 0) costSub += ` (${unpriced} unpriced)`;
+    }
     return {
       state: "waiting",
       say: "A cloud job wants your OK!",
