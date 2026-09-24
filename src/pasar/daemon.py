@@ -2284,10 +2284,10 @@ class Daemon:
         tried once, so a group none of whose accounts will launch fails the job promptly, naming
         every refusal, instead of passing it round for ever.
 
-        The approval moves with it, at the price agreed to: whoever approved the job agreed to
-        run it once at that price on any of the group's accounts, which is what submitting to the
-        group asked for. A sibling that costs more is caught by `_over_the_approval` at launch
-        and sent back for approval like any other price rise."""
+        A move always sends it back to a person (`awaiting`, still `account_unusable`), with no
+        approval carried over: the one it had was a yes to spending the refusing account's
+        owner's credit, and the approve dialog names whose credit pays, so it must not spend
+        somebody else's. The move is written to the machine events like any other (`_move`)."""
         attempts = self.store.attempts(job.id)
         earlier = [a for a in attempts if a.reason != ACCOUNT_UNUSABLE]
         if earlier:
@@ -2305,16 +2305,18 @@ class Daemon:
             else:
                 everywhere += f"; no other {job.spec.group} account is left to try"
             return State.FAILED, everywhere, None
-        last = attempts[-1].n
-        approval = next((r for r in self.store.approvals(job.id) if r["attempt"] == last), None)
-        if approval is None:
-            # Nothing to carry over, so nothing may launch it without a person looking first.
-            state = State.AWAITING
-        else:
-            self.store.add_approval(job.id, last + 1, now, approval["estimated_cost"],
-                                    approval["max_cost"], approval["hourly_rate"])
-            state = State.QUEUED
-        return state, f"{summary}; moved to {chosen.name}", replace(job.spec, target=chosen.name)
+        was = self.cfg.clouds.get(job.spec.target)
+        was_who = f" ({was.owner})" if was is not None and was.owner else ""
+        who = f" ({chosen.owner})" if chosen.owner else ""
+        self.store.add_machine_event(
+            now, "cloud_moved",
+            f"job {job.id} moved from {job.spec.target}{was_who} to {chosen.name}{who} before "
+            f"it ever ran, because {summary}; it waits to be approved again for "
+            f"{chosen.owner or chosen.name}'s credit")
+        self.changed()
+        summary = (f"{summary}; moved to {chosen.name}{who}, so approve it again for it to "
+                   f"spend {chosen.owner or chosen.name}'s credit")
+        return State.AWAITING, summary, replace(job.spec, target=chosen.name)
 
     @staticmethod
     def _pinned(earlier: list[Attempt]) -> str:
@@ -2454,13 +2456,6 @@ class Daemon:
             f"but now costs ${costs:.2f}; it is waiting for approval again")
         summary = (f"the price rose to ${costs:.2f}, above the ${was:.2f} approved for this "
                    "run; approve it again to run at the new price")
-        prior = self.store.attempts(job.id)
-        if prior and prior[-1].reason == ACCOUNT_UNUSABLE:
-            # The price did not move; the job did. Whoever approves it again should know it is
-            # somebody else's account they are agreeing to spend on, and why.
-            summary = (f"{prior[-1].summary}; moved to {target.name}, where it costs "
-                       f"${costs:.2f}, above the ${was:.2f} approved for this run; approve it "
-                       f"again to run on {target.name} at that price")
         self.store.update_job(job.id, state=State.AWAITING, queue_time=now,
                               reason="price_rose", summary=summary)
         return True

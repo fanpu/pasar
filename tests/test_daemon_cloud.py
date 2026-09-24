@@ -3465,27 +3465,60 @@ def approved_group_job(daemon, repo, **kw):
 
 
 def test_a_job_refused_by_its_account_is_re_resolved_not_failed(grouped, repo):
-    """Nothing was spent and there is no checkpoint, so the group should just use a sibling."""
+    """Nothing was spent and there is no checkpoint, so the group should just use a sibling —
+    once a person has agreed to spend that account's owner's credit."""
     d = grouped
     job = approved_group_job(d, repo)
     first = job.spec.target
     refuse_launches_on(d, first)
     d.tick()   # launched on `first`, which refuses it
-    d.tick()   # the refusal is read, and the job moves and launches on the other account
+    d.tick()   # the refusal is read, and the job moves to the other account
     moved = d.job(job.id)
     assert moved.spec.target != first and moved.spec.group == "modal"
-    assert moved.state is State.RUNNING
-    refused, running = d.store.attempts(job.id)
+    assert moved.state is State.AWAITING and moved.reason == "account_unusable"
+    [refused] = d.store.attempts(job.id)
     assert refused.reason == "account_unusable" and "spend limit" in refused.summary
     assert parse_unit(refused.unit)[0] == first
+    d.approve(job.id)
+    d.tick()
+    assert d.job(job.id).state is State.RUNNING
+    running = d.store.attempts(job.id)[-1]
     assert parse_unit(running.unit)[0] == moved.spec.target
     # It never ran, so there is nothing on the new account to resume from.
     box = provider_of(d, moved.spec.target).boxes[handle_of(d, job.id)]
     assert box.req.env["PASAR_RESUMING"] == "0"
-    # The approval carries over at the price agreed to, so the price-rise guard still holds.
-    first_ok, second_ok = d.store.approvals(job.id)
-    assert second_ok["attempt"] == 2
-    assert second_ok["hourly_rate"] == first_ok["hourly_rate"]
+
+
+def test_a_refused_job_is_asked_again_before_it_spends_its_new_accounts_credit(grouped, repo):
+    """The approval was a yes to spending the refusing account's owner's credit; the move puts
+    it on somebody else's, at the same price, and nothing launches there until a person agrees."""
+    d = grouped
+    job = approved_group_job(d, repo)
+    assert job.spec.target == "modal-a"  # a tie on headroom goes to config order
+    refuse_launches_on(d, "modal-a")
+    for _ in range(3):
+        d.tick()
+    after = d.job(job.id)
+    assert after.spec.target == "modal-b"
+    assert after.state is State.AWAITING and after.reason == "account_unusable"
+    assert "modal-a refused to start it" in after.summary and "spend limit" in after.summary
+    assert "moved to modal-b (bob)" in after.summary and "approve it again" in after.summary
+    assert [a["attempt"] for a in d.store.approvals(job.id)] == [1]  # nothing carried over
+    assert len(d.store.attempts(job.id)) == 1                          # nothing on modal-b
+    assert provider_of(d, "modal-b").boxes == {}
+
+
+def test_a_refusal_move_is_recorded_where_a_person_can_see_it(grouped, repo):
+    d = grouped
+    job = approved_group_job(d, repo)
+    refuse_launches_on(d, "modal-a")
+    d.tick()
+    d.tick()
+    [event] = moves(d)
+    text = event["text"]
+    assert f"job {job.id}" in text
+    assert "modal-a (alice)" in text and "modal-b (bob)" in text
+    assert "modal-a refused to start it" in text and "spend limit" in text
 
 
 def test_a_job_refused_everywhere_fails_and_says_why(grouped, repo):
@@ -3493,7 +3526,11 @@ def test_a_job_refused_everywhere_fails_and_says_why(grouped, repo):
     job = approved_group_job(d, repo)
     for name in ("modal-a", "modal-b"):
         refuse_launches_on(d, name)
-    for _ in range(4):
+    d.tick()
+    d.tick()
+    assert d.job(job.id).state is State.AWAITING  # moved, and waiting to be approved there
+    d.approve(job.id)
+    for _ in range(3):
         d.tick()
     failed = d.job(job.id)
     assert failed.state is State.FAILED and failed.reason == "account_unusable"
@@ -3575,23 +3612,20 @@ def test_a_refused_job_whose_sibling_is_refusing_too_says_so(grouped, repo):
 
 
 def test_a_job_moved_to_a_pricier_sibling_waits_for_approval_there(make_group, repo):
-    """The approval carried over is for the price agreed to, not for whatever a sibling charges:
-    a dearer one sends the job back to a person, and says it moved as well as why."""
+    """Asked again like any refused job, and approved at the sibling's own price."""
     d = make_group(b={"rates": {"gpu_hour_cost_h100": 9.0}})
     job = approved_group_job(d, repo)
-    assert job.spec.target == "modal-a"  # a tie on headroom goes to config order
+    assert job.spec.target == "modal-a"
     refuse_launches_on(d, "modal-a")
     d.tick()
     d.tick()
     after = d.job(job.id)
     assert after.spec.target == "modal-b"
-    assert after.state is State.AWAITING and after.reason == "price_rose"
-    assert "modal-a refused to start it" in after.summary and "spend limit" in after.summary
-    assert "moved to modal-b" in after.summary
-    attempts = d.store.attempts(job.id)
-    assert [parse_unit(a.unit)[0] for a in attempts] == ["modal-a"]  # nothing on modal-b
+    assert after.state is State.AWAITING and after.reason == "account_unusable"
+    assert "moved to modal-b (bob)" in after.summary
     assert provider_of(d, "modal-b").boxes == {}
     d.approve(job.id)                      # a person agrees to modal-b's price
+    assert d.store.approvals(job.id)[-1]["hourly_rate"] > H100_RATE
     d.tick()
     assert d.job(job.id).state is State.RUNNING
 
@@ -3618,7 +3652,9 @@ def test_a_refusal_at_the_launch_call_itself_moves_the_job_too(grouped, repo):
     d.tick()
     moved = d.job(job.id)
     assert moved.spec.target != first
-    assert moved.state in (State.QUEUED, State.RUNNING)
+    assert moved.state is State.AWAITING and moved.reason == "account_unusable"
+    assert len(moves(d)) == 1
+    d.approve(job.id)
     d.tick()
     assert d.job(job.id).state is State.RUNNING
 

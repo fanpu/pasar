@@ -513,9 +513,9 @@ packaging, pricing or launching an attempt — a build failure, no capacity, a b
 account refused to start the attempt before any sandbox existed, for a reason that is the
 account's rather than the job's (a workspace past its spend limit, credentials no longer accepted;
 a rate limit or a quota is not one). pasar takes that account out of group choices for an hour. A
-group job that has never run is then moved to a sibling account instead of failing, keeping its
-approval at the agreed rate — or back to **awaiting** with `price_rose` if the sibling charges more
-— and each account gets one try. The job ends `account_unusable` only when it is pinned to the
+group job that has never run is then moved to a sibling account instead of failing, and goes back
+to **awaiting**, still `account_unusable`, with its approval dropped — it was a yes to spending the
+refusing account's owner's credit, not the sibling's — and each account gets one try. The job ends `account_unusable` only when it is pinned to the
 account (named to it, or it has run there) or every account it could go to has refused or can't
 take it. A job blocked on budget or the concurrency cap
 while still queued is not an end reason at all: it stays `queued` with the lane's `blocked` value
@@ -733,8 +733,10 @@ spending limit set to zero or credentials Modal no longer accepts — a failure 
 attempt reveals. Once one refusal does, the account has no headroom for the group choice and is
 never chosen, by a submit or by a move, until a launch on it succeeds again or an hour has passed.
 A group job refused this way that has never run is re-resolved to a sibling account instead of
-failing (see `account_unusable` above), keeping its approval at the rate agreed to, since nothing
-was spent and no checkpoint exists yet. A job pinned to the account (named to it with `--on
+failing (see `account_unusable` above), since nothing was spent and no checkpoint exists yet. It
+waits for a person to approve it again there, because the approval it had was for the refusing
+account's owner's credit; the move is written to the machine events as `cloud_moved`, naming both
+accounts and their owners, and the job's summary names the new account and its owner. A job pinned to the account (named to it with `--on
 <account>`, or one that has run there) still launches there, and fails `account_unusable` if it
 is refused.
 
