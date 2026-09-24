@@ -337,8 +337,13 @@
   .macts .btn { flex: 1; }
 
   @media (max-width: 760px) {
-    .crow { flex-wrap: wrap; gap: 8px 12px; }
-    .who, .specs, .money, .phase-wrap { min-width: 0; }
+    /* Name and its state pill stay together on their own line (like JobTable's mobile card);
+       everything else — specs, price/persist text, the time bar, the action buttons — gets a
+       full-width line of its own below rather than being squeezed into whatever space is left
+       on the first line. */
+    .crow { flex-wrap: wrap; gap: 6px 12px; }
+    .who { min-width: 0; }
+    .specs, .money, .timebar, .racts { flex: 1 1 100%; min-width: 0; }
     .cloud-budget { width: 100%; }
   }
 </style>
