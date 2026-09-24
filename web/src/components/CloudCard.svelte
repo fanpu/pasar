@@ -6,6 +6,7 @@
   import type { CloudBlock, CloudTarget, JobView } from "../lib/types";
   import ApproveDialog from "./ApproveDialog.svelte";
   import JobChip from "./JobChip.svelte";
+  import JobSprite from "./JobSprite.svelte";
   import Modal from "./Modal.svelte";
   import StatePill from "./StatePill.svelte";
 
@@ -163,6 +164,7 @@
           {@const c = job.cloud!}
           {@const why = whyBack(job)}
           <div class="crow" data-job={job.id}>
+            <JobSprite {job} />
             <JobChip id={job.id} tags={job.tags} />
             <div class="who">
               <button type="button" class="jname link" onclick={() => onopen(job.id)}>{job.name}</button>
@@ -203,6 +205,7 @@
           {@const look = job.state === "queued" ? WAITING_LOOK : phaseLook(c.phase)}
           {@const flag = flaggedToExtend(job)}
           <div class="crow" class:flag data-job={job.id}>
+            <JobSprite {job} />
             <JobChip id={job.id} tags={job.tags} />
             <div class="who">
               <button type="button" class="jname link" onclick={() => onopen(job.id)}>{job.name}</button>
@@ -250,6 +253,7 @@
         {#each cloud.recent as job (job.id)}
           {@const c = job.cloud!}
           <div class="crow" data-job={job.id}>
+            <JobSprite {job} />
             <JobChip id={job.id} tags={job.tags} />
             <div class="who">
               <button type="button" class="jname link" onclick={() => onopen(job.id)}>{job.name}</button>

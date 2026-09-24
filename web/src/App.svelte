@@ -60,7 +60,7 @@
   });
   const filterKnown = $derived(knownValues(knownSource));
   // The user's own custom peek image, if they've dropped one in — never a built-in.
-  const peekImage = $derived(mascot.manifest.peek?.[0] ?? null);
+  const peekImage = $derived((mascot.manifest.peek as string[] | undefined)?.[0] ?? null);
   const tableJobs = $derived(
     filterActive ? sortJobs(source.filter((j) => matches(j, filter)), effectiveSort(filter)) : (live.snapshot?.jobs ?? []),
   );

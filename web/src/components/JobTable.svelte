@@ -5,6 +5,7 @@
   import { EMPTY_FILTER, effectiveSort, isActive, type Filter, type SortKey, type StateFilter } from "../lib/jobfilter";
   import FilterBar from "./FilterBar.svelte";
   import JobChip from "./JobChip.svelte";
+  import JobSprite from "./JobSprite.svelte";
   import Sparkline from "./Sparkline.svelte";
   import StatePill from "./StatePill.svelte";
   import TagSummary from "./TagSummary.svelte";
@@ -239,6 +240,7 @@
   <tr class="row" class:sel={selected === job.id} tabindex="0" onclick={() => open(job.id)} onkeydown={(e) => onActivate(e, job.id)}>
     <td>
       <div class="jid">
+        <JobSprite {job} />
         <JobChip id={job.id} tags={job.tags} />
         <div>
           <div class="jname">{job.name}</div>
@@ -306,35 +308,43 @@
 {#snippet card(job: JobView)}
   <div class="card" role="button" tabindex="0" class:sel={selected === job.id} onclick={() => open(job.id)} onkeydown={(e) => onActivate(e, job.id)}>
     <div class="top">
+      <JobSprite {job} />
       <JobChip id={job.id} tags={job.tags} />
-      <b>{job.name}</b>
-      <span class="spacer"></span>
-      <span class="bid" class:hi={job.bid > 1000}>★ {job.bid}</span>
-    </div>
-    {#if job.tags.length > 0}
-      <div class="jtags card-tags">
-        {#each job.tags as tag (tag)}
-          <button type="button" class="tagpill" style="background: {jobColor(job)}1f; color: {jobColor(job)}" onclick={(e) => onTagClick(e, tag)}>{tag}</button>
-        {/each}
+      <!-- Name, bid, tags, state and metric all live in this one column so they line up under
+           the leading icons no matter how many of them render (chip alone, or chip + sprite),
+           rather than the fixed `margin-left` a previous, icon-count-agnostic layout used. -->
+      <div class="card-body">
+        <div class="card-head">
+          <b>{job.name}</b>
+          <span class="spacer"></span>
+          <span class="bid" class:hi={job.bid > 1000}>★ {job.bid}</span>
+        </div>
+        {#if job.tags.length > 0}
+          <div class="jtags card-tags">
+            {#each job.tags as tag (tag)}
+              <button type="button" class="tagpill" style="background: {jobColor(job)}1f; color: {jobColor(job)}" onclick={(e) => onTagClick(e, tag)}>{tag}</button>
+            {/each}
+          </div>
+        {/if}
+        <div class="meta">
+          <StatePill {job} />{@render cloudBadge(job)}
+          {#if job.state === "failed"}
+            <span class="fail">{jobSub(job).text}</span> · {hm(job.end_time ?? now)}
+          {:else}
+            {cardMeta(job)}
+          {/if}
+        </div>
+        {#if isLive(job)}
+          <div class="bar"><i style="width: {timePct(job)}%; background: linear-gradient(90deg, #a9d8f5, #cdbcf5)"></i></div>
+        {/if}
+        {#if spark(job)}
+          <div class="cardmetric">
+            <div class="mhead"><span class="mkey">{spark(job)!.key}</span> <b>{metric(spark(job)!.latest)}</b></div>
+            <Sparkline points={spark(job)!.points} color={jobColor(job)} height={26} format={metric} />
+          </div>
+        {/if}
       </div>
-    {/if}
-    <div class="meta">
-      <StatePill {job} />{@render cloudBadge(job)}
-      {#if job.state === "failed"}
-        <span class="fail">{jobSub(job).text}</span> · {hm(job.end_time ?? now)}
-      {:else}
-        {cardMeta(job)}
-      {/if}
     </div>
-    {#if isLive(job)}
-      <div class="bar"><i style="width: {timePct(job)}%; background: linear-gradient(90deg, #a9d8f5, #cdbcf5)"></i></div>
-    {/if}
-    {#if spark(job)}
-      <div class="cardmetric">
-        <div class="mhead"><span class="mkey">{spark(job)!.key}</span> <b>{metric(spark(job)!.latest)}</b></div>
-        <Sparkline points={spark(job)!.points} color={jobColor(job)} height={26} format={metric} />
-      </div>
-    {/if}
   </div>
 {/snippet}
 
@@ -434,7 +444,7 @@
   .jsub.fail { color: var(--fail); }
   .jtags { display: flex; flex-wrap: wrap; gap: 4px; margin: 2px 0; }
   .tagpill { padding: 1px 8px; border-radius: 99px; font-size: 10.5px; font-weight: 800; line-height: 1.5; border: 0; cursor: pointer; text-decoration: underline dotted; }
-  .card-tags { margin: 6px 0 0 43px; }
+  .card-tags { margin: 6px 0 0; }
 
   .bar i.over { background: var(--stop); }
 
@@ -455,12 +465,14 @@
     .cards { display: block; }
     .card { background: var(--card); border: 1.5px solid var(--line); border-radius: 20px; padding: 12px 13px; margin-top: 8px; cursor: pointer; }
     .card.sel { background: #fdf0f5; }
-    .card .top { display: flex; align-items: center; gap: 9px; }
-    .card .meta { font-size: 12.5px; color: var(--ink-2); font-weight: 700; margin: 6px 0 0 43px; }
+    .card .top { display: flex; align-items: flex-start; gap: 9px; }
+    .card .card-body { flex: 1; min-width: 0; }
+    .card .card-head { display: flex; align-items: center; gap: 9px; }
+    .card .meta { font-size: 12.5px; color: var(--ink-2); font-weight: 700; margin: 6px 0 0; }
     .card .meta .fail { color: var(--fail); }
-    .card .bar { height: 7px; border-radius: 99px; background: #f4ecf0; overflow: hidden; margin: 8px 0 0 43px; }
+    .card .bar { height: 7px; border-radius: 99px; background: #f4ecf0; overflow: hidden; margin: 8px 0 0; }
     .card .bar i { display: block; height: 100%; border-radius: 99px; }
-    .card .cardmetric { margin: 8px 0 0 43px; }
+    .card .cardmetric { margin: 8px 0 0; }
     .cards .grp { font-size: 11.5px; font-weight: 900; color: var(--ink-3); text-transform: uppercase; letter-spacing: 0.6px; margin: 14px 2px 0; }
     .sortsel { display: inline-block !important; }
   }

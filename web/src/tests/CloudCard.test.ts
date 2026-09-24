@@ -1,9 +1,10 @@
 import { fireEvent, render, screen, waitFor, within } from "@testing-library/svelte";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import ApproveDialog from "../components/ApproveDialog.svelte";
 import CloudCard from "../components/CloudCard.svelte";
 import * as api from "../lib/api";
 import { ApiError } from "../lib/api";
+import { mascot } from "../lib/mascot.svelte";
 import { NOW } from "./fixtures";
 import { awaitingFresh, awaitingReapproval, cloudBlock, cloudTarget, needsTime, queuedApproved, recent, running } from "./fixtures/cloud";
 
@@ -272,6 +273,25 @@ describe("CloudCard", () => {
     render(CloudCard, { cloud: cloudBlock(), jobs: running, now: NOW, onopen });
     await fireEvent.click(screen.getByRole("button", { name: recent[0].name }));
     expect(onopen).toHaveBeenCalledWith(recent[0].id);
+  });
+
+  describe("job sprites", () => {
+    afterEach(() => {
+      mascot.manifest = {};
+    });
+
+    it("shows the cloud sprite beside an awaiting job's row", () => {
+      mascot.manifest = { jobs: { local: {}, cloud: { awaiting: ["/mascot/jobs/cloud-awaiting.png"] } } };
+      const { container } = render(CloudCard, { cloud: cloudBlock(), jobs: running, now: NOW });
+      const img = within(row(container, awaitingFresh.id)).getByRole("img", { name: "cloud job, awaiting" });
+      expect(img.querySelector("img")?.src).toContain("/mascot/jobs/cloud-awaiting.png");
+    });
+
+    it("shows nothing extra when the manifest has no job sprites", () => {
+      mascot.manifest = {};
+      const { container } = render(CloudCard, { cloud: cloudBlock(), jobs: running, now: NOW });
+      expect(within(row(container, awaitingFresh.id)).queryByRole("img", { name: /^cloud job,/ })).toBeNull();
+    });
   });
 });
 

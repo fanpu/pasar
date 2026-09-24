@@ -1,8 +1,9 @@
 import { render, screen, fireEvent, waitFor, within } from "@testing-library/svelte";
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import JobTable from "../components/JobTable.svelte";
 import * as api from "../lib/api";
 import { EMPTY_FILTER, type Filter } from "../lib/jobfilter";
+import { mascot } from "../lib/mascot.svelte";
 import { GIB, job, NOW } from "./fixtures";
 import { awaitingFresh, awaitingReapproval, cloudJobView } from "./fixtures/cloud";
 
@@ -450,6 +451,38 @@ describe("JobTable", () => {
       });
       const table = container.querySelector("table")!;
       expect(within(table).getByText(/1h23/)).toHaveTextContent("1h23 / ~4h00");
+    });
+  });
+
+  describe("job sprites", () => {
+    afterEach(() => {
+      mascot.manifest = {};
+    });
+
+    it("shows a job's sprite in both the desktop row and the mobile card", () => {
+      mascot.manifest = { jobs: { local: { running: ["/mascot/jobs/local-running.png"] }, cloud: {} } };
+      const { container } = render(JobTable, {
+        jobs: [job({ id: 1, state: "running", start_time: NOW - 60 })],
+        pool: 105 * GIB,
+        now: NOW,
+        selected: null,
+        onopen: () => {},
+      });
+      const imgs = Array.from(container.querySelectorAll<HTMLImageElement>("img"))
+        .filter((img) => img.src.includes("/mascot/jobs/local-running.png"));
+      expect(imgs).toHaveLength(2); // one in the <table> row, one in the mobile `.card`
+    });
+
+    it("shows nothing extra when the manifest has no job sprites", () => {
+      mascot.manifest = {};
+      const { container } = render(JobTable, {
+        jobs: [job({ id: 1, state: "running", start_time: NOW - 60 })],
+        pool: 105 * GIB,
+        now: NOW,
+        selected: null,
+        onopen: () => {},
+      });
+      expect(container.querySelectorAll('img[src*="/mascot/jobs/"]')).toHaveLength(0);
     });
   });
 });

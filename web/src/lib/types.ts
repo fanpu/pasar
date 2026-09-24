@@ -117,9 +117,21 @@ export type Series = [number, number][];
 export interface JobSpark { key: string; points: Series; latest: number }
 export type SparkMap = Record<number, JobSpark>;
 export interface GpuSeries { power_w: Series; temp_c: Series; util_pct: Series }
-// Keyed by MascotState, plus "peek" for the optional corner-peek image — at most one URL, since
-// unlike the states there's no picking a random variant.
-export type MascotManifest = Record<string, string[]>;
+export type JobSpriteKind = "local" | "cloud";
+export type JobSpriteState =
+  | "running" | "starting" | "queued" | "awaiting" | "over" | "stopping" | "preempted"
+  | "paused" | "completed" | "failed" | "cancelled" | "idle";
+/** `job_manifest` in mascot.py: per-job sprites, kind first (there's no crossing from one to the
+ * other), then state; absent states simply have no entry, since — unlike the mood art — there is
+ * no built-in fallback to draw on. */
+export type JobSpriteManifest = Record<JobSpriteKind, Partial<Record<JobSpriteState, string[]>>>;
+
+// Keyed by MascotState, plus "peek" (a single-URL array) and "jobs" (a JobSpriteManifest, not a
+// plain URL list — callers that index a mood/peek key should keep treating the result as
+// `string[]`, since only "jobs" itself has the other shape).
+export interface MascotManifest {
+  [key: string]: string[] | JobSpriteManifest;
+}
 
 export interface SubmitBody {
   command: string; time: string | number; cwd: string; mem?: string | number | null; bid?: number;
