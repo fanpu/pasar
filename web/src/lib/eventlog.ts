@@ -16,6 +16,12 @@ interface RankedRow extends EventRow {
   rank: number;
 }
 
+// Why a cloud attempt paused (its `reason`), worded for the event list.
+const PAUSE_REASONS: Record<string, string> = {
+  time_limit: "out of approved time",
+  cloud_preempted: "taken back by the provider",
+};
+
 function endRow(a: AttemptView): RankedRow | null {
   if (a.end_kind === null || a.end_time === null) return null;
   const ts = a.end_time;
@@ -33,6 +39,10 @@ function endRow(a: AttemptView): RankedRow | null {
     }
     case "cancelled":
       return { ts, icon: "–", text: "cancelled", rank: LIFECYCLE };
+    case "paused": {
+      const why = PAUSE_REASONS[a.reason ?? ""] ?? reasonLabel(a.reason);
+      return { ts, icon: "⏸", text: `attempt ${a.n} paused${why ? ` · ${why}` : ""} · waiting for approval`, rank: LIFECYCLE };
+    }
   }
 }
 

@@ -4,7 +4,8 @@
 export type JobState =
   | "queued" | "running" | "stopping" | "completed" | "failed" | "cancelled"
   | "awaiting"; // cloud only: submitted, waiting for a person to approve the cost
-export type EndKind = "completed" | "failed" | "preempted" | "cancelled";
+export type EndKind = "completed" | "failed" | "preempted" | "cancelled"
+  | "paused"; // cloud only: stopped at its approved run time or taken back; resumes on approval
 export type Span = [start: number, end: number | null, endKind: EndKind | null];
 
 /** `persist_view` in views.py: what a finished cloud job left in its persist dir, where it went,

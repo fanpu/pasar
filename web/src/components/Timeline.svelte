@@ -305,9 +305,11 @@
   let ctip = $state<CloudTip | null>(null);
 
   function showTip(e: MouseEvent, job: JobView, kind: BlockKind, start: number, end: number) {
+    ctip = null;
     tip = { x: e.clientX + 14, y: e.clientY + 12, job, kind, start, end };
   }
   function showCloudTip(e: MouseEvent, job: JobView, lane: Lane, bar: LaneBar) {
+    tip = null;
     ctip = { x: e.clientX + 14, y: e.clientY + 12, job, lane, bar };
   }
   function hideTip() {

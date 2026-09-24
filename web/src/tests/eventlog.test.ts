@@ -44,6 +44,21 @@ describe("eventRows", () => {
     ]);
   });
 
+  it("says why a cloud attempt paused and that it waits for approval", () => {
+    const detail = jobDetail({
+      id: 9,
+      submit_time: NOW - 5000,
+      submitter: "",
+      attempts: [
+        attempt({ n: 1, job_id: 9, start_time: NOW - 4000, end_time: NOW - 3000, end_kind: "paused", reason: "time_limit" }),
+        attempt({ n: 2, job_id: 9, start_time: NOW - 2000, end_time: NOW - 1000, end_kind: "paused", reason: "cloud_preempted" }),
+      ],
+    });
+    const rows = eventRows(detail, []);
+    expect(rows).toContainEqual({ ts: NOW - 3000, icon: "⏸", text: "attempt 1 paused · out of approved time · waiting for approval" });
+    expect(rows).toContainEqual({ ts: NOW - 1000, icon: "⏸", text: "attempt 2 paused · taken back by the provider · waiting for approval" });
+  });
+
   it("falls back to bare labels with no submitter, no step and no restart cost", () => {
     const detail = jobDetail({
       id: 7,

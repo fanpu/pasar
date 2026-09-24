@@ -1,7 +1,7 @@
 // The cloud lanes under the schedule chart: one row per cloud account with an attempt in view,
 // each attempt a bar on the chart's own time axis. Cloud jobs hold none of this machine's memory,
 // so they stay off the memory chart (see Timeline.svelte) and are drawn here instead.
-import type { JobView } from "./types";
+import type { EndKind, JobView } from "./types";
 
 /** `run`: an attempt still going, drawn solid up to now; `past`: one that has ended. */
 export type LaneBarKind = "run" | "past";
@@ -20,9 +20,8 @@ export interface LaneBar {
   until: number | null;
   /** Its row within the lane: an account may run several attempts at once. */
   row: number;
-  /** How the attempt ended (`spans[i][2]`, which for a cloud attempt may also be `paused`);
-   * `null` while it runs. */
-  endKind: string | null;
+  /** How the attempt ended (`spans[i][2]`); `null` while it runs. */
+  endKind: EndKind | null;
 }
 
 export interface Lane {

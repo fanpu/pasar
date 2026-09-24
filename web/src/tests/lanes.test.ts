@@ -1,6 +1,5 @@
 import { describe, expect, it } from "vitest";
 import { cloudLanes } from "../lib/lanes";
-import type { EndKind } from "../lib/types";
 import { job, NOW } from "./fixtures";
 import { cloudJobView } from "./fixtures/cloud";
 
@@ -48,7 +47,7 @@ describe("cloudLanes", () => {
 
   it("shows a paused job's attempts as separate bars with the gap between them, on one row", () => {
     const [lane] = cloudLanes([
-      cloudJobView({ id: 8, state: "running", spans: [[NOW - 5000, NOW - 4000, "paused" as EndKind], [NOW - 2000, null, null]] }, { approved_seconds: 3000 }),
+      cloudJobView({ id: 8, state: "running", spans: [[NOW - 5000, NOW - 4000, "paused"], [NOW - 2000, null, null]] }, { approved_seconds: 3000 }),
     ], NOW, T0, T1);
     expect(lane.rows).toBe(1);
     expect(lane.bars.map((b) => [b.attempt, b.kind, b.start, b.end])).toEqual([
@@ -60,7 +59,7 @@ describe("cloudLanes", () => {
   it("keeps a resumed attempt on its earlier attempt's row when that row is free", () => {
     const [lane] = cloudLanes([
       cloudJobView({ id: 1, state: "completed", spans: [[NOW - 5000, NOW - 3000, "completed"]] }),
-      cloudJobView({ id: 2, state: "running", spans: [[NOW - 4500, NOW - 4000, "paused" as EndKind], [NOW - 2000, null, null]] }, { approved_seconds: 3600 }),
+      cloudJobView({ id: 2, state: "running", spans: [[NOW - 4500, NOW - 4000, "paused"], [NOW - 2000, null, null]] }, { approved_seconds: 3600 }),
     ], NOW, T0, T1);
     expect(lane.bars.map((b) => [b.id, b.attempt, b.row])).toEqual([[1, 1, 0], [2, 1, 1], [2, 2, 1]]);
   });
