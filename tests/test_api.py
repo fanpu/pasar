@@ -276,6 +276,19 @@ def submit_cloud(client, cloud_cwd, **kw):
     return client.post("/api/jobs", json=body)
 
 
+def test_a_missing_uv_at_submit_is_a_4xx_not_a_500(client, cloud_daemon, cloud_cwd, monkeypatch):
+    # check_platform normally runs through the fake `platform_check` fixture; swap in the real
+    # one so a uv that can't be found exercises the actual BundleError -> ValueError -> 422 path,
+    # rather than the FileNotFoundError this used to be before it was caught.
+    from pasar.cloud.bundle import check_platform
+    monkeypatch.setattr(cloud_daemon, "platform_check", check_platform)
+    monkeypatch.setattr("pasar.cloud.bundle._find_uv", lambda: None)
+    r = submit_cloud(client, cloud_cwd)
+    assert r.status_code == 422
+    detail = r.json()["detail"]
+    assert "uv" in detail and "PASAR_UV" in detail
+
+
 def test_submit_cloud_job_returns_awaiting_with_costs(client, cloud_daemon, cloud_cwd):
     r = submit_cloud(client, cloud_cwd)
     assert r.status_code == 201

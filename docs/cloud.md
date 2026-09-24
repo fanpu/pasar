@@ -657,6 +657,11 @@ sweep has run, and pasar never cleans it up. Delete it yourself once the job has
 The Modal SDK is an optional extra (`pasar[modal]`), imported only when a target uses it, so a
 local-only install stays as it is.
 
+A cloud submit shells out to uv to check the job's lockfile, and looks for it beyond PATH (uv's
+usual install locations, then beside the running Python) since a systemd user service's PATH
+commonly excludes `~/.local/bin`. If pasard still can't find it, set `PASAR_UV` to uv's full path,
+or add it to pasard's PATH with a systemd drop-in (`Environment=PATH=...`).
+
 ## Testing
 
 - **A fake provider** (in-process, running the wrapper as a subprocess) exercises all the shared

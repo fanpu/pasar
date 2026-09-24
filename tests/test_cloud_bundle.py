@@ -1,6 +1,7 @@
 import os
 import shutil
 import subprocess
+import sys
 import tarfile
 
 import pytest
@@ -130,6 +131,65 @@ def test_env_key_is_stable_and_changes_with_lock_contents(tmp_path):
 def test_platform_check_passes_for_this_repo():
     from pasar.cloud.bundle import check_platform
     check_platform(".")            # pasar's own lock resolves for x86_64
+
+
+def _hide_uv(monkeypatch, tmp_path):
+    """Make every way `_find_uv` might locate uv come up empty: no PASAR_UV, nothing on PATH,
+    no install under HOME, and no `uv` beside the interpreter."""
+    monkeypatch.delenv("PASAR_UV", raising=False)
+    monkeypatch.setattr(shutil, "which", lambda name: None)
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setattr(sys, "executable", str(tmp_path / "bin" / "python"))
+
+
+def test_check_platform_without_uv_anywhere_names_path_and_pasar_uv(tmp_path, monkeypatch):
+    from pasar.cloud.bundle import check_platform
+    _hide_uv(monkeypatch, tmp_path)
+    with pytest.raises(BundleError, match="PATH") as exc:
+        check_platform(str(tmp_path))
+    assert "PASAR_UV" in str(exc.value)
+
+
+def test_check_platform_honours_pasar_uv_override(tmp_path, monkeypatch):
+    from pasar.cloud.bundle import check_platform
+    _hide_uv(monkeypatch, tmp_path)
+    override = str(tmp_path / "my-uv")
+    monkeypatch.setenv("PASAR_UV", override)
+    calls = []
+
+    def fake_run(cmd, **kw):
+        calls.append(cmd)
+        return subprocess.CompletedProcess(cmd, 0, b"", b"")
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    check_platform(str(tmp_path))
+    assert calls and calls[0][0] == override
+
+
+def test_find_uv_falls_back_to_local_bin(tmp_path, monkeypatch):
+    from pasar.cloud.bundle import check_platform
+    _hide_uv(monkeypatch, tmp_path)
+    local_uv = tmp_path / ".local" / "bin" / "uv"
+    local_uv.parent.mkdir(parents=True)
+    local_uv.write_text("#!/bin/sh\n")
+    calls = []
+
+    def fake_run(cmd, **kw):
+        calls.append(cmd)
+        return subprocess.CompletedProcess(cmd, 0, b"", b"")
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    check_platform(str(tmp_path))
+    assert calls and calls[0][0] == str(local_uv)
+
+
+def test_check_platform_reports_a_timeout_as_a_bundle_error(tmp_path, monkeypatch):
+    from pasar.cloud.bundle import check_platform
+    monkeypatch.setattr("pasar.cloud.bundle._find_uv", lambda: "uv")
+
+    def fake_run(cmd, **kw):
+        raise subprocess.TimeoutExpired(cmd, kw.get("timeout", 600))
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    with pytest.raises(BundleError, match="uv"):
+        check_platform(str(tmp_path))
 
 
 def test_env_spec_includes_workspace_members(tmp_path):

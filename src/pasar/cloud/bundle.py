@@ -2,7 +2,9 @@
 
 import hashlib
 import os
+import shutil
 import subprocess
+import sys
 import tarfile
 import tomllib
 from dataclasses import dataclass
@@ -242,16 +244,57 @@ def build_bundle(cwd: str, dest: Path, max_bytes: int) -> Bundle:
     return Bundle(dest, root, rel_cwd, EnvSpec(env_files, _env_key(env_files)), total)
 
 
+def _find_uv() -> str | None:
+    """Locate the uv executable, without trusting PATH: pasard runs as a systemd user service,
+    and a service's PATH commonly lacks ~/.local/bin, where uv is usually installed.
+
+    Tried in order: the PASAR_UV environment variable (an explicit override), PATH
+    (`shutil.which`), uv's usual install locations (`~/.local/bin/uv`, `~/.cargo/bin/uv`), and
+    the directory holding the running Python (a uv-managed tool environment keeps its `uv`
+    there too). Returns None if none of these pan out."""
+    override = os.environ.get("PASAR_UV")
+    if override:
+        return override
+    found = shutil.which("uv")
+    if found:
+        return found
+    home = Path.home()
+    for candidate in (home / ".local" / "bin" / "uv", home / ".cargo" / "bin" / "uv"):
+        if candidate.is_file():
+            return str(candidate)
+    sibling = Path(sys.executable).parent / "uv"
+    if sibling.is_file():
+        return str(sibling)
+    return None
+
+
 def check_platform(project_dir: str, platform: str = "x86_64-manylinux_2_28") -> None:
     """Fail at submit if the lockfile can't resolve for the cloud's architecture.
 
     Run inside the project so uv honours its own package indexes; a `uv export` to
     requirements.txt drops them and makes a custom torch index look unsatisfiable.
+
+    Locates uv with `_find_uv` rather than a bare "uv", since pasard's PATH may not reach it;
+    set PASAR_UV to uv's full path to override that search.
     """
-    p = subprocess.run(
-        ["uv", "sync", "--frozen", "--dry-run", "--no-install-project",
-         "--python-platform", platform],
-        cwd=project_dir, capture_output=True, timeout=600, check=False)
+    uv = _find_uv()
+    if uv is None:
+        raise BundleError(
+            "pasard could not find uv, which it needs to check this job's lockfile before a "
+            "cloud submit. Put uv on pasard's PATH (e.g. a systemd drop-in with "
+            "`Environment=PATH=...`) or set PASAR_UV to uv's full path.")
+    try:
+        p = subprocess.run(
+            [uv, "sync", "--frozen", "--dry-run", "--no-install-project",
+             "--python-platform", platform],
+            cwd=project_dir, capture_output=True, timeout=600, check=False)
+    except subprocess.TimeoutExpired:
+        raise BundleError(
+            f"uv ({uv}) did not finish checking this project's lockfile for {platform} within "
+            "600s; try again, or check whether the project's package indexes are reachable"
+        ) from None
+    except OSError as e:
+        raise BundleError(f"could not run uv ({uv}) to check this job's lockfile: {e}") from None
     if p.returncode != 0:
         raise BundleError(
             f"this project's uv.lock does not resolve for {platform}, so it can't run in the "
