@@ -500,10 +500,18 @@ sandbox), `price_rose` (the price moved above what was approved between approval
 provider could not be set up: `failed` if it was running, since its sandbox may still be billing at
 the provider; if it was only waiting, `cancelled` when the target is gone from the config, but left
 where it is — awaiting or queued, unable to be approved or launched — when only its provider
-failed), `rejected` and `approval_expired` (never approved, or approved too late). Any failure while
+failed), `rejected` and `approval_expired` (never approved, or approved too late). A failure while
 packaging, pricing or launching an attempt — a build failure, no capacity, a bad bundle — is
 `launch_error`, the same reason a local job's launch failure gets; there is no separate
-`image_build_error`, `no_capacity` or `cloud_error`. A job blocked on budget or the concurrency cap
+`image_build_error`, `no_capacity` or `cloud_error`. The one exception is `account_unusable`: the
+account refused to start the attempt before any sandbox existed, for a reason that is the
+account's rather than the job's (a workspace past its spend limit, credentials no longer accepted;
+a rate limit or a quota is not one). pasar takes that account out of group choices for an hour. A
+group job that has never run is then moved to a sibling account instead of failing, keeping its
+approval at the agreed rate — or back to **awaiting** with `price_rose` if the sibling charges more
+— and each account gets one try. The job ends `account_unusable` only when it is pinned to the
+account (named to it, or it has run there) or every account it could go to has refused or can't
+take it. A job blocked on budget or the concurrency cap
 while still queued is not an end reason at all: it stays `queued` with the lane's `blocked` value
 (`budget` or `concurrency`) shown alongside it, not written to the job. The existing `gpu_oom`,
 `signal` and `exit` reasons come from the log scan and the wrapper's exit line as usual.

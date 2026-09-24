@@ -227,7 +227,7 @@ These apply to every `pasar` command, not just `wait`:
 | `preempted` | Stopped to make room for a higher-bid job that asked to preempt. It is requeued automatically — this is not a failure. | Nothing to do. |
 
 Cloud jobs have reasons of their own (`time_limit`, `job_cap`, `cloud_preempted`, `price_rose`,
-`pause_limit`, `target_gone`): see `pasar guide cloud`.
+`pause_limit`, `target_gone`, `account_unusable`): see `pasar guide cloud`.
 
 ## Cloud jobs
 

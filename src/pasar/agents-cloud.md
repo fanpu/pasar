@@ -218,7 +218,9 @@ A submit is also refused when:
 - the estimate (`--time` × the rate) is over the job cap. The error names the GPUs on that target
   whose estimate for the same run would fit. Don't shorten `--time` to squeeze under it: the
   estimate should be honest, and the cap covers every later attempt anyway.
-- `--on` named a group and none of its accounts has the month's budget for the job; ask the user.
+- `--on` named a group and none of its accounts will take the job: each is out of the month's
+  budget for it, or is refusing to launch anything (the error says which, per account); ask the
+  user.
 
 ## Approval, and what's waiting
 
@@ -253,7 +255,12 @@ A cloud job goes back to `awaiting` rather than ending when:
 | `time_limit` | Its approved run time ran out before it finished. | Tell the user; they approve it again to carry on. |
 | `job_cap` | It has spent all its lifetime cap (`max_job_cost`). It waits for the user to raise the cap and approve it again, but only for `approval_ttl` (24 h by default; `summary` gives the time): unapproved by then, it is cancelled. Resubmitting starts over from scratch: a new job can't resume from this one's checkpoint, which is pulled home once this job ends. | Tell the user, with the deadline. Never work around it. |
 | `cloud_preempted` | The provider reclaimed the machine (a spot interruption, a host failure). Not a failure. | Tell the user; they approve it again to run again. |
-| `price_rose` | Its price rose past what was approved, between approval and launch. `summary` has the old ceiling and the new price. | Tell the user; they approve again if the new price is fine. |
+| `price_rose` | Its price rose past what was approved, between approval and launch. `summary` has the old ceiling and the new price. Also what a group job gets when its account refused it and it was moved to a sibling that charges more: `summary` says which account refused, why, and where it moved. | Tell the user; they approve again if the new price is fine. |
+
+If a group job's account refuses to start it (`account_unusable`, below) before it has ever run,
+pasar moves it to another account in the group and it stays approved: its `spec.target` changes
+and the refused attempt stays in its history. Only a job that has never run is moved, and each
+account gets one try.
 
 An approved job starts a fresh attempt from the same code snapshot, with `PASAR_RESUMING=1`. It
 resumes from its last checkpoint if it wrote one under `pasar_job.persist_dir()`, or starts over
@@ -265,6 +272,7 @@ Cloud-only terminal reasons:
 | Reason | What happened | What to do |
 |---|---|---|
 | `pause_limit` | It ran out of its approved time for the 5th time in its life (every `time_limit` pause counts, not only ones in a row) without finishing. One pause is not a failure, but 5 means `--time` was far too short or it isn't resuming. | Check that it checkpoints and resumes, then ask about resubmitting with a `--time` for the whole run. A resubmit starts over; this job's checkpoints are pulled home. |
+| `account_unusable` | Its account refused to start it before any sandbox existed, so nothing was spent. The account itself can't run anything right now: a workspace past its spend limit (its billing can still look fine) or credentials Modal no longer accepts. Only a job pinned to that account ends this way: one named to it by `--on <account>`, or one that has already run there. A group job that never ran is moved instead (see above), and fails only once every account it could go to refused or couldn't take it; `summary` lists each account and its reason. pasar skips that account for new group submits for an hour, then tries it again. | Tell the user which account refused and why: they raise that workspace's spend limit, or fix its credentials. Then resubmit. |
 | `target_gone` | Its target is no longer configured here, or its provider could not be set up (often a bad `~/.modal.toml`; pasard's log says which). `failed` if it was running: its sandbox may still be billing, so tell the user to end it at the provider. A waiting job is left waiting when only the provider failed, and `cancelled` when the target left the config; its summary says whether anything was spent and where earlier attempts' files are. | Tell the user what the summary says to fix. |
 
 ## Getting results back
