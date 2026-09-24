@@ -411,6 +411,8 @@ describe("JobTable", () => {
       const cloudRow = Array.from(rows).find((r) => r.querySelector(".jname")?.textContent === "sweep-wd-3");
       expect(localRow?.querySelector(".cloudbadge")).toBeNull();
       expect(cloudRow?.querySelector(".cloudbadge")).not.toBeNull();
+      // Named for a screen reader too, not only in a hover title.
+      expect(within(cloudRow as HTMLElement).getByRole("img", { name: "runs in the cloud on modal-a" })).toBeInTheDocument();
     });
 
     it("shows GPU · target in the memory column for a cloud job instead of GiB", () => {

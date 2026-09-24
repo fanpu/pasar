@@ -244,7 +244,7 @@ describe("App", () => {
       FakeEventSource.last!.emit({ status: status(), jobs: [awaitingFresh], cloud: cloudBlock() });
       const card = await screen.findByRole("region", { name: "Cloud" });
       const row = card.querySelector<HTMLElement>(`[data-job="${awaitingFresh.id}"]`)!;
-      await fireEvent.click(within(row).getByRole("button", { name: "Reject" }));
+      await fireEvent.click(within(row).getByRole("button", { name: /^Reject/ }));
       const ask = await screen.findByRole("dialog", { name: `Reject #${awaitingFresh.id}?` });
       await fireEvent.click(within(ask).getByRole("button", { name: "Reject" }));
       await waitFor(() => expect(screen.getByRole("status")).toHaveTextContent(`#${awaitingFresh.id} rejected`));

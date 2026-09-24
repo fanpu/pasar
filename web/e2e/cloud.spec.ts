@@ -31,7 +31,7 @@ test("approving a cloud job goes through the dialog and its worst case", async (
   await expect(row).toContainText("e2e-approve");
   await expect(row).toContainText(/up to \$\d+\.\d\d/);
 
-  await row.getByRole("button", { name: "Approve…" }).click();
+  await row.getByRole("button", { name: /^Approve…/ }).click();
   const dialog = page.getByRole("dialog", { name: `Approve #${id} e2e-approve?` });
   await expect(dialog).toBeVisible();
   await expect(dialog).toContainText("H100 on modal-a · First Owner's account");
@@ -54,7 +54,7 @@ test("reject asks first, and Keep it keeps the job waiting", async ({ page, requ
   const row = awaitingRow(page, id);
   await expect(row).toBeVisible({ timeout: 15_000 });
 
-  await row.getByRole("button", { name: "Reject", exact: true }).click();
+  await row.getByRole("button", { name: /^Reject #/ }).click();
   const ask = page.getByRole("dialog", { name: `Reject #${id}?` });
   await expect(ask).toContainText(`Reject #${id}? It won't run.`);
   await ask.getByRole("button", { name: "Keep it" }).click();
@@ -62,7 +62,7 @@ test("reject asks first, and Keep it keeps the job waiting", async ({ page, requ
   await expect(row).toBeVisible();
   expect(await stateOf(request, id)).toBe("awaiting");
 
-  await row.getByRole("button", { name: "Reject", exact: true }).click();
+  await row.getByRole("button", { name: /^Reject #/ }).click();
   await ask.getByRole("button", { name: "Reject", exact: true }).click();
   await expect(ask).toBeHidden();
   await expect(row).toHaveCount(0);

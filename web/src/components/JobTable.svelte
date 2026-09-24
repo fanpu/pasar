@@ -226,7 +226,7 @@
 
 {#snippet cloudBadge(job: JobView)}
   {#if job.cloud !== null}
-    <span class="cloudbadge" title="runs in the cloud · {job.cloud.target}">
+    <span class="cloudbadge" role="img" aria-label="runs in the cloud on {job.cloud.target}" title="runs in the cloud · {job.cloud.target}">
       <svg viewBox="0 0 24 24" width="13" height="13" aria-hidden="true" focusable="false">
         <path d="M7 18a4 4 0 0 1-.6-7.96 5 5 0 0 1 9.44-2A4.5 4.5 0 0 1 17.5 18H7Z" fill="currentColor" />
       </svg>

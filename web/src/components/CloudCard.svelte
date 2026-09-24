@@ -171,8 +171,10 @@
               {#if why}<div class="reason">{why}</div>{/if}
             </div>
             <div class="racts">
-              <button class="btn primary small" type="button" onclick={() => (approving = { id: job.id, extend: false })}>Approve…</button>
-              <button class="btn quiet small" type="button" onclick={() => askReject(job)}>Reject</button>
+              <button class="btn primary small" type="button" aria-label="Approve… #{job.id} {job.name}"
+                onclick={() => (approving = { id: job.id, extend: false })}>Approve…</button>
+              <button class="btn quiet small" type="button" aria-label="Reject #{job.id} {job.name}"
+                onclick={() => askReject(job)}>Reject</button>
             </div>
           </div>
         {/each}
@@ -216,7 +218,8 @@
                 <a class="dash" href={c.console_url} target="_blank" rel="noopener noreferrer">Modal ↗</a>
               {/if}
               {#if flag}
-                <button class="btn small" type="button" onclick={() => (approving = { id: job.id, extend: true })}>Give more time…</button>
+                <button class="btn small" type="button" aria-label="Give more time… #{job.id} {job.name}"
+                  onclick={() => (approving = { id: job.id, extend: true })}>Give more time…</button>
               {/if}
             </div>
           </div>
