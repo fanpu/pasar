@@ -7,14 +7,17 @@ import os
 import shlex
 import sys
 import time
+from dataclasses import asdict
 
 import httpx
 
-from pasar.config import DEFAULT_ADDRESS
+from pasar.cloud.check import CloudCheckResult, check_targets
+from pasar.config import DEFAULT_ADDRESS, load_config
 from pasar.guide import TOPICS, load_guide
 from pasar.units import fmt_duration, fmt_gib
 
 EX_USAGE, EX_UNAVAILABLE, EX_API = 64, 69, 70
+EX_CLOUD_CHECK = 1  # pasar cloud check: a target is unusable, or two share a workspace
 WAIT_TIMEOUT = 4
 OOM_REASONS = {"oom", "gpu_oom", "kernel_oom"}
 
@@ -88,7 +91,10 @@ def _mem(job: dict) -> str:
     if cloud is not None:
         label = cloud["gpu"] or cloud["target"]
         cost = cloud.get("estimated_cost")
-        return f"{label} (~{_money(cost)})" if cost is not None else label
+        bits = [f"~{_money(cost)}"] if cost is not None else []
+        if cloud.get("owner"):
+            bits.append(cloud["owner"])
+        return f"{label} ({' · '.join(bits)})" if bits else label
     if job["mode"] == "whole":
         return "whole GPU"
     if job.get("usage") is not None:
@@ -219,7 +225,8 @@ def print_job(job: dict) -> None:
         # `phase` is the live attempt's own, and is absent between attempts; the job's state is
         # already on its own line, so there is nothing to fall back to and nothing to repeat.
         where = f" · {cloud['phase']}" if cloud["phase"] else ""
-        fields.append(("cloud", f"{cloud['target']} · {cloud['gpu']}{where}"))
+        owner = f" ({cloud['owner']}'s account)" if cloud.get("owner") else ""
+        fields.append(("cloud", f"{cloud['target']}{owner} · {cloud['gpu']}{where}"))
         fields.append(("cost", cost))
         fields.append(("approved", _approved_run(cloud)))
         if cloud.get("job_cap") is not None:
@@ -258,17 +265,22 @@ def print_cloud(body: dict) -> None:
     if not targets:
         print("no cloud targets configured")
     else:
-        rows = [("TARGET", "PROVIDER", "RUNNING", "TODAY", "MONTH", "JOB CAP", "STORED",
-                 "RATES")]
+        rows = [("TARGET", "OWNER", "GROUP", "PROVIDER", "RUNNING", "TODAY", "MONTH", "JOB CAP",
+                 "STORED", "RATES")]
         for t in targets:
             today = f"{_money(t['spent_today'])} / {_money(t['daily_budget'])}"
             month = f"{_money(t['spent_month'])} / {_money(t['monthly_budget'])}"
+            # pasar's own budget, then the provider's own books where pasard has read them.
+            if t.get("budget_exhausted"):
+                month += " (budget exhausted)"
+            if t.get("credit_exhausted"):
+                month += " (credit exhausted)"
             running = f"{t['running']}/{t['max_running']}"
             rates = _extra_rates(t["rates"])
             name = t["name"] + ("" if t["configured"] else " (no provider)")
             stored = f"{fmt_gib(t['known_stored_bytes'])} ({t['known_stored_jobs']} job(s))"
-            rows.append((name, t["provider"], running, today, month,
-                         _money(t.get("max_job_cost")), stored, rates))
+            rows.append((name, t.get("owner") or "-", t.get("group") or "-", t["provider"],
+                        running, today, month, _money(t.get("max_job_cost")), stored, rates))
         widths = [max(len(r[i]) for r in rows) for i in range(len(rows[0]))]
         for r in rows:
             print("  ".join(c.ljust(w) for c, w in zip(r, widths)).rstrip())
@@ -300,6 +312,37 @@ def print_cloud(body: dict) -> None:
         print_table(needs_time)
     else:
         print("nothing running past its approved pace")
+
+
+def print_cloud_check(result: CloudCheckResult) -> None:
+    if not result.targets:
+        print("no cloud targets with a profile configured")
+        return
+    # LEFT OF BUDGET is pasar's own monthly budget for the target less what Modal says is used,
+    # not Modal's own allowance, which its billing summary does not report.
+    rows = [("TARGET", "OWNER", "GROUP", "WORKSPACE", "STATUS", "CREDIT USED", "LEFT OF BUDGET",
+             "CYCLE")]
+    for t in result.targets:
+        status = "ok" if t.ok else f"UNUSABLE: {t.error}"
+        if t.exhausted:
+            status += " (credit exhausted)"
+        used = _money(t.credit_used) if t.credit_used is not None else "?"
+        left = _money(t.budget_left) if t.budget_left is not None else "?"
+        cycle = (f"{_clock(t.cycle_start)}..{_clock(t.cycle_end)}"
+                 if t.cycle_start is not None and t.cycle_end is not None else "?")
+        rows.append((t.name, t.owner, t.group or "-", t.workspace or "-", status, used, left,
+                    cycle))
+    widths = [max(len(r[i]) for r in rows) for i in range(len(rows[0]))]
+    for r in rows:
+        print("  ".join(c.ljust(w) for c, w in zip(r, widths)).rstrip())
+    for ws, names in sorted(result.collisions.items()):
+        print(f"\nWARNING: {', '.join(sorted(names))} all reach the same workspace ({ws}); "
+              "headroom() would count its allowance once per target, so the group could "
+              "overspend. Configure only one target for it.")
+    if result.ok:
+        print("\nevery target checked out")
+    else:
+        print("\nsee above: some target needs attention")
 
 
 def build_parser() -> Parser:
@@ -380,7 +423,12 @@ def build_parser() -> Parser:
     pl.add_argument("--keep", action="store_true", help="leave the remote copy in place instead of deleting it once verified")
 
     add("status", "machine and memory pool status")
-    add("cloud", "cloud targets: budgets, spend, rates and jobs awaiting approval")
+    c = add("cloud", "cloud targets: budgets, spend, rates and jobs awaiting approval")
+    csub = c.add_subparsers(dest="cloud_cmd")
+    chk = csub.add_parser("check", help="verify every configured target's profile, workspace "
+                          "and credit; exits non-zero if any is unusable or two share a "
+                          "workspace. Works without a daemon running")
+    chk.add_argument("--json", action="store_true", help="machine-readable output")
     g = sub.add_parser("guide", help="print the agent guide (works without a daemon running)")
     g.add_argument("topic", nargs="?", choices=sorted(TOPICS),
                    help="print one topic's guide instead, e.g. `cloud` before any cloud work")
@@ -391,6 +439,16 @@ def run(args, client: httpx.Client) -> int:
     if args.cmd == "guide":
         sys.stdout.write(load_guide(args.topic))
         return 0
+    if args.cmd == "cloud" and getattr(args, "cloud_cmd", None) == "check":
+        # Never talks to pasard: it reads pasar's own config file directly, so it still works as
+        # a health check when pasard is down.
+        result = check_targets(sorted(load_config().clouds.values(), key=lambda t: t.group))
+        if args.json:
+            print(json.dumps({"ok": result.ok, "collisions": result.collisions,
+                              "targets": [asdict(t) for t in result.targets]}, indent=2))
+        else:
+            print_cloud_check(result)
+        return 0 if result.ok else EX_CLOUD_CHECK
     out = (lambda obj: print(json.dumps(obj, indent=2))) if args.json else None
     if args.cmd == "submit":
         command = args.command[1:] if args.command[:1] == ["--"] else args.command

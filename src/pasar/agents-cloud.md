@@ -234,8 +234,8 @@ only once a person approves it. `pasar cloud [--json]` shows each target, its bu
 cap, its GPUs and what's waiting (prices elided here):
 
     $ pasar cloud
-    TARGET  PROVIDER  RUNNING  TODAY          MONTH           JOB CAP  STORED              RATES
-    modal   modal     1/2      $… / $50.00    $… / $300.00    $10.00   0.0 GiB (0 job(s))  cpu_hour_cost_sandbox=$…, ...
+    TARGET  OWNER  GROUP  PROVIDER  RUNNING  TODAY          MONTH           JOB CAP  STORED              RATES
+    modal   alice  -      modal     1/2      $… / $50.00    $… / $300.00    $10.00   0.0 GiB (0 job(s))  cpu_hour_cost_sandbox=$…, ...
 
     modal GPUs (what --gpu accepts):
       GPU        $/HOUR  MEMORY
@@ -250,6 +250,22 @@ cap, its GPUs and what's waiting (prices elided here):
 Even an approved job starts only if it fits the target's daily and monthly budgets (TODAY and
 MONTH); otherwise it waits in the queue, blocked on `budget`. At most RUNNING's second number
 run at once.
+
+OWNER says whose credit a target spends; GROUP is the group (if any) it belongs to. A job's own
+`cloud` object carries the same two fields, so a job detail view can say whose account it ran on.
+MONTH ends in `(budget exhausted)` once pasar's own budget for the target is spent, and in
+`(credit exhausted)` once the provider's own books say the account's free allowance is gone (only
+where pasard has read them). In `--json`, a target's `budget_exhausted` is the first,
+`credit_exhausted`, `credit_used` and `credit_as_of` the second; the credit fields are `null`
+when pasard doesn't know.
+
+If a job on a target is refused right after it was approved, or a target that should work reports
+no provider, `pasar cloud check` re-runs the account survey: for each target with a `profile`, it
+authenticates, reads which workspace the token reaches (loudly, if two targets share one — that
+means one allowance counted twice), and how much credit is used. LEFT OF BUDGET is the target's
+monthly budget in pasar's config less that, not the provider's own allowance. It exits non-zero on any problem,
+so it doubles as a health check; it never prints a token, and reports rather than raises when
+`modal` is not installed.
 
 ## Pauses, and why a cloud job ended
 
@@ -313,6 +329,8 @@ jobs:
 - `approved_seconds`/`full_seconds`: the run time one approval buys, and what it would buy
   without the dollar caps.
 - `job_cap`/`job_spent`: the job's lifetime cap and what its attempts have spent so far.
+- `owner`/`group`: whose credit this runs on, and which group (if any) its target belongs to —
+  both `null` once the target is no longer configured, like `job_cap`.
 - `console_url`: only while the daemon is watching the attempt.
 - `needs_more_time`: extra seconds a running attempt's own pace projects past its approved run
   time, or `null` when it's on pace or there isn't enough progress yet to judge (that takes 5

@@ -332,12 +332,27 @@ class FakeSDK:
         self.volume_clients = []
         self.workspace_clients = []
         self.list_clients = []
+        # -- pasar.cloud.check's own surface (Task 0/8's repeatable survey), keyed by token_id
+        # like `clients` above.
+        self.verify_calls: list[tuple[str, tuple]] = []
+        self.verify_errors: dict[str, str] = {}       # token_id -> why Client.verify refuses
+        self.workspace_names: dict[str, str] = {}      # token_id -> Workspace.from_context.name
+        self.billing_summaries: dict[str, FakeBillingSummary] = {}  # token_id -> its own summary
+        self.billing_errors: dict[str, str] = {}       # token_id -> why billing.summary() fails
+        self.config = type("Config", (), {"config": {"server_url": "https://fake.modal.test"}})()
         sdk = self
 
         class Client:
             @staticmethod
             def from_credentials(token_id, token_secret):
                 return sdk.clients.setdefault(token_id, FakeClient(token_id, token_secret))
+
+            @staticmethod
+            def verify(server_url, credentials):
+                token_id, _ = credentials
+                sdk.verify_calls.append((server_url, credentials))
+                if token_id in sdk.verify_errors:
+                    raise RuntimeError(sdk.verify_errors[token_id])
 
         class Sandbox:
             @staticmethod
@@ -385,15 +400,23 @@ class FakeSDK:
             @staticmethod
             def from_context(*, client=None):
                 sdk.workspace_clients.append(client)
+                token_id = getattr(client, "token_id", None)
+                name = sdk.workspace_names.get(token_id, token_id)
 
                 def summary(cycle=None):
+                    # One account's own figure (`pasar.cloud.check` reads several), else the
+                    # one every account shares.
+                    if token_id in sdk.billing_errors:
+                        raise RuntimeError(sdk.billing_errors[token_id])
                     if sdk.billing_error:
                         raise RuntimeError(sdk.billing_error)
-                    return sdk.billing_summary
+                    return sdk.billing_summaries.get(token_id, sdk.billing_summary)
 
                 class _W:
-                    billing = type("B", (), {"rates": staticmethod(lambda: dict(sdk.rates_value)),
-                                             "summary": staticmethod(summary)})
+                    pass
+                _W.name = name
+                _W.billing = type("B", (), {"rates": staticmethod(lambda: dict(sdk.rates_value)),
+                                            "summary": staticmethod(summary)})
                 return _W()
 
         class Types:

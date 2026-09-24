@@ -2595,6 +2595,83 @@ def test_the_cloud_status_says_whose_account_pays_for_each_target(make_cloud, cl
     assert target["owner"] == "First Owner"
 
 
+def test_the_cloud_status_says_which_group_a_target_belongs_to(make_cloud, clock):
+    daemon, _ = make_cloud(group="modal")
+    [target] = cloud_status_view(daemon, clock.t, {})["targets"]
+    assert target["group"] == "modal"
+
+
+def test_the_cloud_status_reports_what_is_left_of_the_tighter_budget(make_cloud, clock):
+    daemon, _ = make_cloud(daily_budget=5.0, monthly_budget=50.0)
+    spent(daemon, "fake", 2.0)
+    [target] = cloud_status_view(daemon, clock.t, {})["targets"]
+    # The daily budget is the tighter one: $5 - $2 spent = $3 left, not the monthly $48.
+    assert target["left"] == pytest.approx(3.0)
+    assert target["budget_exhausted"] is False
+
+
+def test_the_cloud_status_says_a_target_is_exhausted_once_its_tighter_budget_is_spent(make_cloud,
+                                                                                      clock):
+    daemon, _ = make_cloud(daily_budget=50.0, monthly_budget=2.0)
+    spent(daemon, "fake", 2.0)
+    [target] = cloud_status_view(daemon, clock.t, {})["targets"]
+    assert target["left"] == 0.0
+    assert target["budget_exhausted"] is True
+    # pasar's budget, not the provider's books: those it has not read, so it does not know.
+    assert target["credit_exhausted"] is None
+
+
+def test_the_cloud_status_shows_the_providers_own_credit_figure_once_read(make_cloud, clock):
+    daemon, provider = make_cloud(FakeProvider().with_credit(used=7.5, exhausted=True))
+    pending = []
+    daemon.credit_background = pending.append
+    [target] = cloud_status_view(daemon, clock.t, {})["targets"]
+    # Nothing read yet, and the view is not what starts a read: unknown, not zero.
+    assert (target["credit_used"], target["credit_exhausted"], target["credit_as_of"]) == (
+        None, None, None)
+    assert pending == [] and provider.credit_calls == 0
+    daemon.cloud_credit(daemon.cfg.clouds["fake"])  # what the tick does
+    pending.pop()()
+    [target] = cloud_status_view(daemon, clock.t, {})["targets"]
+    assert target["credit_used"] == 7.5 and target["credit_exhausted"] is True
+    assert target["credit_as_of"] == clock.t
+    assert target["budget_exhausted"] is False  # the ledger has seen none of it
+    assert provider.credit_calls == 1
+
+
+def test_targets_are_listed_by_group_then_config_order(tmp_path, clock, executor, probe,
+                                                        platform_check):
+    # Config order: solo (no group), modal-b, modal-a -- deliberately not alphabetical, so a
+    # plain name sort would get this wrong. Grouped targets stay together, in the order they
+    # were written; the ungrouped one (group "") sorts first.
+    base = {"provider": "modal", "daily_budget": 30.0, "monthly_budget": 30.0}
+    cfg = Config(clouds={
+        "solo": CloudTarget(name="solo", **base),
+        "modal-b": CloudTarget(name="modal-b", group="modal", **base),
+        "modal-a": CloudTarget(name="modal-a", group="modal", **base),
+    })
+    data = tmp_path / "order-data"
+    data.mkdir()
+    daemon = Daemon(cfg, Store(data / "pasar.db"), executor, probe, data, clock=clock,
+                    platform_check=platform_check, background=run_now)
+    names = [t["name"] for t in cloud_status_view(daemon, clock.t, {})["targets"]]
+    assert names == ["solo", "modal-b", "modal-a"]
+
+
+def test_a_jobs_cloud_view_says_whose_account_and_group_its_on(grouped, repo):
+    job = grouped.submit(cloud_spec(repo, target="modal-a", est_runtime=600))
+    view = cloud_view(grouped, job)
+    assert view["owner"] == "alice" and view["group"] == "modal"
+
+
+def test_a_jobs_cloud_view_has_no_owner_once_its_target_is_gone(cloud, repo):
+    daemon, _ = cloud
+    job = daemon.submit(cloud_spec(repo))
+    daemon.cfg.clouds = {}  # the target vanished from config, like job_cap already handles
+    view = cloud_view(daemon, daemon.job(job.id))
+    assert view["owner"] is None and view["group"] is None
+
+
 # ---- the per-job lifetime cap
 
 H100_RATE = hourly_rate(FakeProvider().rates(), "h100", 1)  # $5.278/hour

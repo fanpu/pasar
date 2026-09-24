@@ -1,6 +1,6 @@
 <script lang="ts">
   import * as api from "../lib/api";
-  import { gpuLabel, money, persistLine, phaseLook, whyBack } from "../lib/cloud";
+  import { gpuLabel, money, ownerNote, persistLine, phaseLook, whyBack } from "../lib/cloud";
   import { jobColor } from "../lib/colors";
   import { dur } from "../lib/format";
   import type { CloudBlock, CloudTarget, JobView } from "../lib/types";
@@ -64,7 +64,7 @@
 
   function targetLine(t: CloudTarget): string {
     const name = t.configured ? t.name : `${t.name} (not set up)`;
-    return `${name} · ${money(t.spent_today)} today / ${money(t.daily_budget)} · `
+    return `${name}${ownerNote(t.owner)} · ${money(t.spent_today)} today / ${money(t.daily_budget)} · `
       + `${money(t.spent_month)} this month / ${money(t.monthly_budget)} · job cap ${money(t.max_job_cost)}`;
   }
 
@@ -175,7 +175,7 @@
             </div>
             <div class="specs">
               {gpuLabel(c, targetOf(job))}
-              <span class="faint">{c.target}</span>
+              <span class="faint">{c.target}{ownerNote(c.owner)}</span>
             </div>
             <div class="money">
               <div class="est">{priceLine(job)}</div>
@@ -206,7 +206,7 @@
             <JobChip id={job.id} tags={job.tags} />
             <div class="who">
               <button type="button" class="jname link" onclick={() => onopen(job.id)}>{job.name}</button>
-              <div class="jsub">{job.submitter} · {c.target}</div>
+              <div class="jsub">{job.submitter} · {c.target}{ownerNote(c.owner)}</div>
               {#if flag}<span class="needsmore">needs ~{dur(c.needs_more_time!)} more</span>{/if}
             </div>
             <div class="phase-wrap">
@@ -253,7 +253,7 @@
             <JobChip id={job.id} tags={job.tags} />
             <div class="who">
               <button type="button" class="jname link" onclick={() => onopen(job.id)}>{job.name}</button>
-              <div class="jsub">{job.submitter} · {c.target}</div>
+              <div class="jsub">{job.submitter} · {c.target}{ownerNote(c.owner)}</div>
             </div>
             <div class="phase-wrap"><StatePill {job} /></div>
             <div class="money"><div class="cap">{persistLine(c.persist, c.target)}</div></div>

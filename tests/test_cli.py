@@ -1,5 +1,6 @@
 import json
 import time
+from dataclasses import replace
 
 import httpx
 import pytest
@@ -7,6 +8,7 @@ from fastapi.testclient import TestClient
 
 from pasar.api import create_app
 from pasar.cli import ApiError, base_url, call, main, wait_code
+from pasar.cloud.base import Credit
 from pasar.cloud.executor import parse_unit
 from pasar.cloud.pace import MIN_REPORTS
 from pasar.units import GiB
@@ -281,6 +283,26 @@ def test_ls_shows_cloud_cost(client, capsys, cloud_daemon, cloud_cwd, monkeypatc
     assert code == 0 and "awaiting" in out.out and "H100" in out.out and "$" in out.out
 
 
+def test_ls_names_the_account_owner_next_to_the_cost(client, capsys, cloud_daemon, cloud_cwd,
+                                                      monkeypatch):
+    cloud_daemon.cfg.clouds["fake"] = replace(cloud_daemon.cfg.clouds["fake"], owner="alice")
+    monkeypatch.chdir(cloud_cwd)
+    run(client, capsys, "submit", "--time", "1h", "--on", "fake", "--gpu", "H100", "--",
+        "python", "-c", "pass")
+    code, out = run(client, capsys, "ls")
+    assert code == 0 and "alice" in out.out
+
+
+def test_show_names_the_account_owner_on_the_cloud_line(client, capsys, cloud_daemon, cloud_cwd,
+                                                         monkeypatch):
+    cloud_daemon.cfg.clouds["fake"] = replace(cloud_daemon.cfg.clouds["fake"], owner="alice")
+    monkeypatch.chdir(cloud_cwd)
+    run(client, capsys, "submit", "--time", "1h", "--on", "fake", "--gpu", "H100", "--",
+        "python", "-c", "pass")
+    code, out = run(client, capsys, "show", "1")
+    assert code == 0 and "fake (alice's account) · H100" in out.out
+
+
 def test_restart_of_a_cloud_job_gives_the_equivalent_submit_command(client, capsys, cloud_daemon,
                                                                      cloud_cwd, monkeypatch):
     monkeypatch.chdir(cloud_cwd)
@@ -349,6 +371,76 @@ def test_cloud_command_text_and_json(client, capsys, cloud_daemon, cloud_cwd, mo
     assert body["targets"][0]["name"] == "fake"
     assert len(body["awaiting"]) == 1
     assert body["needs_time"] == []
+
+
+def test_cloud_command_shows_owner_and_group_columns(client, capsys, cloud_daemon, cloud_cwd,
+                                                      monkeypatch):
+    cloud_daemon.cfg.clouds["fake"] = replace(cloud_daemon.cfg.clouds["fake"], owner="alice",
+                                              group="modal")
+    monkeypatch.chdir(cloud_cwd)
+    code, out = run(client, capsys, "cloud")
+    assert code == 0
+    header, row = out.out.splitlines()[0], out.out.splitlines()[1]
+    assert "OWNER" in header and "GROUP" in header
+    assert "alice" in row and "modal" in row
+
+
+def test_cloud_command_says_when_the_providers_own_books_say_credit_is_exhausted(
+        client, capsys, cloud_daemon, cloud_cwd, monkeypatch):
+    monkeypatch.chdir(cloud_cwd)
+    code, out = run(client, capsys, "cloud")
+    assert code == 0 and "exhausted" not in out.out  # unknown is not exhausted
+    books = Credit(used=31.0, limit=None, exhausted=True, cycle_start=0.0, cycle_end=4e9)
+    monkeypatch.setattr(cloud_daemon, "cached_credit", lambda target: (1.0, books))
+    code, out = run(client, capsys, "cloud")
+    assert code == 0
+    row = out.out.splitlines()[1]
+    assert "(credit exhausted)" in row and "(budget exhausted)" not in row
+    body = json.loads(run(client, capsys, "cloud", "--json")[1].out)
+    t = body["targets"][0]
+    assert (t["credit_used"], t["credit_exhausted"], t["credit_as_of"]) == (31.0, True, 1.0)
+    assert t["budget_exhausted"] is False
+
+
+def _write_cloud_config(tmp_path, monkeypatch, **kw):
+    """A `~/.config/pasar/config.toml` with one `[clouds.modal-a]` block, for `pasar cloud
+    check` -- which reads pasar's own config file directly, never the daemon."""
+    cfg_dir = tmp_path / "cfg" / "pasar"
+    cfg_dir.mkdir(parents=True)
+    extra = "\n".join(f'{k} = "{v}"' for k, v in kw.items())
+    (cfg_dir / "config.toml").write_text(
+        '[clouds.modal-a]\nprovider = "modal"\nprofile = "alice"\nowner = "alice"\n'
+        'budget = { monthly = 30.0 }\n' + extra + "\n")
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "cfg"))
+
+
+def test_cloud_check_has_nothing_to_check_with_no_profiles(client, capsys, tmp_path, monkeypatch):
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "empty"))
+    code, out = run(client, capsys, "cloud", "check")
+    assert code == 0 and "no cloud targets with a profile configured" in out.out
+
+
+def test_cloud_check_reports_modal_not_installed_and_exits_nonzero(client, capsys, tmp_path,
+                                                                    monkeypatch):
+    # `modal` is not installed in this test environment, and never should be for the unit suite
+    # (it stays an optional dependency) -- so this exercises the real "not installed" path
+    # end-to-end, with no fake SDK needed.
+    _write_cloud_config(tmp_path, monkeypatch)
+    code, out = run(client, capsys, "cloud", "check")
+    assert code == 1
+    assert "modal-a" in out.out and "alice" in out.out and "modal is not installed" in out.out
+
+
+def test_cloud_check_json(client, capsys, tmp_path, monkeypatch):
+    _write_cloud_config(tmp_path, monkeypatch)
+    code, out = run(client, capsys, "cloud", "check", "--json")
+    assert code == 1
+    body = json.loads(out.out)
+    assert body["ok"] is False
+    assert body["targets"][0]["name"] == "modal-a"
+    assert body["targets"][0]["owner"] == "alice"
+    assert body["targets"][0]["error"] == "modal is not installed"
+    assert body["collisions"] == {}
 
 
 def test_cloud_command_lists_gpus_as_clean_rows(client, capsys, cloud_daemon, cloud_cwd,

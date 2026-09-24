@@ -422,7 +422,7 @@ describe("JobPanel", () => {
       const block = within(container.querySelector(".cloudblock")!);
       expect(block.getByText("Cloud")).toBeInTheDocument();
       expect(block.getByText("modal-a")).toBeInTheDocument();
-      expect(block.getByText("H100")).toBeInTheDocument();
+      expect(block.getByText("H100 · First Owner's account")).toBeInTheDocument();
       expect(block.getByText("running")).toBeInTheDocument();
       expect(block.getByText("$5.00")).toBeInTheDocument();
       expect(block.getByText("up to $7.00")).toBeInTheDocument();

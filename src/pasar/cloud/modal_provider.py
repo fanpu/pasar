@@ -130,6 +130,19 @@ class _Box:
             return self.snap.phase in TERMINAL
 
 
+def credit_of(summary) -> Credit:
+    """A Modal `WorkspaceBillingSummary` as a `Credit`: the one place its figures are read, for
+    the daemon (`ModalProvider.credit`) and `pasar cloud check` alike, so the two never disagree.
+
+    `used` is the larger of `metered_cost` and the sum of its own breakdown, and `exhausted` is
+    `billed_cost > 0`: see `ModalProvider.credit` for why. Raises on a summary missing any of
+    these, which a caller reports as a figure it could not read."""
+    used = max(float(summary.metered_cost),
+               sum(float(v) for v in summary.metered_cost_breakdown.values()))
+    return Credit(used=used, limit=None, exhausted=float(summary.billed_cost) > 0,
+                  cycle_start=summary.start.timestamp(), cycle_end=summary.end.timestamp())
+
+
 class ModalProvider:
     name = "modal"
     caps = Capabilities(graceful_stop=True, replay_output=True, billing=False, credit=True)
@@ -646,13 +659,10 @@ class ModalProvider:
         signal here that does not depend on anybody's arithmetic. `used` is the larger of
         `metered_cost` and the sum of its own breakdown, because on a real account the two
         disagreed and nothing yet shows which one GPU time lands in; counting too much only
-        makes a group pick a different account, counting too little bills somebody."""
+        makes a group pick a different account, counting too little bills somebody. See
+        `credit_of`, which `pasar cloud check` reads the same summary through."""
         try:
-            s = self.sdk.Workspace.from_context(client=self.client).billing.summary()
-            used = max(float(s.metered_cost),
-                       sum(float(v) for v in s.metered_cost_breakdown.values()))
-            return Credit(used=used, limit=None, exhausted=float(s.billed_cost) > 0,
-                          cycle_start=s.start.timestamp(), cycle_end=s.end.timestamp())
+            return credit_of(self.sdk.Workspace.from_context(client=self.client).billing.summary())
         except Exception:
             # The ledger's own figure still gates every launch; this only adds what pasar could
             # not see. A billing API that is down is not a reason to stop running jobs.

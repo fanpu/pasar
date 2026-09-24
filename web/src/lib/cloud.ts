@@ -34,6 +34,12 @@ export function gpuLabel(c: CloudJob, target: CloudTarget | null | undefined): s
   return g?.memory_gb != null ? `${c.gpu} · ${g.memory_gb}GB` : c.gpu;
 }
 
+/** " · <owner>'s account" next to wherever the account is already named; "" when the owner is
+ * unknown (the job's target is no longer configured). */
+export function ownerNote(owner: string | null | undefined): string {
+  return owner ? ` · ${owner}'s account` : "";
+}
+
 // Why an awaiting job came back to a person, for jobs whose `summary` is empty.
 const BACK_REASONS: Record<string, string> = {
   time_limit: "paused at its approved run time",

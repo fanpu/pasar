@@ -321,6 +321,19 @@ class Daemon:
             return None
         return cached[1]
 
+    def cached_credit(self, target: CloudTarget) -> tuple[float, Credit] | None:
+        """The figure `cloud_credit` would serve for `target`, with the time it was read, or
+        None when it would serve none. Memory only, and never starts a read: for views, which
+        show what pasard already knows and must not be what sets off a billing call. The tick
+        keeps the figure fresh (`CLOUD_CREDIT_TTL`)."""
+        if self._credit_provider(target.name) is None:
+            return None
+        with self._credit_lock:
+            cached = self._credit.get(target.name)
+        if cached is None or cached[1] is None or self.clock() >= cached[1].cycle_end:
+            return None
+        return cached[0], cached[1]
+
     def _credit_named(self, name: str) -> Credit | None:
         target = self.cfg.clouds.get(name)
         return None if target is None else self.cloud_credit(target)
