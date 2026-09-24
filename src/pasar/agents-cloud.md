@@ -254,7 +254,7 @@ A cloud job goes back to `awaiting` rather than ending when:
 | `job_cap` | It has spent all its lifetime cap (`max_job_cost`). It waits for the user to raise the cap and approve it again, but only for `approval_ttl` (24 h by default; `summary` gives the time): unapproved by then, it is cancelled. Resubmitting starts over from scratch: a new job can't resume from this one's checkpoint, which is pulled home once this job ends. | Tell the user, with the deadline. Never work around it. |
 | `cloud_preempted` | The provider reclaimed the machine (a spot interruption, a host failure). Not a failure. | Tell the user; they approve it again to run again. |
 | `price_rose` | Its price rose past what was approved, between approval and launch. `summary` has the old ceiling and the new price. | Tell the user; they approve again if the new price is fine. |
-| `moved` | Submitted to a group, approved, and then moved to another account of the group before its first launch, because the first could no longer pay for it. The approval was for the first account's credit. `summary` names both accounts. | Tell the user; they approve again to spend the new account's credit. |
+| `moved` | Submitted to a group and moved to another account of the group before its first launch, because the first could no longer pay for it or its provider failed. An approval it had was for the first account's credit, so it is dropped. `summary` names both accounts. | Tell the user; they approve it to spend the new account's credit. |
 
 An approved job starts a fresh attempt from the same code snapshot, with `PASAR_RESUMING=1`. It
 resumes from its last checkpoint if it wrote one under `pasar_job.persist_dir()`, or starts over

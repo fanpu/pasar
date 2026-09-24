@@ -1438,9 +1438,11 @@ class Daemon:
     def tick(self) -> None:
         now = self.clock()
         self._sample_machine()
-        self._drop_unreachable(now)
         self._expire_awaiting(now)
+        # Before the unreachable are settled: a group job that never ran, on an account whose
+        # provider failed, is moved to one that works rather than left stranded.
         self._rebalance(now)
+        self._drop_unreachable(now)
         self._release_settled(now)
         for _, ex in self._cloud_executors():
             # Before the statuses are read: an attempt that ended between two ticks left its own
@@ -1495,9 +1497,12 @@ class Daemon:
                 continue
             why, fix = self._unreachable(target)
             if target in self.cfg.clouds:
-                # Still configured; only its provider failed to start. Left exactly as it is:
-                # `approve` refuses without a provider and the lane only launches on targets
-                # that have one, so the job cannot move, or spend, until the provider is back.
+                # Still configured; only its provider failed to start. A group job that never
+                # ran has already been moved to a member that works, if one could pay for it
+                # (`_rebalance`, earlier in the tick), so what is left here is pinned to this
+                # account or fits nowhere else. Left exactly as it is: `approve` refuses without
+                # a provider and the lane only launches on targets that have one, so the job
+                # cannot launch, or spend, until the provider is back.
                 # Cancelling it would end a paused job whose checkpoint its next attempt resumes
                 # from, with nothing able to pull it home. Said once per job, not every tick.
                 if job.id not in self._stranded:
@@ -1559,10 +1564,11 @@ class Daemon:
         "Can pay for it" counts the jobs waiting on each account as well as the ledger's settled
         and running money, which the submit-time choice cannot see: several quick submits to a
         group all land on the fullest account, and this is what spreads them once that account
-        cannot pay for them all. Waiting jobs claim an account's money in the order the lane
-        would want it spent — jobs that cannot move first, then approved ones, then those still
-        awaiting, each by submit order — so it is always the most movable job that moves, and a
-        job moved to where it fits is still there on the next tick.
+        cannot pay for them all. Waiting jobs claim an account's money approved ones first, then
+        those still awaiting — a job nobody has approved never pushes out one somebody has, even
+        when it is the one that cannot move — and within each, jobs that cannot move before jobs
+        that can, each by submit order. So the job that moves is the least committed one that
+        can, and a job moved to where it fits is still there on the next tick.
 
         A job that fits nowhere stays where it is: the budget gate blocks it there with a reason,
         and credit resets.
@@ -1572,7 +1578,7 @@ class Daemon:
                    if self._is_cloud(j)]
         movable = {j.id: bool(groups.get(j.spec.group)) and not self._has_run(j)
                    for j in waiting}
-        waiting.sort(key=lambda j: (movable[j.id], j.state != State.QUEUED, j.id))
+        waiting.sort(key=lambda j: (j.state != State.QUEUED, movable[j.id], j.id))
         claimed: dict[str, float] = {}
 
         def claim(name: str, dollars: float) -> None:
@@ -1636,10 +1642,11 @@ class Daemon:
 
     def _move(self, job: Job, chosen: CloudTarget, need: float, here: CloudTarget | None,
               claimed_here: float, now: float) -> None:
-        """Point `job` at `chosen`, and say so where a person can see it. An approved job goes
-        back to awaiting: the approvals row records a price but no account, and the approve
-        dialog names whose credit pays, so a yes given for one person's credit must not spend
-        another's."""
+        """Point `job` at `chosen`, and say so where a person can see it: in the machine events,
+        and as the job's reason (`moved`) and summary, which replace any it had. An approval it
+        had not used yet is dropped and an approved job goes back to awaiting: the approvals row
+        records a price but no account, and the approve dialog names whose credit pays, so a yes
+        given for one person's credit must not spend another's."""
         was = job.spec.target
         who = f" ({chosen.owner})" if chosen.owner else ""
         if here is None:
@@ -1650,17 +1657,20 @@ class Daemon:
             why = (f"{was} has ${left:.2f} left this month"
                    + (" after the jobs waiting ahead of it there" if claimed_here else "")
                    + f", and this job needs up to ${need:.2f}")
-        values: dict = {"spec": replace(job.spec, target=chosen.name)}
         text = f"job {job.id} moved from {was} to {chosen.name}{who} before launching: {why}"
-        if job.state == State.QUEUED:
-            self.store.drop_approval(job.id, len(self.store.attempts(job.id)) + 1)
+        summary = f"moved from {was} to {chosen.name}{who} before launching, because {why}"
+        values: dict = {"spec": replace(job.spec, target=chosen.name), "reason": "moved"}
+        # Any reason it had (a bounce for a price rise, say) described the account it has left.
+        n = len(self.store.attempts(job.id)) + 1
+        if any(r["attempt"] == n for r in self.store.approvals(job.id)):
+            self.store.drop_approval(job.id, n)
             whose = chosen.owner or chosen.name
-            values.update(
-                state=State.AWAITING, queue_time=now, reason="moved",
-                summary=(f"moved from {was} to {chosen.name}{who} before launching, because "
-                         f"{why}. It was approved to spend {was}'s credit, not {whose}'s, so "
-                         "approve it again for it to run"))
+            summary += (f". It was approved to spend {was}'s credit, not {whose}'s, so approve "
+                        "it again for it to run")
             text += "; its approval was for the other account, so it waits to be approved again"
+        if job.state == State.QUEUED:
+            values.update(state=State.AWAITING, queue_time=now)
+        values["summary"] = summary
         self.store.update_job(job.id, **values)
         self.store.add_machine_event(now, "cloud_moved", text)
         self.changed()
