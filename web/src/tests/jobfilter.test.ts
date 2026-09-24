@@ -113,13 +113,15 @@ describe("sortJobs", () => {
     expect(sortJobs(jobs, { key: "name", desc: false }).map((j) => j.name)).toEqual(["Apple", "banana", "cherry"]);
   });
 
-  it("sorts by state in running, stopping, queued, failed, completed, cancelled order", () => {
+  it("sorts by state in running, stopping, awaiting, queued, failed, completed, cancelled order", () => {
+    // Awaiting sits just above queued, as the table groups it: waiting on a person, then a turn.
     const jobs = [
       job({ id: 1, state: "cancelled" }), job({ id: 2, state: "completed" }), job({ id: 3, state: "failed" }),
       job({ id: 4, state: "queued" }), job({ id: 5, state: "stopping" }), job({ id: 6, state: "running" }),
+      job({ id: 7, state: "awaiting" }),
     ];
     expect(sortJobs(jobs, { key: "state", desc: false }).map((j) => j.state)).toEqual([
-      "running", "stopping", "queued", "failed", "completed", "cancelled",
+      "running", "stopping", "awaiting", "queued", "failed", "completed", "cancelled",
     ]);
   });
 

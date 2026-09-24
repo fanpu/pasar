@@ -82,7 +82,7 @@ export function effectiveSort(f: Filter): Sort {
 // Sort-key semantics: id/bid/memory(limit)/submitted(submit_time) are plain numeric fields;
 // name/by(submitter) use localeCompare; state uses this fixed order; time is run_time once a job
 // has started, else est_runtime; ended (end_time) sorts unset values last regardless of direction.
-const STATE_ORDER: JobState[] = ["running", "stopping", "queued", "failed", "completed", "cancelled"];
+const STATE_ORDER: JobState[] = ["running", "stopping", "awaiting", "queued", "failed", "completed", "cancelled"];
 
 function timeValue(job: JobView): number {
   return job.start_time !== null ? job.run_time : job.est_runtime;
