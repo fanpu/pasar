@@ -95,6 +95,7 @@ can. So the true ceiling lives at the provider (item 1), and pasar makes spendin
 | **Environment spec** | `pyproject.toml`, `uv.lock`, `.python-version`, plus every uv workspace member's `pyproject.toml` and the files a `pyproject.toml` references that uv reads while resolving (its readme and licence files). Its hash is the image cache key. |
 | **Persist dir** | Per-job storage on a provider volume that survives every attempt of the job (`$PASAR_PERSIST_DIR`, `pasar_job.persist_dir()`), for checkpoints and outputs. Once the job finishes it is pulled to local disk and deleted at the provider — see [Getting results back](#getting-results-back-and-when-they-are-deleted). |
 | **Wrapper** | `python -m pasar_job.run`, the entry point inside the container. It runs the command and talks to pasard through stdout. |
+| **Group** | A name shared by several targets' `group =` setting, meaning their accounts are interchangeable. `--on <group>` (instead of a target) resolves to one member account at submit; `--on <account>` still names one directly. See [Running from several accounts](#running-from-several-accounts). |
 
 ## Architecture
 
@@ -498,11 +499,14 @@ provider reclaim doesn't count toward the five), `cloud_preempted` (the provider
 sandbox), `out_of_credit` (the provider ended an attempt on an account its own billing says is
 out of free credit: `failed` rather than paused, since approving it again would only be refused),
 `price_rose` (the price moved above what was approved between approval and launch; back to
-**awaiting**, not a launch), `target_gone` (the job's target is no longer configured, or its
+**awaiting**, not a launch), `moved` (a group job that has never run was moved to another account
+of its group before its first launch; back to **awaiting**, and an approval it had not used is
+dropped: see [Running from several accounts](#running-from-several-accounts)), `target_gone` (the job's target is no longer configured, or its
 provider could not be set up: `failed` if it was running, since its sandbox may still be billing at
 the provider; if it was only waiting, `cancelled` when the target is gone from the config, but left
 where it is — awaiting or queued, unable to be approved or launched — when only its provider
-failed), `rejected` and `approval_expired` (never approved, or approved too late). A failure while
+failed, unless it is a group job that has never run and another account of its group can take it,
+in which case it is `moved`), `rejected` and `approval_expired` (never approved, or approved too late). A failure while
 packaging, pricing or launching an attempt — a build failure, no capacity, a bad bundle — is
 `launch_error`, the same reason a local job's launch failure gets; there is no separate
 `image_build_error`, `no_capacity` or `cloud_error`. The one exception is `account_unusable`: the
@@ -523,7 +527,10 @@ New machine-event kinds, alongside the existing `pressure`/`pressure_end`/`oom_k
 (the launch-time price moved past what was approved; the job's own `price_rose` reason says the same
 thing from the job's side), `max_cost` (a pause was triggered by `--max-cost` rather than the
 approved run time, named separately from `time_limit` while it's known, since both pause the same
-way), `extended` (a person raised a running attempt's ceiling, and at what rate), `target_gone` (a
+way), `extended` (a person raised a running attempt's ceiling, and at what rate),
+`max_cost_raised` (a person raised a job's own `--max-cost` in the approve dialog, from and to
+what), `cloud_moved` (a group job that has never run moved to another account, and why),
+`target_gone` (a
 target was removed from config, or its provider could not be set up, for both its running and
 waiting jobs), and `orphan_unit` (a live handle this pasard can no longer follow after a restart —
 the executor never adopted it back — which is terminated on the spot rather than left to bill
@@ -633,6 +640,109 @@ provider. A target left without a provider keeps its waiting jobs (paused, await
 queued) where they are until it has one again; only a running job is failed, since nothing can
 follow its attempt. A job that finished meanwhile is pulled once the provider is back, however
 long that took: the retention sweep never deletes a job no automatic pull has tried.
+
+### Running from several accounts
+
+Several people's Modal accounts — or several workspaces of one person's — can run from one
+pasard. Give each account its own `[clouds.*]` target and the same `group`, so `--on <group>`
+can pick between them instead of a person or an agent naming an account by hand:
+
+```toml
+[clouds.modal-alice]
+provider = "modal"        # every member of a group must share one provider, explicit or inherited
+group = "modal"
+profile = "alice"          # alice's own profile in ~/.modal.toml; never falls back to whichever
+                            # profile happens to be active there
+owner = "alice"             # whose credit this is, shown on the job and in the approval; defaults
+                            # to `profile`, then to the target's own name
+budget = { monthly = 30.0 }
+
+[clouds.modal-bob]
+provider = "modal"
+group = "modal"
+profile = "bob"
+owner = "bob"
+budget = { monthly = 30.0 }
+```
+
+`provider` on a grouped target defaults to the group's own name, so a group named after the
+provider its members share (as above) can leave `provider =` off every member. If that inherited
+name turns out not to be a provider pasar has, each affected target is logged and left with no
+provider — not pasard refusing to start — the same as any other misconfigured target (see
+above); the fix is to set `provider =` explicitly on every member. A group also can't share its
+name with a plain cloud target, and its members can't disagree on `provider`: both are config
+errors pasard refuses to start with, because a group's whole point is that its members are
+interchangeable.
+
+**`--on <group>` (e.g. `--on modal` above) picks the fullest account that still fits, at
+submit.** Of the group's members that can afford the job's price ceiling this month, pasar
+resolves to whichever has the *least* headroom left — the fullest account that still has room,
+not the emptiest one. This is packing, not spreading, and deliberately so: each account has its
+own image cache and its own Modal volumes, so a job that landed on a fresh account would pay for
+a fresh image build out of credit meant for compute, and could never resume a checkpoint left on
+another account's volume. Concentrating work on as few accounts as possible keeps both cheap.
+Once resolved this way, the job's target is a concrete account like any other — the budget gate,
+approval and ledger never know a group was involved. `--on <account>` skips all of this and pins
+that account from the start, the same as it always has for a single-target config.
+
+If none of the group's accounts has the monthly headroom for a new job, the submit is refused
+(not queued) naming every member, whose credit it is, and what's left of each one's budget, so a
+person can see at a glance whose account is short before approving anything else onto it;
+`--on <account>` still queues for one by name regardless.
+
+**A job is pinned to whichever account it lands on, for the rest of its life, once it has run.**
+Nothing moves a job that has had an attempt (or has spend recorded against it) to a different
+account. This is the sharpest edge in the whole design: a paused job's checkpoint lives on that
+one account's Modal volume, so it can never resume anywhere else. If that account runs out of
+credit mid-life, an attempt the provider ends there fails the job (`out_of_credit`) rather than
+pausing it, and a resubmit starts over — a group buys a good first pick, not a safety net after
+the first attempt runs. Naming `--on <account>` directly instead of a group makes this pin
+explicit from the outset, since there was never another account the job could have gone to.
+
+**Until its first launch, a group job can still move.** Every tick, pasar checks each queued or
+awaiting job submitted with `--on <group>` that has never run, and moves it to the account the
+group choice would pick now if the one it is on can no longer pay for it: its headroom falls
+short of the job's price ceiling, its provider failed to start, its provider says it is out of
+credit, or it is refusing every launch (both below). "Can pay" counts the jobs already waiting
+on each account, not just what has been spent: several quick submits to a group all land on the
+fullest account, and this is what spreads them once it cannot pay for them all. Approved jobs
+claim an account's money before unapproved ones, so a job nobody has approved never pushes out
+one somebody has. A job that fits nowhere else stays where it is, and the budget gate holds it
+there. A moved job's reason is `moved` and its summary names both accounts; the move is also a
+`cloud_moved` machine event. An approval it had not used yet is dropped and it goes back to
+**awaiting**, since that approval was for the first account's credit, not the new one's. For the
+same reason the web UI's approve dialog sends the account it showed: if the job moved between
+showing and clicking, the approval is refused (`moved to <account> since this was shown; look
+again`) rather than spent on somebody else's credit.
+
+**The group choice also reads the provider's own books.** pasar's ledger only knows what pasar
+spent and committed; it can't see an image build, a sandbox started outside pasar, or a
+collaborator's own work on the same account. For Modal targets, pasard also reads the account's
+billing summary for the current cycle (Modal's cycle is the UTC calendar month), off the tick,
+every 10 minutes and again at once after a reclaim, and the account's headroom is its monthly budget less the
+*larger* of the two figures, since over-counting is the safe direction here. An account Modal
+says is past its free allowance has no headroom at all, and a submit refused for want of an
+account says so next to it (`out of credit, its provider says`). A billing summary that can't be
+read counts as unknown, never as zero, and the ledger alone decides. This feeds the group choice
+(at submit, when a waiting job is moved, and when a refused job is re-resolved) and the
+`out_of_credit` decision above. The launch-time budget gate still checks pasar's own ledger only.
+
+**An account that refuses every launch is taken out of the rotation.** An account can look
+completely healthy in its budget and still refuse to launch anything, e.g. a Modal workspace
+spending limit set to zero or credentials Modal no longer accepts — a failure only a real launch
+attempt reveals. Once one refusal does, the account has no headroom for the group choice and is
+never chosen, by a submit or by a move, until a launch on it succeeds again or an hour has passed.
+A group job refused this way that has never run is re-resolved to a sibling account instead of
+failing (see `account_unusable` above), keeping its approval at the rate agreed to, since nothing
+was spent and no checkpoint exists yet. A job pinned to the account (named to it with `--on
+<account>`, or one that has run there) still launches there, and fails `account_unusable` if it
+is refused.
+
+Every account's tokens stay in `~/.modal.toml`; nothing in `config.toml` or committed to a repo
+is ever a credential, only a `profile` name that points at one. Because spending somebody else's
+credit is easy to do by accident when several accounts are one `--on` away, whose account a job
+landed on is always visible: on the job itself (its `target`), and in `pasar cloud` and the
+approval, which show each target's `owner` — by design, not as an afterthought.
 
 `rates` pins prices over the provider's live list, keyed the way the provider reports them
 (`pasar cloud --json` shows the keys): `gpu_hour_cost_<gpu>` in $/GPU-hour, and the sandbox's

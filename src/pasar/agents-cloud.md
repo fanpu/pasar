@@ -18,6 +18,11 @@ checkpoints, `pasar wait` and `pasar cancel` as a local one. It also costs real 
   `?extend=1`) or `/reject`, on the user's behalf or otherwise. The approval UI isn't built yet,
   so today the user approves by calling the endpoint themselves. That is still never an agent's
   call.
+- **`--on <group>` (e.g. `--on modal`) is the normal way to submit** when a target name covers
+  several accounts: pasar picks which account pays, at submit, and may move a job that has not
+  launched yet to another account of the group (`moved`); `--on <account>` pins a specific one
+  instead. Either way the same rule above still applies: proposing and picking a target is
+  yours, submitting still needs the user's explicit go-ahead.
 - **Each job has a lifetime spending cap:** the target's `max_job_cost`, shown as JOB CAP in
   `pasar cloud` (default $10). It covers every attempt, re-approval and extension of the job. A
   submit whose estimate is already over it is refused. Only the user raises it, in pasard's
