@@ -43,8 +43,9 @@ pythonpath = ["."]
 markers = [
     "systemd: needs a systemd user session",
     "gpu: needs an NVIDIA GPU with PyTorch",
+    "modal: needs Modal credentials and spends money",
 ]
-addopts = "-m 'not systemd and not gpu'"
+addopts = "-m 'not systemd and not gpu and not modal'"
 filterwarnings = [
     "ignore:Using `httpx` with `starlette.testclient` is deprecated; install `httpx2` instead\\.:starlette.exceptions.StarletteDeprecationWarning",
     "ignore:The anyio.abc.BlockingPortal alias is deprecated, use anyio.from_thread.BlockingPortal instead\\.:DeprecationWarning",
