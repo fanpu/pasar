@@ -5,8 +5,12 @@ from pathlib import Path
 
 STATES = ("idle", "happy", "start", "busy", "waiting", "sweat", "hot", "oom",
           "failed", "preempted", "done", "thinking", "hmm", "confused")
+# "peek" isn't a machine state — it's the optional corner-peek image — but it shares the same
+# `name.ext` / `name-2.ext` variant naming, so it resolves through the same filename regex and
+# the same `/mascot/{filename}` route as the state art.
+PEEK = "peek"
 BUILTIN_DIR = Path(__file__).parent / "mascot"
-_NAME = re.compile(rf"^({'|'.join(STATES)})(?:-([0-9]{{1,3}}))?\.(png|svg|webp|gif)$")
+_NAME = re.compile(rf"^({'|'.join((*STATES, PEEK))})(?:-([0-9]{{1,3}}))?\.(png|svg|webp|gif)$")
 
 
 def _files(d: Path) -> list[str]:
@@ -35,6 +39,11 @@ def manifest(custom_dir: Path) -> dict[str, list[str]]:
             out[state] = [f"/mascot/{n}" for n in custom[state]]
         else:
             out[state] = [f"/mascot/builtin/{n}" for n in builtin.get(state, [])]
+    # The peek image is only ever the user's own file — there is no built-in fallback, so unlike
+    # the states above `builtin` is never consulted. When variants exist (`peek.png`,
+    # `peek-2.png`, …) only the first is shown.
+    peek = custom.get(PEEK, [])
+    out[PEEK] = [f"/mascot/{peek[0]}"] if peek else []
     return out
 
 

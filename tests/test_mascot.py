@@ -25,13 +25,24 @@ def test_manifest_prefers_custom_and_orders_variants(tmp_path, monkeypatch):
     assert m["done"] == ["/mascot/done.png", "/mascot/done-2.png", "/mascot/done-10.png"]
     assert m["happy"] == ["/mascot/happy.webp"]
     assert m["idle"] == ["/mascot/builtin/idle.png"]
-    assert set(m) == set(mascot.STATES)
+    assert set(m) == set(mascot.STATES) | {"peek"}
 
 
 def test_manifest_missing_dirs(tmp_path, monkeypatch):
     monkeypatch.setattr(mascot, "BUILTIN_DIR", tmp_path / "nope")
     m = mascot.manifest(tmp_path / "also-nope")
     assert all(v == [] for v in m.values())
+
+
+def test_manifest_peek_is_custom_only_and_picks_first_variant(tmp_path, monkeypatch):
+    builtin = tmp_path / "builtin"
+    touch(builtin, "peek.png")  # a built-in peek image must never surface
+    monkeypatch.setattr(mascot, "BUILTIN_DIR", builtin)
+    assert mascot.manifest(tmp_path / "none")["peek"] == []
+
+    custom = tmp_path / "custom"
+    touch(custom, "peek-2.webp", "peek.webp")
+    assert mascot.manifest(custom)["peek"] == ["/mascot/peek.webp"]
 
 
 def test_resolve_rejects_traversal_and_unknown(tmp_path):
@@ -41,6 +52,12 @@ def test_resolve_rejects_traversal_and_unknown(tmp_path):
                 "happy.png/..", ""]:
         assert mascot.resolve(tmp_path, bad) is None
     assert mascot.resolve(tmp_path, "done.png") is None  # valid name, no file
+
+
+def test_resolve_accepts_peek_and_its_variants(tmp_path):
+    touch(tmp_path, "peek.gif", "peek-2.gif")
+    assert mascot.resolve(tmp_path, "peek.gif") == tmp_path / "peek.gif"
+    assert mascot.resolve(tmp_path, "peek-2.gif") == tmp_path / "peek-2.gif"
 
 
 def test_builtin_art_complete():
