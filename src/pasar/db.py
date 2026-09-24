@@ -370,6 +370,11 @@ class Store:
                 " hourly_rate) VALUES (?, ?, ?, ?, ?, ?)",
                 (job_id, attempt, ts, estimated_cost, max_cost, hourly_rate))
 
+    def drop_approval(self, job_id: int, attempt: int) -> None:
+        """Take back an approval that has not been used: one given for an account the job no
+        longer runs on (`Daemon._rebalance`)."""
+        self._x("DELETE FROM approvals WHERE job_id = ? AND attempt = ?", (job_id, attempt))
+
     def approvals(self, job_id: int) -> list[dict]:
         rows = self._q("SELECT * FROM approvals WHERE job_id = ? ORDER BY attempt", (job_id,))
         return [dict(r) for r in rows]

@@ -163,8 +163,10 @@ describe("CloudCard", () => {
     const onnotice = vi.fn();
     render(CloudCard, { cloud: cloudBlock(), jobs: running, now: NOW, onnotice });
     await fireEvent.click(screen.getAllByRole("button", { name: /^Approve…/ })[0]);
+    // It goes with the account the dialog showed, so a job moved since is refused, not approved.
+    expect(screen.getByRole("dialog").textContent).toContain(`on ${awaitingFresh.cloud!.target}`);
     await fireEvent.click(screen.getByRole("button", { name: "Approve · up to $8.00" }));
-    await waitFor(() => expect(api.approve).toHaveBeenCalledWith(201, false));
+    await waitFor(() => expect(api.approve).toHaveBeenCalledWith(201, false, awaitingFresh.cloud!.target));
     await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
     expect(onnotice).toHaveBeenCalledWith("#201 approved · up to $7.90");
   });
@@ -178,7 +180,7 @@ describe("CloudCard", () => {
     expect(dialog.textContent).toContain("about 30m more");
     expect(dialog.textContent).toContain("priced at today's rate when you confirm");
     await fireEvent.click(within(dialog).getByRole("button", { name: "Give more time · up to $1.30 more" }));
-    await waitFor(() => expect(api.approve).toHaveBeenCalledWith(212, true));
+    await waitFor(() => expect(api.approve).toHaveBeenCalledWith(212, true, needsTime[0].cloud!.target));
     await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
     expect(onnotice).toHaveBeenCalledWith("#212 got more time · up to $9.95");
   });
@@ -316,7 +318,7 @@ describe("ApproveDialog", () => {
     expect(screen.getByText(/Raise this job's --max-cost to/)).toBeInTheDocument();
     expect(screen.getByRole("spinbutton")).toHaveValue(7.1); // 6 × (3600 + 600 × 1.1) / 3600
     await fireEvent.click(screen.getByRole("button", { name: "Raise to $7.10 · give more time" }));
-    await waitFor(() => expect(api.approve).toHaveBeenCalledWith(job.id, true, 7.1));
+    await waitFor(() => expect(api.approve).toHaveBeenCalledWith(job.id, true, job.cloud.target, 7.1));
   });
 
   it("shows the raise field once the server says --max-cost is what binds", async () => {
@@ -326,7 +328,7 @@ describe("ApproveDialog", () => {
     expect(screen.queryByRole("spinbutton")).toBeNull();
     await fireEvent.click(screen.getByRole("button", { name: /^Give more time/ }));
     await fireEvent.click(await screen.findByRole("button", { name: "Raise to $6.95 · give more time" }));
-    await waitFor(() => expect(api.approve).toHaveBeenLastCalledWith(job.id, true, 6.95));
+    await waitFor(() => expect(api.approve).toHaveBeenLastCalledWith(job.id, true, job.cloud.target, 6.95));
   });
 
   it("names the submitter's own --max-cost when that is what shortens the run", () => {

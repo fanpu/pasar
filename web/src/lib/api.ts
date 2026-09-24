@@ -75,11 +75,17 @@ export function cancelJob(id: number): Promise<JobView> {
   return request("POST", `/api/jobs/${id}/cancel`);
 }
 /** Approves a cloud job's cost so it can start (or resume) — or, with `extend`, raises a
- * *running* job's approved ceiling to cover what `needs_more_time` says it now needs. `maxCost`
+ * *running* job's approved ceiling to cover what `needs_more_time` says it now needs. `target`
+ * is the account the person was shown: a group job can move to another before it launches, and
+ * the daemon refuses (409) rather than spend a different person's credit on this yes. `maxCost`
  * raises the job's own --max-cost on the way (a person's call only; never lowers it). */
-export function approve(id: number, extend = false, maxCost?: number): Promise<JobView> {
-  const q = [extend ? "extend=1" : "", maxCost === undefined ? "" : `max_cost=${maxCost}`].filter(Boolean);
-  return request("POST", `/api/jobs/${id}/approve${q.length ? `?${q.join("&")}` : ""}`);
+export function approve(id: number, extend = false, target?: string, maxCost?: number): Promise<JobView> {
+  const q = new URLSearchParams();
+  if (extend) q.set("extend", "1");
+  if (target !== undefined) q.set("target", target);
+  if (maxCost !== undefined) q.set("max_cost", String(maxCost));
+  const qs = q.toString();
+  return request("POST", `/api/jobs/${id}/approve${qs ? `?${qs}` : ""}`);
 }
 export function reject(id: number): Promise<JobView> {
   return request("POST", `/api/jobs/${id}/reject`);

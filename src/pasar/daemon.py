@@ -18,7 +18,7 @@ from pasar.cloud.base import Credit, GpuRow, parse_gpu, price_list
 from pasar.cloud.bundle import Bundle, BundleError, EnvSpec, build_bundle, check_platform
 from pasar.cloud.cost import Ledger, estimate, hourly_rate
 from pasar.cloud.executor import CloudExecutor
-from pasar.cloud.group import choose, shortfall
+from pasar.cloud.group import choose, headroom, shortfall
 from pasar.cloud.lane import CloudDecision, CloudQueued, decide_cloud
 from pasar.cloud.pace import needs_more_time as _needs_more_time
 from pasar.config import CloudTarget, Config
@@ -936,7 +936,7 @@ class Daemon:
                 + "\n".join(lines)
                 + "\nsubmit to one by name with --on <account> to queue for it anyway")
 
-    def approve(self, job_id: int, extend: bool = False,
+    def approve(self, job_id: int, extend: bool = False, target: str | None = None,
                 max_cost: float | None = None) -> Job:
         """Let one attempt run, at today's price. Approval is per attempt: a paused or reclaimed
         job comes back here rather than straight to the queue. The row records the price only —
@@ -949,7 +949,19 @@ class Daemon:
         `max_cost` is a person, in the web UI's dialog, raising the job's own `--max-cost` on
         the way through (`_raise_max_cost`). It only ever raises it, never past what the job's
         lifetime cap (`max_job_cost`) leaves, and it sticks only if the approval or extension it
-        rides on goes through; every other check is exactly as without it."""
+        rides on goes through; every other check is exactly as without it.
+
+        `target` is the account the person approving was shown, when the caller knows it (the
+        approve dialog sends it). A group job that has not launched can move between showing
+        and clicking (`_rebalance`), and a yes given for one person's credit must not spend
+        another's, so a mismatch is refused and the job left as it is."""
+        if target is not None:
+            now_on = self.job(job_id).spec.target
+            if now_on != target:
+                on = self.cfg.clouds.get(now_on)
+                who = f" ({on.owner})" if on is not None and on.owner else ""
+                raise Conflict(f"job {job_id} moved to {now_on}{who} since this was shown; "
+                               "look again")
         if max_cost is None:
             return self._extend(job_id) if extend else self._approve(job_id)
         job = self.job(job_id)
@@ -1569,13 +1581,16 @@ class Daemon:
     def tick(self) -> None:
         now = self.clock()
         self._sample_machine()
-        self._drop_unreachable(now)
         self._expire_awaiting(now)
-        self._release_settled(now)
         for name, _ in self._cloud_executors():
-            # Only starts a read, off the tick, for a figure that has gone stale: a group submit
-            # or a reclaim then finds the provider's figure already here.
+            # Only starts a read, off the tick, for a figure that has gone stale: a group submit,
+            # a rebalance or a reclaim then finds the provider's figure already here.
             self.cloud_credit(self.cfg.clouds[name])
+        # Before the unreachable are settled: a group job that never ran, on an account whose
+        # provider failed, is moved to one that works rather than left stranded.
+        self._rebalance(now)
+        self._drop_unreachable(now)
+        self._release_settled(now)
         for _, ex in self._cloud_executors():
             # Before the statuses are read: an attempt that ended between two ticks left its own
             # account of why on stdout, and that beats whatever the provider says.
@@ -1629,9 +1644,12 @@ class Daemon:
                 continue
             why, fix = self._unreachable(target)
             if target in self.cfg.clouds:
-                # Still configured; only its provider failed to start. Left exactly as it is:
-                # `approve` refuses without a provider and the lane only launches on targets
-                # that have one, so the job cannot move, or spend, until the provider is back.
+                # Still configured; only its provider failed to start. A group job that never
+                # ran has already been moved to a member that works, if one could pay for it
+                # (`_rebalance`, earlier in the tick), so what is left here is pinned to this
+                # account or fits nowhere else. Left exactly as it is: `approve` refuses without
+                # a provider and the lane only launches on targets that have one, so the job
+                # cannot launch, or spend, until the provider is back.
                 # Cancelling it would end a paused job whose checkpoint its next attempt resumes
                 # from, with nothing able to pull it home. Said once per job, not every tick.
                 if job.id not in self._stranded:
@@ -1679,6 +1697,134 @@ class Daemon:
                 job.id, state=State.CANCELLED, reason="approval_expired",
                 summary=f"nobody approved it within {fmt_duration(target.approval_ttl)}")
             self._cloud_ended(job, State.CANCELLED)
+
+    def _rebalance(self, now: float) -> None:
+        """Move a group job that has not launched yet off an account that can no longer pay for
+        it, to the one `choose` would pick now. Runs every tick, so it reads records and cached
+        rates only.
+
+        Only jobs submitted to a group: naming an account is how somebody says they meant that
+        one. Only jobs that have never run (no attempt, no spend): once one has, it is pinned to
+        its account, because its checkpoint is on that account's volume, and a job that silently
+        restarted somewhere else would pay twice for the same work.
+
+        "Can pay for it" counts the jobs waiting on each account as well as the ledger's settled
+        and running money, which the submit-time choice cannot see: several quick submits to a
+        group all land on the fullest account, and this is what spreads them once that account
+        cannot pay for them all. Waiting jobs claim an account's money approved ones first, then
+        those still awaiting — a job nobody has approved never pushes out one somebody has, even
+        when it is the one that cannot move — and within each, jobs that cannot move before jobs
+        that can, each by submit order. So the job that moves is the least committed one that
+        can, and a job moved to where it fits is still there on the next tick.
+
+        A job that fits nowhere stays where it is: the budget gate blocks it there with a reason,
+        and credit resets.
+        """
+        groups = self.cfg.groups()
+        waiting = [j for j in self.store.list_jobs([State.QUEUED, State.AWAITING])
+                   if self._is_cloud(j)]
+        movable = {j.id: bool(groups.get(j.spec.group)) and not self._has_run(j)
+                   for j in waiting}
+        waiting.sort(key=lambda j: (j.state != State.QUEUED, movable[j.id], j.id))
+        claimed: dict[str, float] = {}
+
+        def claim(name: str, dollars: float) -> None:
+            claimed[name] = claimed.get(name, 0.0) + dollars
+
+        for job in waiting:
+            if not movable[job.id]:
+                target = self.cfg.clouds.get(job.spec.target)
+                if target is not None:
+                    claim(target.name, self._need(target, job))
+                continue
+            # Where it is first, and only that account priced: the lane prices it there anyway,
+            # so a job that fits costs nothing extra to check.
+            here = self.cfg.clouds.get(job.spec.target)
+            if here is not None and not self._movable_to(job, [here]):
+                here = None
+            if here is not None:
+                need = self._need(here, job)
+                if headroom(self.ledger, here, self._credit_named(here.name),
+                            claimed.get(here.name, 0.0)) >= need:
+                    claim(here.name, need)
+                    continue
+            candidates = self._movable_to(job, groups[job.spec.group])
+            if not candidates:
+                continue  # nothing can price it right now; the lane says so if it matters
+            # The largest ceiling of any candidate, as at submit: a price difference between
+            # accounts can only make the choice more conservative.
+            need = max(self._need(t, job) for t in candidates)
+            chosen = choose(candidates, self.ledger, need, self._running_on,
+                            credit=self._credit_named, claimed=claimed)
+            if chosen is None or chosen.name == job.spec.target:
+                claim(job.spec.target, need)
+                continue
+            self._move(job, chosen, need, here, claimed.get(job.spec.target, 0.0), now)
+            claim(chosen.name, need)
+
+    def _has_run(self, job: Job) -> bool:
+        """True if `job` has used its account: an attempt, or spend recorded against it."""
+        return bool(self.store.attempts(job.id) or self.store.cloud_spend_of_job(job.id))
+
+    def _need(self, target: CloudTarget, job: Job) -> float:
+        """`_ceiling`, or nothing for a job that cannot be priced on `target` right now."""
+        try:
+            return self._ceiling(target, job)
+        except (KeyError, ValueError):
+            return 0.0
+
+    def _movable_to(self, job: Job, members: list[CloudTarget]) -> list[CloudTarget]:
+        """The members of `job`'s group it could run on, by the rules `_resolve_group` chose by
+        at submit: a provider here, a price for its GPU, and an estimate under the account's
+        `max_job_cost`."""
+        out = []
+        for t in members:
+            if t.name not in self.executors:
+                continue
+            try:
+                est = estimate(self._hourly(t, job.spec.gpu), job.spec.est_runtime)
+            except (KeyError, ValueError):
+                continue
+            if est <= t.max_job_cost + PRICE_TOLERANCE:
+                out.append(t)
+        return out
+
+    def _move(self, job: Job, chosen: CloudTarget, need: float, here: CloudTarget | None,
+              claimed_here: float, now: float) -> None:
+        """Point `job` at `chosen`, and say so where a person can see it: in the machine events,
+        and as the job's reason (`moved`) and summary, which replace any it had. An approval it
+        had not used yet is dropped and an approved job goes back to awaiting: the approvals row
+        records a price but no account, and the approve dialog names whose credit pays, so a yes
+        given for one person's credit must not spend another's."""
+        was = job.spec.target
+        who = f" ({chosen.owner})" if chosen.owner else ""
+        if here is None:
+            why = (self._unreachable(was)[0] if was not in self.executors
+                   else f"this run is over {was}'s max_job_cost")
+        elif (credit := self._credit_named(was)) is not None and credit.exhausted:
+            why = f"{was} is out of credit, its provider says"
+        else:
+            left = headroom(self.ledger, here, credit, claimed_here)
+            why = (f"{was} has ${left:.2f} left this month"
+                   + (" after the jobs waiting ahead of it there" if claimed_here else "")
+                   + f", and this job needs up to ${need:.2f}")
+        text = f"job {job.id} moved from {was} to {chosen.name}{who} before launching: {why}"
+        summary = f"moved from {was} to {chosen.name}{who} before launching, because {why}"
+        values: dict = {"spec": replace(job.spec, target=chosen.name), "reason": "moved"}
+        # Any reason it had (a bounce for a price rise, say) described the account it has left.
+        n = len(self.store.attempts(job.id)) + 1
+        if any(r["attempt"] == n for r in self.store.approvals(job.id)):
+            self.store.drop_approval(job.id, n)
+            whose = chosen.owner or chosen.name
+            summary += (f". It was approved to spend {was}'s credit, not {whose}'s, so approve "
+                        "it again for it to run")
+            text += "; its approval was for the other account, so it waits to be approved again"
+        if job.state == State.QUEUED:
+            values.update(state=State.AWAITING, queue_time=now)
+        values["summary"] = summary
+        self.store.update_job(job.id, **values)
+        self.store.add_machine_event(now, "cloud_moved", text)
+        self.changed()
 
     def _pause_overdue(self, now: float) -> None:
         """Stop a cloud attempt that has used the run time its approval bought. The wrapper

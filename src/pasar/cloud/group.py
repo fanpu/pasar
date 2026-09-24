@@ -6,7 +6,7 @@ checks the monthly budget — the gate also checks the daily one, so it can stil
 account this module picks.
 """
 
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 
 from pasar.cloud.base import Credit
@@ -22,10 +22,12 @@ def _no_credit(_name: str) -> None:
     return None
 
 
-def headroom(ledger: Ledger, target: CloudTarget, credit: Credit | None = None) -> float:
+def headroom(ledger: Ledger, target: CloudTarget, credit: Credit | None = None,
+             claimed: float = 0.0) -> float:
     """Dollars left on `target` this month: its budget, less what is already settled and what
-    running attempts have already promised. Never negative — an overspent account has no
-    headroom, and how far past the line it went is not a number any caller here can use.
+    running attempts have already promised, and less `claimed` — what jobs waiting on it that
+    the ledger cannot see yet will need. Never negative — an overspent account has no headroom,
+    and how far past the line it went is not a number any caller here can use.
 
     `credit` is the provider's own figure for the account, where it has one: an account it says
     is past its free allowance has no headroom at all, whatever the ledger thinks."""
@@ -40,11 +42,15 @@ def headroom(ledger: Ledger, target: CloudTarget, credit: Credit | None = None) 
         # the same window: Modal's is the UTC calendar month, the ledger's the local one, and
         # another provider may bill on a cycle of its own.
         used = max(used, credit.used)
+    # `claimed` is money for jobs that have not launched, so neither view has seen it yet: it
+    # is added to whichever of the two is larger.
+    return max(0.0, target.monthly_budget - used - claimed)
     return max(0.0, target.monthly_budget - used)
 
 
 def choose(members: list[CloudTarget], ledger: Ledger, need: float,
-           running: Callable[[str], int], credit: CreditOf = _no_credit) -> CloudTarget | None:
+           running: Callable[[str], int], credit: CreditOf = _no_credit,
+           claimed: Mapping[str, float] | None = None) -> CloudTarget | None:
     """The fullest account, by monthly headroom, that can still pay for the whole run, or None if
     none can. Only the monthly budget is checked; the launch-time gate also checks the daily one,
     so it may still refuse the account this returns.
@@ -58,16 +64,21 @@ def choose(members: list[CloudTarget], ledger: Ledger, need: float,
     matter — `choose` calls it on every account that still fits before it can know which of them
     a free slot will decide between.
 
-    `credit` gives the provider's own figure for each account (see `headroom`).
+    `credit` gives the provider's own figure for each account (see `headroom`), and `claimed`
+    dollars per account already spoken for by jobs waiting on it (see `headroom`).
     """
-    fits = [t for t in members if headroom(ledger, t, credit(t.name)) >= need]
+    claimed = claimed or {}
+
+    def left(t: CloudTarget) -> float:
+        return headroom(ledger, t, credit(t.name), claimed.get(t.name, 0.0))
+
+    fits = [t for t in members if left(t) >= need]
     if not fits:
         return None
     free = [t for t in fits if running(t.name) < t.max_running]
     # Least headroom first; `members` order breaks a tie, because a choice that moves with
     # dictionary ordering is one nobody can reproduce from a bug report.
-    return min(free or fits, key=lambda t: (headroom(ledger, t, credit(t.name)),
-                                          members.index(t)))
+    return min(free or fits, key=lambda t: (left(t), members.index(t)))
 
 
 @dataclass(frozen=True)

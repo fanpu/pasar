@@ -104,6 +104,18 @@ def test_headroom_with_no_provider_figure_is_the_ledgers(store, ledger, clock):
     assert headroom(ledger, target, credit=None) == pytest.approx(25.0)
 
 
+def test_waiting_jobs_claims_come_on_top_of_the_larger_figure(store, ledger, clock):
+    """What jobs waiting on the account will need is in neither the ledger nor the provider's
+    books yet, so it is taken off after the two are compared, never swallowed by the max."""
+    target = _target("a", monthly=30.0)
+    _run(store, ledger, clock, "a", 5.0)
+    _settle_all(store, clock)
+    assert headroom(ledger, target, credit=_credit(used=12.0), claimed=4.0) == pytest.approx(
+        14.0)
+    assert headroom(ledger, target, credit=_credit(used=2.0), claimed=4.0) == pytest.approx(21.0)
+    assert headroom(ledger, target, credit=_credit(used=0.0, exhausted=True), claimed=0.0) == 0.0
+
+
 # ---- choose
 
 

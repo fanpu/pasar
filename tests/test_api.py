@@ -348,6 +348,18 @@ def test_approve_passes_max_cost_through(client, cloud_daemon, cloud_cwd):
     assert cloud_daemon.job(job_id).state == "awaiting"
 
 
+def test_approve_refuses_when_the_job_is_not_on_the_account_that_was_shown(
+        client, cloud_daemon, cloud_cwd):
+    job_id = submit_cloud(client, cloud_cwd).json()["id"]
+    target = client.get(f"/api/jobs/{job_id}").json()["cloud"]["target"]
+    r = client.post(f"/api/jobs/{job_id}/approve", params={"target": "somewhere-else"})
+    assert r.status_code == 409
+    assert f"moved to {target}" in r.json()["detail"] and "look again" in r.json()["detail"]
+    assert cloud_daemon.store.approvals(job_id) == []
+    r = client.post(f"/api/jobs/{job_id}/approve", params={"target": target})
+    assert r.status_code == 200 and r.json()["state"] == "queued"
+
+
 def test_submit_rejects_an_unconfigured_target(client, daemon, cloud_cwd):
     # daemon (not cloud_daemon) has no cloud target at all: submit fails outright, before
     # anything exists to approve.

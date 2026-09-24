@@ -67,7 +67,7 @@ describe("api", () => {
   });
   it("sends a raised --max-cost as max_cost", async () => {
     const f = mockFetch(200, {});
-    await approve(3, true, 6.95);
+    await approve(3, true, undefined, 6.95);
     expect(f.mock.calls[0][0]).toBe("/api/jobs/3/approve?extend=1&max_cost=6.95");
   });
   it("approves with extend=1 to raise a running job's ceiling", async () => {
@@ -75,6 +75,21 @@ describe("api", () => {
     await approve(3, true);
     expect(f.mock.calls[0][0]).toBe("/api/jobs/3/approve?extend=1");
     expect(f.mock.calls[0][1].method).toBe("POST");
+  });
+  it("sends the account the person was shown, so a moved job is refused", async () => {
+    const f = mockFetch(200, { id: 3, state: "queued" });
+    await approve(3, false, "modal-b");
+    expect(f.mock.calls[0][0]).toBe("/api/jobs/3/approve?target=modal-b");
+  });
+  it("sends extend and the account together", async () => {
+    const f = mockFetch(200, { id: 3, state: "running" });
+    await approve(3, true, "modal-b");
+    expect(f.mock.calls[0][0]).toBe("/api/jobs/3/approve?extend=1&target=modal-b");
+  });
+  it("sends the account and a raised --max-cost together", async () => {
+    const f = mockFetch(200, { id: 3, state: "running" });
+    await approve(3, true, "modal-b", 6.95);
+    expect(f.mock.calls[0][0]).toBe("/api/jobs/3/approve?extend=1&target=modal-b&max_cost=6.95");
   });
   it("posts without a body for reject", async () => {
     const f = mockFetch(200, { id: 3, state: "cancelled" });

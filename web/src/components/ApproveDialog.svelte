@@ -79,7 +79,11 @@
     error = null;
     try {
       // The toast says what the daemon agreed to, from its answer, not what this dialog showed.
-      const after = raise === null ? await api.approve(job.id, extend) : await api.approve(job.id, extend, raise);
+      // The account it showed goes with the yes: if the job has moved to another since, the
+      // daemon refuses rather than spend somebody else's credit.
+      const after = raise === null
+        ? await api.approve(job.id, extend, c.target)
+        : await api.approve(job.id, extend, c.target, raise);
       const ceiling = money(after.cloud?.max_cost);
       ondone(extend ? `#${job.id} got more time · up to ${ceiling}` : `#${job.id} approved · up to ${ceiling}`);
       onclose();

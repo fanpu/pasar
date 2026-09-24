@@ -3083,3 +3083,282 @@ def test_a_reclaim_with_credit_unknown_pauses(make_cloud, repo):
     provider.reclaim(handle_of(daemon, job_id))
     daemon.tick()
     assert daemon.job(job_id).reason == "cloud_preempted"
+
+
+# ---- moving a group job that has not launched yet
+
+
+def moves(daemon):
+    return [e for e in daemon.store.machine_events(limit=100) if e["kind"] == "cloud_moved"]
+
+
+def test_a_waiting_job_moves_to_an_account_that_can_still_afford_it(grouped, repo):
+    job = grouped.submit(cloud_spec(repo, target="modal", est_runtime=3600))
+    first = job.spec.target
+    spent(grouped, first, 25.0)  # something else ate that account: $5 left, the job needs $7.92
+    grouped.tick()
+    moved = grouped.job(job.id)
+    assert moved.spec.target != first and moved.spec.group == "modal"
+    assert moved.state == State.AWAITING
+
+
+def test_a_job_that_has_already_run_is_never_moved(grouped, repo):
+    """Its checkpoint is on that account's volume; another account cannot read it, so moving the
+    job would silently restart work that has already been paid for."""
+    job_id = start(grouped, repo, target="modal", est_runtime=3600)
+    first = grouped.job(job_id).spec.target
+    grouped.executors[first].provider.reclaim(handle_of(grouped, job_id))
+    grouped.tick()
+    assert grouped.job(job_id).state == State.AWAITING  # paused after running, waiting again
+    spent(grouped, first, 29.9)
+    grouped.tick()
+    assert grouped.job(job_id).spec.target == first
+    assert moves(grouped) == []
+
+
+def test_a_job_with_spend_on_its_account_is_never_moved(grouped, repo):
+    """Spend is the other sign a job has used its account, even without an attempt row."""
+    job = grouped.submit(cloud_spec(repo, target="modal", est_runtime=3600))
+    first = job.spec.target
+    grouped.ledger.record(first, job.id, 1, estimated=1.0, billed=1.0)
+    spent(grouped, first, 28.0)
+    grouped.tick()
+    assert grouped.job(job.id).spec.target == first
+
+
+def test_a_job_pinned_to_a_named_account_is_never_moved(grouped, repo):
+    job = grouped.submit(cloud_spec(repo, target="modal-a", est_runtime=3600))
+    spent(grouped, "modal-a", 29.9)
+    grouped.tick()
+    assert grouped.job(job.id).spec.target == "modal-a"
+    assert moves(grouped) == []
+
+
+def test_a_move_is_recorded_where_a_person_can_see_it(grouped, repo):
+    job = grouped.submit(cloud_spec(repo, target="modal", est_runtime=3600))
+    spent(grouped, "modal-a", 25.0)
+    grouped.tick()
+    [event] = moves(grouped)
+    text = event["text"]
+    assert f"job {job.id}" in text and "modal-a" in text and "modal-b (bob)" in text
+    assert f"${estimate(H100_RATE, 5400):.2f}" in text  # what it needs
+
+
+def test_a_job_that_cannot_move_anywhere_stays_where_it_is(grouped, repo):
+    """Not an error: the budget gate blocks it with a reason, and credit resets eventually."""
+    job = grouped.submit(cloud_spec(repo, target="modal", est_runtime=3600))
+    first = job.spec.target
+    for name in ("modal-a", "modal-b"):
+        spent(grouped, name, 29.9)
+    grouped.tick()
+    assert grouped.job(job.id).spec.target == first
+    assert grouped.job(job.id).state == State.AWAITING
+    assert moves(grouped) == []
+
+
+def test_a_job_does_not_move_to_an_account_whose_job_cap_its_estimate_is_over(make_group, repo):
+    # 1h of H100 is $5.28, over modal-b's $5 cap: modal-b would have refused it at submit
+    daemon = make_group(b={"max_job_cost": 5.0})
+    job = daemon.submit(cloud_spec(repo, target="modal", est_runtime=3600))
+    assert job.spec.target == "modal-a"
+    spent(daemon, "modal-a", 25.0)
+    daemon.tick()
+    assert daemon.job(job.id).spec.target == "modal-a"
+
+
+def test_a_job_does_not_move_to_an_account_without_a_provider(make_group, repo):
+    daemon = make_group(reachable=("modal-a",))
+    job = daemon.submit(cloud_spec(repo, target="modal", est_runtime=3600))
+    spent(daemon, "modal-a", 25.0)
+    daemon.tick()
+    assert daemon.job(job.id).spec.target == "modal-a"
+
+
+def test_jobs_submitted_together_are_spread_once_one_account_is_full(grouped, repo):
+    """The submit-time choice cannot see jobs that are waiting, only money already spent or held,
+    so several quick submits all land on the fullest account; the tick then moves the ones it
+    cannot pay for all of, and leaves them there on the next."""
+    spent(grouped, "modal-a", 15.0)  # $15 left: room for one $7.92 run, not two
+    first = grouped.submit(cloud_spec(repo, target="modal", est_runtime=3600))
+    second = grouped.submit(cloud_spec(repo, target="modal", est_runtime=3600))
+    assert first.spec.target == second.spec.target == "modal-a"
+    grouped.tick()
+    assert grouped.job(first.id).spec.target == "modal-a"
+    assert grouped.job(second.id).spec.target == "modal-b"
+    grouped.tick()
+    grouped.tick()
+    assert len(moves(grouped)) == 1
+
+
+def test_an_approved_job_keeps_its_place_ahead_of_one_still_awaiting(grouped, repo):
+    spent(grouped, "modal-a", 15.0)
+    earlier = grouped.submit(cloud_spec(repo, target="modal", est_runtime=3600))
+    later = grouped.submit(cloud_spec(repo, target="modal", est_runtime=3600))
+    grouped.approve(later.id)
+    grouped.tick()  # the move comes before the lane, which then launches the approved one
+    assert grouped.job(later.id).spec.target == "modal-a"
+    assert grouped.job(earlier.id).spec.target == "modal-b"
+
+
+def test_a_job_that_cannot_move_claims_its_account_first(grouped, repo):
+    spent(grouped, "modal-a", 15.0)
+    movable = grouped.submit(cloud_spec(repo, target="modal", est_runtime=3600))
+    named = grouped.submit(cloud_spec(repo, target="modal-a", est_runtime=3600))
+    grouped.tick()
+    assert grouped.job(named.id).spec.target == "modal-a"
+    assert grouped.job(movable.id).spec.target == "modal-b"
+
+
+def test_a_moved_approved_job_must_be_approved_again(grouped, repo, clock):
+    """An approval says whose credit is spent (the approve dialog names the owner), and the
+    approvals row does not record an account, so a job moved to another one is asked again
+    rather than spending bob's credit on a yes given for alice's."""
+    job = grouped.submit(cloud_spec(repo, target="modal", est_runtime=3600))
+    assert job.spec.target == "modal-a"
+    grouped.approve(job.id)
+    spent(grouped, "modal-a", 25.0)
+    clock.advance(30)
+    grouped.tick()
+    moved = grouped.job(job.id)
+    assert moved.spec.target == "modal-b"
+    assert moved.state == State.AWAITING and moved.reason == "moved"
+    assert moved.queue_time == clock.t  # a fresh approval_ttl to approve it again
+    assert "approve" in moved.summary and "bob" in moved.summary
+    assert grouped.store.approvals(job.id) == []
+    for name in ("modal-a", "modal-b"):
+        assert grouped.executors[name].provider.boxes == {}
+    grouped.approve(job.id)
+    grouped.tick()
+    assert grouped.job(job.id).state == State.RUNNING
+    assert parse_unit(grouped.store.current_attempt(job.id).unit)[0] == "modal-b"
+
+
+def test_a_moved_job_that_was_never_approved_says_why_without_asking_again(grouped, repo):
+    job = grouped.submit(cloud_spec(repo, target="modal", est_runtime=3600))
+    spent(grouped, "modal-a", 25.0)
+    grouped.tick()
+    moved = grouped.job(job.id)
+    assert moved.spec.target == "modal-b"
+    assert moved.state == State.AWAITING and moved.reason == "moved"
+    assert "modal-a" in moved.summary and "modal-b" in moved.summary
+    assert "again" not in moved.summary  # nobody approved it, so nothing is asked again
+    assert moved.queue_time == job.queue_time  # its approval_ttl runs from submit, as before
+
+
+def test_an_approved_job_claims_its_account_before_an_unapproved_one_that_cannot_move(
+        grouped, repo):
+    """A job nobody has approved must not push out one somebody has, even if it is pinned."""
+    spent(grouped, "modal-a", 15.0)  # room for one $7.92 run
+    approved = grouped.submit(cloud_spec(repo, target="modal", est_runtime=3600))
+    grouped.approve(approved.id)
+    grouped.submit(cloud_spec(repo, target="modal-a", est_runtime=3600))  # named, awaiting
+    grouped.tick()
+    assert grouped.job(approved.id).spec.target == "modal-a"
+    assert grouped.store.approvals(approved.id) != []
+    assert moves(grouped) == []
+
+
+def test_a_moved_job_bounced_back_to_awaiting_loses_its_stale_reason_and_approval(grouped, repo):
+    """Approved, then sent back to awaiting (the price rose before launch): the approvals row is
+    still there, and so are the reason and summary of a bounce that no longer describe it."""
+    job = grouped.submit(cloud_spec(repo, target="modal", est_runtime=3600))
+    grouped.approve(job.id)
+    grouped.store.update_job(job.id, state=State.AWAITING, reason="price_rose",
+                             summary="the price rose past what was approved")
+    spent(grouped, "modal-a", 25.0)
+    grouped.tick()
+    moved = grouped.job(job.id)
+    assert moved.spec.target == "modal-b" and moved.state == State.AWAITING
+    assert moved.reason == "moved" and "price" not in moved.summary
+    assert "approve it again" in moved.summary and "bob" in moved.summary
+    assert grouped.store.approvals(job.id) == []
+
+
+def test_a_job_that_never_ran_leaves_an_account_whose_provider_failed(grouped, repo):
+    """Not stranded: another account in its group can take it, so it goes there, and nothing
+    says it is waiting for the provider to come back."""
+    job = grouped.submit(cloud_spec(repo, target="modal", est_runtime=3600))
+    assert job.spec.target == "modal-a"
+    del grouped.executors["modal-a"]  # its provider failed to start this time
+    grouped.tick()
+    assert grouped.job(job.id).spec.target == "modal-b"
+    assert grouped.job(job.id).state == State.AWAITING
+    events = grouped.store.machine_events(limit=100)
+    assert [e for e in events if e["kind"] == "target_gone"] == []
+    [event] = moves(grouped)
+    assert "provider could not be set up" in event["text"]
+
+
+def test_a_job_that_never_ran_and_fits_nowhere_else_is_still_said_to_be_stranded(grouped, repo):
+    job = grouped.submit(cloud_spec(repo, target="modal", est_runtime=3600))
+    del grouped.executors["modal-a"]
+    spent(grouped, "modal-b", 29.9)
+    grouped.tick()
+    assert grouped.job(job.id).spec.target == "modal-a"
+    events = grouped.store.machine_events(limit=100)
+    assert any(e["kind"] == "target_gone" and f"job {job.id}" in e["text"] for e in events)
+
+
+def test_approving_checks_the_account_the_person_was_shown(grouped, repo):
+    """The approve dialog names whose credit pays; a move between showing it and the click
+    must not turn a yes for alice's credit into spending bob's."""
+    job = grouped.submit(cloud_spec(repo, target="modal", est_runtime=3600))
+    spent(grouped, "modal-a", 25.0)
+    grouped.tick()  # moved to modal-b while the dialog still said modal-a
+    with pytest.raises(Conflict) as e:
+        grouped.approve(job.id, target="modal-a")
+    assert str(e.value) == (f"job {job.id} moved to modal-b (bob) since this was shown; "
+                            "look again")
+    assert grouped.job(job.id).state == State.AWAITING
+    assert grouped.store.approvals(job.id) == []
+    assert grouped.approve(job.id, target="modal-b").state == State.QUEUED
+
+
+def test_approving_checks_the_shown_account_before_raising_max_cost(grouped, repo):
+    """Both at once: a refusal for a moved job leaves --max-cost alone, and a yes for the account
+    it is on now raises it and approves in one step."""
+    job = grouped.submit(cloud_spec(repo, target="modal", est_runtime=1800, max_cost=3.0))
+    assert job.spec.target == "modal-a"
+    spent(grouped, "modal-a", 28.0)  # $2 left; it needs up to $3
+    grouped.tick()  # moved to modal-b while the dialog still said modal-a
+    assert grouped.job(job.id).spec.target == "modal-b"
+    with pytest.raises(Conflict, match="moved to modal-b"):
+        grouped.approve(job.id, target="modal-a", max_cost=4.0)
+    assert grouped.job(job.id).spec.max_cost == 3.0
+    assert grouped.store.approvals(job.id) == []
+    assert not [e for e in grouped.store.events(job.id) if e["kind"] == "max_cost_raised"]
+    after = grouped.approve(job.id, target="modal-b", max_cost=4.0)
+    assert after.state == State.QUEUED and after.spec.max_cost == 4.0
+    assert grouped.store.approvals(job.id)[0]["max_cost"] > 3.0  # no longer held to the old cap
+    assert [e["kind"] for e in grouped.store.events(job.id)].count("max_cost_raised") == 1
+
+
+def test_a_waiting_job_moves_off_an_account_its_provider_says_is_out_of_credit(grouped, repo):
+    """The ledger thinks modal-a has all its money; its provider says it has none."""
+    job = grouped.submit(cloud_spec(repo, target="modal", est_runtime=600))
+    assert job.spec.target == "modal-a"
+    grouped.executors["modal-a"].provider.with_credit(exhausted=True)
+    grouped.tick()
+    moved = grouped.job(job.id)
+    assert moved.spec.target == "modal-b" and moved.reason == "moved"
+    assert "modal-a is out of credit, its provider says" in moved.summary
+
+
+def test_a_job_that_cannot_be_priced_is_left_alone(grouped, repo, monkeypatch):
+    job = grouped.submit(cloud_spec(repo, target="modal", est_runtime=3600))
+    spent(grouped, "modal-a", 25.0)
+    for name in ("modal-a", "modal-b"):
+        monkeypatch.setattr(grouped.executors[name].provider, "rates", dict)
+    grouped._rates.clear()
+    grouped.tick()
+    assert grouped.job(job.id).spec.target == "modal-a"
+
+
+def test_a_job_that_fits_where_it_is_prices_no_other_account(grouped, repo, clock):
+    """The rebalance runs every tick, so its common case must cost nothing the lane does not."""
+    grouped.submit(cloud_spec(repo, target="modal", est_runtime=3600))
+    clock.advance(CLOUD_RATE_TTL + 1)
+    other = grouped.executors["modal-b"].provider
+    other.rates_calls = 0
+    grouped.tick()
+    assert other.rates_calls == 0

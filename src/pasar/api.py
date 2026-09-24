@@ -298,9 +298,12 @@ def create_app(daemon: Daemon, *, prom: Prometheus | None = None, wake=lambda: N
     # projects it past its approved run time (`daemon.needs_more_time`), raising its ceiling
     # instead of admitting it to the queue. See `Daemon._extend`. `max_cost` is the person
     # raising the job's own --max-cost on the way (never lowering it, never past max_job_cost).
+    # `target` is the account the approver was shown: a group job can move to another before
+    # it launches, and a yes for one person's credit is refused rather than spent on another's.
     @app.post("/api/jobs/{job_id}/approve")
-    async def approve(job_id: int, extend: bool = False, max_cost: float | None = None):
-        job = daemon.approve(job_id, extend=extend, max_cost=max_cost)
+    async def approve(job_id: int, extend: bool = False, target: str | None = None,
+                      max_cost: float | None = None):
+        job = daemon.approve(job_id, extend=extend, target=target, max_cost=max_cost)
         wake()
         return view(job)
 
