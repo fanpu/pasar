@@ -84,6 +84,9 @@ To run jobs on [Modal](https://modal.com):
                                    # is a config error, and pasard won't start with it
        # profile = "your-profile"
 
+   Running several Modal accounts from one pasard? Give each its own target with the same
+   `group` (and a `profile` and `owner` each) instead, and submit with `--on <group>`; pasar
+   picks the fullest account that still fits. See [docs/cloud.md](docs/cloud.md#running-from-several-accounts).
 5. Restart pasard, then `pasar submit --on modal --gpu T4 --time 30m -- .venv/bin/python train.py`.
 6. The job waits in `awaiting` until a person approves it. Until the approval UI exists, that is
    `curl -X POST http://127.0.0.1:8750/api/jobs/<id>/approve`. **Agents must never call the

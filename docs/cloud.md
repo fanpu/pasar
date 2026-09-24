@@ -95,6 +95,7 @@ can. So the true ceiling lives at the provider (item 1), and pasar makes spendin
 | **Environment spec** | `pyproject.toml`, `uv.lock`, `.python-version`, plus every uv workspace member's `pyproject.toml` and the files a `pyproject.toml` references that uv reads while resolving (its readme and licence files). Its hash is the image cache key. |
 | **Persist dir** | Per-job storage on a provider volume that survives every attempt of the job (`$PASAR_PERSIST_DIR`, `pasar_job.persist_dir()`), for checkpoints and outputs. Once the job finishes it is pulled to local disk and deleted at the provider — see [Getting results back](#getting-results-back-and-when-they-are-deleted). |
 | **Wrapper** | `python -m pasar_job.run`, the entry point inside the container. It runs the command and talks to pasard through stdout. |
+| **Group** | A name shared by several targets' `group =` setting, meaning their accounts are interchangeable. `--on <group>` (instead of a target) resolves to one member account at submit; `--on <account>` still names one directly. See [Running from several accounts](#running-from-several-accounts). |
 
 ## Architecture
 
@@ -623,6 +624,89 @@ provider. A target left without a provider keeps its waiting jobs (paused, await
 queued) where they are until it has one again; only a running job is failed, since nothing can
 follow its attempt. A job that finished meanwhile is pulled once the provider is back, however
 long that took: the retention sweep never deletes a job no automatic pull has tried.
+
+### Running from several accounts
+
+Several people's Modal accounts — or several workspaces of one person's — can run from one
+pasard. Give each account its own `[clouds.*]` target and the same `group`, so `--on <group>`
+can pick between them instead of a person or an agent naming an account by hand:
+
+```toml
+[clouds.modal-alice]
+provider = "modal"        # every member of a group must share one provider, explicit or inherited
+group = "modal"
+profile = "alice"          # alice's own profile in ~/.modal.toml; never falls back to whichever
+                            # profile happens to be active there
+owner = "alice"             # whose credit this is, shown on the job and in the approval; defaults
+                            # to `profile`, then to the target's own name
+budget = { monthly = 30.0 }
+
+[clouds.modal-bob]
+provider = "modal"
+group = "modal"
+profile = "bob"
+owner = "bob"
+budget = { monthly = 30.0 }
+```
+
+`provider` on a grouped target defaults to the group's own name, so a group named after the
+provider its members share (as above) can leave `provider =` off every member. If that inherited
+name turns out not to be a provider pasar has, each affected target is logged and left with no
+provider — not pasard refusing to start — the same as any other misconfigured target (see
+above); the fix is to set `provider =` explicitly on every member. A group also can't share its
+name with a plain cloud target, and its members can't disagree on `provider`: both are config
+errors pasard refuses to start with, because a group's whole point is that its members are
+interchangeable.
+
+**`--on <group>` (e.g. `--on modal` above) picks the fullest account that still fits, at
+submit.** Of the group's members that can afford the job's price ceiling this month, pasar
+resolves to whichever has the *least* headroom left — the fullest account that still has room,
+not the emptiest one. This is packing, not spreading, and deliberately so: each account has its
+own image cache and its own Modal volumes, so a job that landed on a fresh account would pay for
+a fresh image build out of credit meant for compute, and could never resume a checkpoint left on
+another account's volume. Concentrating work on as few accounts as possible keeps both cheap.
+Once resolved this way, the job's target is a concrete account like any other — the budget gate,
+approval and ledger never know a group was involved. `--on <account>` skips all of this and pins
+that account from the start, the same as it always has for a single-target config.
+
+If none of the group's accounts has the monthly headroom for a new job, the submit is refused
+(not queued) naming every member, whose credit it is, and what's left of each one's budget, so a
+person can see at a glance whose account is short before approving anything else onto it;
+`--on <account>` still queues for one by name regardless.
+
+**A job is pinned to whichever account it lands on, for the rest of its life, once it has run.**
+Resolving `--on <group>` only ever happens once, at submit, before anything has been spent — there
+is nothing that moves an already-run job to a different account. This is the sharpest edge in the
+whole design: a paused job's checkpoint lives on that one account's Modal volume, so if that
+account's credit runs out mid-life, the job cannot be resumed anywhere else until the credit
+resets — a group buys a good first pick, not a safety net after the first attempt runs. Naming
+`--on <account>` directly instead of a group makes this pin explicit from the outset, since there
+was never another account the job could have gone to.
+
+<!-- verify after T5 merge -->
+A queued or awaiting job that has *not* run yet (no attempt) is planned to move off an account
+that can no longer afford it to a sibling that can, the next time the daemon looks — still only
+within its own group, and never once an attempt has run, for exactly the pinning reason above.
+
+<!-- verify after T6 merge -->
+Today the headroom `--on <group>` and the budget gate compare against is only pasar's own ledger
+of what it has spent and committed — it can't see an image build run by hand, a sandbox started
+outside pasar, or a collaborator's own work on the same account. That is planned to change:
+Modal's own billing summary for the account is meant to be read alongside the ledger, and the
+larger of the two figures used, since over-counting is the safe direction here.
+
+<!-- verify after T7 merge -->
+An account can look completely healthy in its budget and still refuse to launch anything, e.g. a
+Modal workspace spending limit set to zero — a failure only a real launch attempt reveals. That
+is planned to take the account out of the group's rotation (no headroom, never chosen) until a
+launch on it succeeds again, and to re-resolve a job refused this way to a sibling instead of
+failing it outright, since nothing was spent and no checkpoint exists yet.
+
+Every account's tokens stay in `~/.modal.toml`; nothing in `config.toml` or committed to a repo
+is ever a credential, only a `profile` name that points at one. Because spending somebody else's
+credit is easy to do by accident when several accounts are one `--on` away, whose account a job
+landed on is always visible: on the job itself (its `target`), and in `pasar cloud` and the
+approval, which show each target's `owner` — by design, not as an afterthought.
 
 `rates` pins prices over the provider's live list, keyed the way the provider reports them
 (`pasar cloud --json` shows the keys): `gpu_hour_cost_<gpu>` in $/GPU-hour, and the sandbox's
