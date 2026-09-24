@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { ApiError, cancelJob, followLog, setBid, submitJob } from "../lib/api";
+import { ApiError, approve, cancelJob, followLog, reject, setBid, submitJob } from "../lib/api";
 
 function mockFetch(status: number, body: unknown) {
   const f = vi.fn().mockResolvedValue(new Response(JSON.stringify(body), { status, headers: { "Content-Type": "application/json" } }));
@@ -58,6 +58,24 @@ describe("api", () => {
     const err = await submitJob({ command: "x", time: "1h", cwd: "/" }).catch((e) => e);
     expect(err).toBeInstanceOf(ApiError);
     expect(err.message).toBe("Field required; bad time");
+  });
+  it("approves a job with no query string by default", async () => {
+    const f = mockFetch(200, { id: 3, state: "queued" });
+    await approve(3);
+    expect(f.mock.calls[0][0]).toBe("/api/jobs/3/approve");
+    expect(f.mock.calls[0][1].method).toBe("POST");
+  });
+  it("approves with extend=1 to raise a running job's ceiling", async () => {
+    const f = mockFetch(200, { id: 3, state: "running" });
+    await approve(3, true);
+    expect(f.mock.calls[0][0]).toBe("/api/jobs/3/approve?extend=1");
+    expect(f.mock.calls[0][1].method).toBe("POST");
+  });
+  it("posts without a body for reject", async () => {
+    const f = mockFetch(200, { id: 3, state: "cancelled" });
+    await reject(3);
+    expect(f.mock.calls[0][0]).toBe("/api/jobs/3/reject");
+    expect(f.mock.calls[0][1].method).toBe("POST");
   });
 });
 

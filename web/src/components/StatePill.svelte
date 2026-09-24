@@ -9,6 +9,7 @@
 
   const ICONS: Record<JobView["state"], string> = {
     running: "●", queued: "◷", stopping: "◐", completed: "✓", failed: "✕", cancelled: "–",
+    awaiting: "◔",
   };
 
   const text = $derived.by(() => {
@@ -27,6 +28,8 @@
         return reasonLabel(job.reason) || "failed";
       case "cancelled":
         return "cancelled";
+      case "awaiting":
+        return "awaiting your OK";
       default:
         return job.state;
     }

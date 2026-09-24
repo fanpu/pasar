@@ -48,6 +48,7 @@ export function job(overrides: Partial<JobView> = {}): JobView {
     last_checkpoint: null,
     projected: [],
     spans: [],
+    cloud: null,
     ...overrides,
   };
 }

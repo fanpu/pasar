@@ -1,9 +1,33 @@
 // Mirrors src/pasar/views.py, src/pasar/db.py (_event, metric_summaries), src/pasar/api.py
 // (SubmitBody, RestartBody). The Python code is the source of truth.
 
-export type JobState = "queued" | "running" | "stopping" | "completed" | "failed" | "cancelled";
+export type JobState =
+  | "queued" | "running" | "stopping" | "completed" | "failed" | "cancelled"
+  | "awaiting"; // cloud only: submitted, waiting for a person to approve the cost
 export type EndKind = "completed" | "failed" | "preempted" | "cancelled";
 export type Span = [start: number, end: number | null, endKind: EndKind | null];
+
+/** `persist_view` in views.py: what a finished cloud job left in its persist dir, where it went,
+ * and when what is still at the provider goes. `null` until the job is terminal. */
+export interface CloudPersist {
+  files: number | null; bytes: number | null; pulled_at: number | null; pulled_to: string | null;
+  remote_deleted: boolean; remote_bytes: number | null;
+  swept_at: number | null; swept_bytes: number | null; sweeps_at: number | null;
+  last_error: string | null;
+}
+
+/** `cloud_view` in views.py: the `cloud` object embedded in a cloud job's `JobView`; `null` for a
+ * job that ran locally. */
+export interface CloudJob {
+  target: string; gpu: string;
+  phase: "pending" | "starting" | "running" | "success" | "exit-code" | "stopped" | "reclaimed"
+       | "time_limit" | "signal" | null;
+  estimated_cost: number | null; max_cost: number | null; user_capped: boolean;
+  approved_seconds: number | null; full_seconds: number | null;
+  job_cap: number | null; job_spent: number; console_url: string | null;
+  needs_more_time: number | null;
+  persist: CloudPersist | null;
+}
 
 export interface JobView {
   id: number; name: string; state: JobState; reason: string | null; summary: string;
@@ -21,6 +45,7 @@ export interface JobView {
   last_checkpoint: { step: number | null; ts: number } | null;
   projected: [number, number][];
   spans: Span[];
+  cloud: CloudJob | null;
 }
 
 export interface AttemptView {
@@ -41,7 +66,30 @@ export interface StatusView {
   machine_events: MachineEvent[]; hot_temp_c: number; grafana_url: string | null;
 }
 
-export interface Snapshot { status: StatusView; jobs: JobView[] }
+/** One GPU a cloud target can be asked for (`Daemon.cloud_gpus`): the name `--gpu` accepts, its
+ * live $/hour, and its memory in GB — `null` when the provider's memory table doesn't know it. */
+export interface CloudGpu { name: string; hourly_rate: number; memory_gb: number | null }
+
+/** One configured cloud target, as `cloud_status_view` and `GET /api/cloud` show it. */
+export interface CloudTarget {
+  name: string; provider: string; configured: boolean;
+  daily_budget: number; monthly_budget: number;
+  spent_today: number; spent_month: number; committed: number;
+  max_running: number; max_job_cost: number; running: number;
+  rates: Record<string, number>;
+  known_stored_bytes: number; known_stored_jobs: number;
+  gpus: CloudGpu[];
+}
+
+/** The `cloud` block on the stream snapshot: `null` when no cloud target is configured. */
+export interface CloudBlock {
+  targets: CloudTarget[];
+  awaiting: JobView[];   // State.AWAITING cloud jobs
+  needs_time: JobView[]; // running cloud jobs past their approved pace
+  recent: JobView[];     // up to 5 most recently finished cloud jobs
+}
+
+export interface Snapshot { status: StatusView; jobs: JobView[]; cloud: CloudBlock | null }
 
 export interface JobEvent {
   attempt: number; ts: number; kind: "checkpoint" | "resumed" | "progress" | "note";

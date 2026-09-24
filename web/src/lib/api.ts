@@ -74,6 +74,14 @@ export function getLog(id: number, offset = 0): Promise<{ text: string; offset: 
 export function cancelJob(id: number): Promise<JobView> {
   return request("POST", `/api/jobs/${id}/cancel`);
 }
+/** Approves a cloud job's cost so it can start (or resume) — or, with `extend`, raises a
+ * *running* job's approved ceiling to cover what `needs_more_time` says it now needs. */
+export function approve(id: number, extend = false): Promise<JobView> {
+  return request("POST", `/api/jobs/${id}/approve${extend ? "?extend=1" : ""}`);
+}
+export function reject(id: number): Promise<JobView> {
+  return request("POST", `/api/jobs/${id}/reject`);
+}
 export function setBid(id: number, bid: number, preempt: boolean): Promise<JobView> {
   return request("PATCH", `/api/jobs/${id}`, { bid, preempt });
 }

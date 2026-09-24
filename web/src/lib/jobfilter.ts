@@ -52,9 +52,13 @@ export function isActive(f: Filter): boolean {
   return f.q !== "" || f.states.length > 0 || f.tags.length > 0 || f.by.length > 0 || f.sort !== null;
 }
 
-/** Maps a job's raw state onto a filter bucket: running and stopping both count as "running". */
+/** Maps a job's raw state onto a filter bucket: running and stopping both count as "running";
+ * awaiting (cloud jobs waiting on a person to approve their cost) counts as "queued" until the
+ * job list grows its own awaiting group. */
 function stateFilterOf(state: JobState): StateFilter {
-  return state === "running" || state === "stopping" ? "running" : state;
+  if (state === "running" || state === "stopping") return "running";
+  if (state === "awaiting") return "queued";
+  return state;
 }
 
 /** `q` matches `#id`/id, name, command or note (case-insensitive substring). `states` (if any)
