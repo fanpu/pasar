@@ -72,7 +72,11 @@ Your job is a **poor candidate for sharing** if it has any of the following.
 - Tight memory usage close to the GPU's capacity
 - A deadline or a need for early results (sharing delays every job's completion)
 
-To share, pass `--mem` with an honest estimate of what the job needs.
+To share, pass `--mem` with an honest estimate of what the job needs. Going over the estimate is
+tolerated while the machine has room: the job keeps running and is flagged `over limit`. Only when
+the machine stays under memory pressure (about 30 s) does pasar kill a job, and then it is the one
+furthest over its limit (reason `oom`). Keep the estimate honest anyway: other jobs are scheduled
+around it, so a low one crowds them and makes yours the first to go when memory runs short.
 
 **Keep the default bid (1000) unless the work should go ahead of what's queued**, and add
 `--preempt` only when it is worth stopping someone else's running job (they lose work since their

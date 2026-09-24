@@ -73,7 +73,7 @@ including `PASAR_*`) and runs roughly:
 systemd-run --user --quiet --unit=pasar-job-42-3 \
   -p StandardOutput=append:<jobdir>/output.log -p StandardError=append:<jobdir>/output.log \
   -p RemainAfterExit=yes -p KillMode=control-group -p KillSignal=SIGTERM \
-  -p TimeoutStopSec=<grace> -p MemorySwapMax=0 -p MemoryMax=<limit> \
+  -p TimeoutStopSec=<grace> -p MemorySwapMax=0 -p MemoryMax=<pool> \
   <python> -m pasar.launch <jobdir>
 ```
 
@@ -98,7 +98,7 @@ So pasar accounts for memory itself.
 - **Shared job** requesting *R*: reserves **R + max(2 GiB, 10% of R)** to cover the CUDA context, fragmentation and caching-allocator slack. This reservation is the job's **limit**.
 - **Job usage** = cgroup `memory.current` + the NVML GPU memory of every PID in the job's cgroup. Peak usage is tracked per attempt.
 - For scheduling, each running job counts as `max(reservation, actual usage)`.
-- The cgroup `MemoryMax` is set to the limit as a backstop for CPU-side memory only.
+- The limit is not a hard cap. Every local job, shared or whole-GPU, gets the same cgroup `MemoryMax`: the full pool, set once at launch, a machine-safety backstop for CPU-side memory only. A shared job that runs past its limit while the machine has room keeps running; only the watchdog below stops it, and only under sustained pressure.
 
 ### Watchdog
 
