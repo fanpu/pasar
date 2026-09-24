@@ -20,6 +20,7 @@
   import Toast from "./components/Toast.svelte";
   import JobPanel from "./components/JobPanel.svelte";
   import JobForm from "./components/JobForm.svelte";
+  import Peek from "./components/Peek.svelte";
   import type { JobDetail, JobView, Snapshot } from "./lib/types";
 
   const live = new Live();
@@ -58,6 +59,8 @@
     return [...liveJobs, ...cache.filter((j) => !liveIds.has(j.id))];
   });
   const filterKnown = $derived(knownValues(knownSource));
+  // The user's own custom peek image, if they've dropped one in — never a built-in.
+  const peekImage = $derived(mascot.manifest.peek?.[0] ?? null);
   const tableJobs = $derived(
     filterActive ? sortJobs(source.filter((j) => matches(j, filter)), effectiveSort(filter)) : (live.snapshot?.jobs ?? []),
   );
@@ -253,3 +256,4 @@
   {/if}
 </div>
 <Toast message={toast?.message ?? null} image={toast?.image ?? ""} />
+<Peek src={peekImage} />

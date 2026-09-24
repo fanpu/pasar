@@ -117,6 +117,8 @@ export type Series = [number, number][];
 export interface JobSpark { key: string; points: Series; latest: number }
 export type SparkMap = Record<number, JobSpark>;
 export interface GpuSeries { power_w: Series; temp_c: Series; util_pct: Series }
+// Keyed by MascotState, plus "peek" for the optional corner-peek image — at most one URL, since
+// unlike the states there's no picking a random variant.
 export type MascotManifest = Record<string, string[]>;
 
 export interface SubmitBody {
