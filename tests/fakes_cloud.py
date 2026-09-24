@@ -80,6 +80,7 @@ class FakeProvider:
         self.after_download = None
         self.short_download: set[int] = set()
         self.fail_download: set[int] = set()
+        self.rates_calls = 0
 
     # --- provider interface
     def prepare_image(self, env: EnvSpec) -> str:
@@ -120,6 +121,7 @@ class FakeProvider:
         return [(h, b.req.tags) for h, b in self.boxes.items() if b.phase is not Phase.GONE]
 
     def rates(self) -> dict[str, float]:
+        self.rates_calls += 1
         return {"gpu_hour_cost_h100": 3.95, "cpu_hour_cost_sandbox": 0.14,
                 "mem_gib_hour_cost_sandbox": 0.024}
 

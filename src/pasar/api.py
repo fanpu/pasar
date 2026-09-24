@@ -27,6 +27,7 @@ from pasar.models import TERMINAL, JobSpec, State
 from pasar.units import parse_duration, parse_size
 from pasar.views import (
     attempt_view,
+    cloud_snapshot_view,
     cloud_status_view,
     job_view,
     schedule_projection,
@@ -243,7 +244,8 @@ def create_app(daemon: Daemon, *, prom: Prometheus | None = None, wake=lambda: N
         now = daemon.clock()
         proj = schedule_projection(daemon, now)
         return {"status": status_view(daemon, now, proj),
-                "jobs": [job_view(daemon, j, now, proj) for j in listed(now)]}
+                "jobs": [job_view(daemon, j, now, proj) for j in listed(now)],
+                "cloud": cloud_snapshot_view(daemon, now, proj)}
 
     @app.post("/api/jobs", status_code=201)
     async def submit(body: SubmitBody):

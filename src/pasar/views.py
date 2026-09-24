@@ -344,3 +344,41 @@ def cloud_status_view(daemon, now: float, projection: dict) -> dict:
         if pace is not None:
             needs_time.append(job_view(daemon, j, now, projection, pace))
     return {"targets": targets, "awaiting": awaiting, "needs_time": needs_time}
+
+
+RECENT_CLOUD_LIMIT = 5
+
+
+def _recent_cloud_jobs(daemon, now: float, projection: dict, limit: int = RECENT_CLOUD_LIMIT):
+    """Up to `limit` most recently finished cloud jobs, newest first. `cloud_finished` (stamped
+    the moment a cloud job goes terminal — see `Daemon._cloud_ended`) is the source of which jobs
+    to even look at, so this never walks every local job ever run; each one's own end time is its
+    current attempt's `end_time` where that survived, else the stamp itself (a job cancelled or
+    rejected while awaiting approval never ran an attempt at all)."""
+    candidates: list[tuple[float, Job]] = []
+    for job_id, ts in daemon.store.cloud_finished().items():
+        job = daemon.store.get_job(job_id)
+        if job is None or job.state not in TERMINAL or job.spec.target == LOCAL:
+            continue
+        att = daemon.store.current_attempt(job_id)
+        ended = att.end_time if att and att.end_time else ts
+        candidates.append((ended, job))
+    candidates.sort(key=lambda pair: pair[0], reverse=True)
+    return [job_view(daemon, job, now, projection) for _, job in candidates[:limit]]
+
+
+def cloud_snapshot_view(daemon, now: float, projection: dict) -> dict | None:
+    """The `cloud` key in the live snapshot (`GET /api/stream`, `snapshot()` in api.py): `None`
+    when no cloud target is configured, so a plain local box never carries an empty cloud block
+    around. Otherwise everything `cloud_status_view` already reports, plus `recent`, the most
+    recently finished cloud jobs — reusing `cloud_status_view` rather than rebuilding targets,
+    `awaiting` and `needs_time` a second way.
+
+    Kept cheap on purpose: the snapshot is rebuilt on every version bump, so nothing here may call
+    a provider except through `cloud_rates`/`cloud_gpus`, both already cached for
+    `CLOUD_RATE_TTL` seconds (see `Daemon.cloud_rates`)."""
+    if not daemon.cfg.clouds:
+        return None
+    view = cloud_status_view(daemon, now, projection)
+    view["recent"] = _recent_cloud_jobs(daemon, now, projection)
+    return view

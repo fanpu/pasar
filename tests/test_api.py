@@ -533,3 +533,73 @@ def test_price_rise_above_the_users_cap_bounces_to_awaiting(client, cloud_daemon
     assert job["state"] == "awaiting" and job["reason"] == "price_rose"
     assert job["cloud"]["max_cost"] == pytest.approx(9.00)  # live re-price, held to --max-cost
     assert job["cloud"]["user_capped"] is True
+
+
+# ---- the `cloud` key in the live snapshot (/api/stream)
+
+def stream_snapshot(client):
+    with client.stream("GET", "/api/stream?limit=1") as r:
+        line = next(ln for ln in r.iter_lines() if ln.startswith("data: "))
+    return json.loads(line[len("data: "):])
+
+
+def finish_cloud_job(client, cloud_daemon, cloud_provider, cloud_cwd, **kw):
+    """Submit, approve, launch and finish one cloud job; returns its id."""
+    job_id = submit_cloud(client, cloud_cwd, **kw).json()["id"]
+    client.post(f"/api/jobs/{job_id}/approve")
+    cloud_daemon.tick()  # launches it
+    handle = cloud_daemon.store.current_attempt(job_id).unit.rsplit(":", 1)[1]
+    cloud_provider.finish(handle, 0)
+    cloud_daemon.tick()  # picks up the exit and completes the job
+    return job_id
+
+
+def test_snapshot_cloud_is_none_without_a_cloud_target(client, daemon, tmp_path):
+    submit(client, tmp_path)
+    assert stream_snapshot(client)["cloud"] is None
+
+
+def test_snapshot_cloud_is_present_with_one_target(client, cloud_daemon, cloud_cwd):
+    submit_cloud(client, cloud_cwd)
+    cloud = stream_snapshot(client)["cloud"]
+    assert cloud is not None
+    assert [t["name"] for t in cloud["targets"]] == ["fake"]
+    assert cloud["needs_time"] == []
+    assert cloud["recent"] == []
+
+
+def test_snapshot_awaiting_cloud_job_is_in_both_cloud_awaiting_and_jobs(client, cloud_daemon,
+                                                                        cloud_cwd):
+    job_id = submit_cloud(client, cloud_cwd).json()["id"]
+    msg = stream_snapshot(client)
+    assert job_id in [j["id"] for j in msg["jobs"]]
+    assert job_id in [j["id"] for j in msg["cloud"]["awaiting"]]
+
+
+def test_snapshot_recent_cloud_jobs_are_capped_at_five_newest_first(client, cloud_daemon,
+                                                                     cloud_provider, cloud_cwd,
+                                                                     clock):
+    ids = []
+    for i in range(6):
+        ids.append(finish_cloud_job(client, cloud_daemon, cloud_provider, cloud_cwd,
+                                    name=f"job{i}"))
+        clock.advance(60)
+    recent = stream_snapshot(client)["cloud"]["recent"]
+    assert [j["id"] for j in recent] == list(reversed(ids))[:5]
+
+
+def test_snapshot_recent_cloud_jobs_never_include_local_jobs(client, cloud_daemon, cloud_provider,
+                                                              cloud_cwd, tmp_path):
+    local_id = submit(client, tmp_path).json()["id"]
+    client.post(f"/api/jobs/{local_id}/cancel")
+    cloud_id = finish_cloud_job(client, cloud_daemon, cloud_provider, cloud_cwd)
+    recent_ids = [j["id"] for j in stream_snapshot(client)["cloud"]["recent"]]
+    assert recent_ids == [cloud_id]
+
+
+def test_snapshot_building_calls_the_provider_at_most_once_for_rates(client, cloud_daemon,
+                                                                      cloud_provider, cloud_cwd):
+    submit_cloud(client, cloud_cwd)
+    stream_snapshot(client)
+    stream_snapshot(client)  # same clock reading: the cached rates must cover both
+    assert cloud_provider.rates_calls <= 1
