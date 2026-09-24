@@ -12,9 +12,10 @@ with the optional `pasar[modal]` extra, one Modal account per target), a persist
 outlives its attempts, and getting results back: `pasar pull`, an automatic pull when a job
 finishes, and a retention sweep of whatever nobody pulled (see
 [Getting results back](#getting-results-back-and-when-they-are-deleted)). The tests run against a
-fake, in-process provider and a fake Modal SDK (see [Testing](#testing)), never the network. Still
-a proposal, not implemented: the web UI (so there is no approval UI — a person approves with
-`POST /api/jobs/{id}/approve` — and no cloud timeline), `--data` upload, `--resume-from`, pace
+fake, in-process provider and a fake Modal SDK (see [Testing](#testing)), never the network. The web
+UI's Cloud card is built — a person approves a waiting job there with **Approve…** and gives a
+running one more time with **Give more time…** — but much of the [Web UI](#web-ui) described
+below (the cloud timeline among it) is still a proposal, and so are `--data` upload, `--resume-from`, pace
 calibration, billing reconciliation with a provider's own numbers, and a periodic sweep for stray
 sandboxes (strays are only looked for when pasard starts). Each of those is called out again where
 it comes up below.
@@ -413,9 +414,8 @@ finishes, so the limit pauses instead, and pasar warns early, using the job's re
    pace, and three is the smallest count that shows a cadence rather than a single event. Once
    both hold, pasar projects the job's total run time the same way the schedule does; if that is
    over the approved run time, `needs_more_time` (seconds of projected overrun) is non-`None` on
-   the job's `cloud` view, and the job is meant to appear in the approval tray as **needs more
-   time** ("#52 is on pace for 2 h 40 m, approved 1 h 30 m: approve $9 more?" — the tray itself is
-   part of the web UI and not yet built). A person can raise the ceiling with
+   the job's `cloud` view, and the web UI's Cloud card flags the job as needing more time, with a
+   **Give more time…** button. That is how a person raises the ceiling: it calls
    `POST /api/jobs/{id}/approve?extend=1`, which re-reads the attempt's current pace and ceiling
    each time, so a job extended once and still falling behind can be extended again. The job keeps
    running either way; nothing here stops it early.
@@ -455,7 +455,8 @@ tree is snapshotted fresh, the estimated cost is shown again, and the budget is 
 - `pasar restart` and `POST /api/jobs/{id}/restart` return an error for cloud jobs, which gives the
   equivalent `pasar submit` command.
 - The UI hides **restart** and **restart…** on cloud jobs and shows **copy submit command** instead
-  (proposed; the web UI isn't built).
+  (proposed, not built: the web UI still shows restart on a finished cloud job, and it gets the
+  same error).
 - Continuing an earlier job's checkpoint into a new submit, with `--resume-from <id>`, is proposed
   but not implemented.
 
@@ -691,9 +692,10 @@ person can see at a glance whose account is short before approving anything else
 `--on <account>` still queues for one by name regardless.
 
 **A job is pinned to whichever account it lands on, for the rest of its life, once it has run.**
-Nothing moves a job that has had an attempt (or has spend recorded against it) to a different
-account. This is the sharpest edge in the whole design: a paused job's checkpoint lives on that
-one account's Modal volume, so it can never resume anywhere else. If that account runs out of
+Nothing moves a job that has run (had an attempt its account did not refuse) to a different
+account; a job whose every attempt was refused never ran, and is moved (see `account_unusable`).
+This is the sharpest edge in the whole design: a paused job's checkpoint lives on that one
+account's Modal volume, so it can never resume anywhere else. If that account runs out of
 credit mid-life, an attempt the provider ends there fails the job (`out_of_credit`) rather than
 pausing it, and a resubmit starts over — a group buys a good first pick, not a safety net after
 the first attempt runs. Naming `--on <account>` directly instead of a group makes this pin

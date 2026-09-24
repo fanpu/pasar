@@ -57,9 +57,9 @@ real money, so it's built to be hard to trigger by accident:
 
 - A cloud target only exists if `config.toml` defines it with a `budget`, and needs its own
   spending limit set at the provider (its dashboard, not pasar) as the real backstop.
-- Every cloud run needs a person's approval in the web UI, at its estimated cost, before it
-  launches — there is no `pasar approve` command. That UI isn't built yet, so today a person
-  approves by calling `POST /api/jobs/{id}/approve` directly.
+- Every cloud run needs a person's approval in the web UI (**Approve…** on its Cloud card), at
+  its estimated cost, before it launches — there is no `pasar approve` command. A running job that
+  needs longer gets **Give more time…** there too.
 - One job may spend at most the target's `max_job_cost` (default $10) over its whole life, every
   attempt included; a submit estimated above it is refused. Raise it in `config.toml`.
 - **Agents must only submit with `--on` when the user has explicitly asked for cloud compute for
@@ -88,9 +88,8 @@ To run jobs on [Modal](https://modal.com):
    `group` (and a `profile` and `owner` each) instead, and submit with `--on <group>`; pasar
    picks the fullest account that still fits. See [docs/cloud.md](docs/cloud.md#running-from-several-accounts).
 5. Restart pasard, then `pasar submit --on modal --gpu T4 --time 30m -- .venv/bin/python train.py`.
-6. The job waits in `awaiting` until a person approves it. Until the approval UI exists, that is
-   `curl -X POST http://127.0.0.1:8750/api/jobs/<id>/approve`. **Agents must never call the
-   approve endpoint.**
+6. The job waits in `awaiting` until a person approves it with **Approve…** on the web UI's
+   Cloud card. **Agents must never call the approve endpoint.**
 
 When a cloud job finishes, whatever it wrote under `pasar_job.persist_dir()` is pulled to local
 disk (`pull_dir`, by default `~/.local/share/pasar/pulls/<id>/`) and deleted at Modal. A pull

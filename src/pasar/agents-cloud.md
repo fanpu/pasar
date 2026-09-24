@@ -15,9 +15,9 @@ checkpoints, `pasar wait` and `pasar cancel` as a local one. It also costs real 
   a busy GPU without asking.
 - **Never approve.** Every cloud attempt waits in `awaiting` until a person approves it. There is
   no `pasar approve` command. Never call `POST /api/jobs/{id}/approve` (with or without
-  `?extend=1`) or `/reject`, on the user's behalf or otherwise. The approval UI isn't built yet,
-  so today the user approves by calling the endpoint themselves. That is still never an agent's
-  call.
+  `?extend=1`) or `/reject`, on the user's behalf or otherwise. The user approves in the web UI:
+  **Approve…** on its Cloud card for a waiting job, **Give more time…** for a running one that
+  needs it. Point them there; approving is never an agent's call.
 - **`--on <group>` (e.g. `--on modal`) is the normal way to submit** when a target name covers
   several accounts: pasar picks which account pays, at submit, and may move a job that has not
   launched yet to another account of the group (`moved`); `--on <account>` pins a specific one
@@ -195,12 +195,13 @@ Once the user has said yes:
 
     $ pasar submit --time 1h15m --max-cost 7 --on modal --gpu H100 --tag sft \
         --note "sft on the full set" -- .venv/bin/python train.py
-    submitted #7 train (awaiting) on modal
+    submitted #7 train (awaiting) on modal-a (alice's account)
       estimated $5.00, capped at $7.00 (your --max-cost) for this run
       it will be paused after 1h45m instead of 1h52m, to stay under that cap
-      a person has to approve it before it launches: POST /api/jobs/7/approve (no web UI for it yet)
+      a person has to approve it before it launches: Approve… on the web UI's Cloud card
 
-(Figures illustrative.) The last line is for the user, not for you.
+(Figures illustrative.) The first line names the account the group picked and whose credit it
+spends. The last line is for the user, not for you.
 
 Extra flags, cloud jobs only:
 
@@ -266,7 +267,10 @@ authenticates, reads which workspace the token reaches (loudly, if two targets s
 means one allowance counted twice), and how much credit is used. LEFT OF BUDGET is the target's
 monthly budget in pasar's config less that, not the provider's own allowance. It exits non-zero on any problem,
 so it doubles as a health check; it never prints a token, and reports rather than raises when
-`modal` is not installed.
+`modal` is not installed. It cannot see a spend-limit refusal: a workspace past its spend limit
+still authenticates and its billing can look fine, so `pasar cloud check` passes it. Only a real
+launch reveals that (the job ends or moves with `account_unusable`, and its `summary` quotes the
+refusal).
 
 ## Pauses, and why a cloud job ended
 
@@ -339,8 +343,9 @@ jobs:
 - `needs_more_time`: extra seconds a running attempt's own pace projects past its approved run
   time, or `null` when it's on pace or there isn't enough progress yet to judge (that takes 5
   minutes and at least 3 progress reports since the attempt started). A flagged job keeps
-  running; the user can raise its ceiling (`POST /api/jobs/{id}/approve?extend=1`, never for an
-  agent to call) or let it pause at the limit and approve it again. Tell them.
+  running; the user can raise its ceiling (**Give more time…** in the web UI; never for an agent
+  to do, or to call `POST /api/jobs/{id}/approve?extend=1` for) or let it pause at the limit and
+  approve it again. Tell them.
 - `persist` (`null` until the job finishes): what it left behind. `files`/`bytes`/`pulled_at`/
   `pulled_to` of the last pull that landed, `remote_deleted`, `remote_bytes` (still at the
   provider, as last measured), `sweeps_at`, `swept_at`/`swept_bytes` and `last_error`.
