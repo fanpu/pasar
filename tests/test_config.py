@@ -217,15 +217,11 @@ def test_a_job_cap_must_be_positive(tmp_path, value):
 
 
 def test_groups_lists_members_in_config_order(tmp_path):
-    # provider is explicit and identical on both members: it defaults to the target's own name,
-    # and "b" and "a" differ, which would otherwise trip the mixed-provider check below.
     cfg = _write(tmp_path, """
         [clouds.b]
-        provider = "modal"
         group = "modal"
         budget = { monthly = 30.0 }
         [clouds.a]
-        provider = "modal"
         group = "modal"
         budget = { monthly = 30.0 }
         [clouds.solo]
@@ -233,6 +229,27 @@ def test_groups_lists_members_in_config_order(tmp_path):
     """)
     assert [t.name for t in cfg.groups()["modal"]] == ["b", "a"]
     assert "solo" not in cfg.groups()
+
+
+def test_a_grouped_targets_provider_defaults_to_its_group(tmp_path):
+    """Two members of a group rarely both spell out `provider =`; without this default they
+    resolved to two different providers (their own target names) and the mixing check below
+    rejected every real grouped config."""
+    cfg = _write(tmp_path, """
+        [clouds.b]
+        group = "modal"
+        budget = { monthly = 30.0 }
+        [clouds.a]
+        group = "modal"
+        budget = { monthly = 30.0 }
+    """)
+    assert cfg.clouds["b"].provider == "modal"
+    assert cfg.clouds["a"].provider == "modal"
+
+
+def test_an_ungrouped_targets_provider_still_defaults_to_its_own_name(tmp_path):
+    cfg = _write(tmp_path, "[clouds.solo]\nbudget = { monthly = 5.0 }\n")
+    assert cfg.clouds["solo"].provider == "solo"
 
 
 def test_a_group_may_not_be_named_after_a_target(tmp_path):
@@ -248,8 +265,9 @@ def test_a_group_may_not_be_named_after_a_target(tmp_path):
 
 
 def test_a_groups_members_must_share_a_provider(tmp_path):
-    """Members are interchangeable by definition; two providers in one group are not."""
-    with pytest.raises(ValueError, match="group 'mixed'"):
+    """Members are interchangeable by definition; two providers in one group are not. The error
+    names the fix: set provider = explicitly, or name the group after the provider it should be."""
+    with pytest.raises(ValueError, match="group 'mixed' mixes providers.*set provider ="):
         _write(tmp_path, """
             [clouds.a]
             provider = "modal"
@@ -258,5 +276,20 @@ def test_a_groups_members_must_share_a_provider(tmp_path):
             [clouds.b]
             provider = "runpod"
             group = "mixed"
+            budget = { monthly = 30.0 }
+        """)
+
+
+def test_a_group_named_after_something_that_is_not_a_provider_fails_clearly(tmp_path):
+    """A group's provider defaults to the group's own name; when nobody sets `provider =`
+    explicitly and that name is not a real provider, loading must say so plainly rather than
+    silently building a target for a provider that does not exist."""
+    with pytest.raises(ValueError, match="group 'burst' defaults to unknown provider 'burst'"):
+        _write(tmp_path, """
+            [clouds.a]
+            group = "burst"
+            budget = { monthly = 30.0 }
+            [clouds.b]
+            group = "burst"
             budget = { monthly = 30.0 }
         """)

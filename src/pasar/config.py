@@ -13,6 +13,10 @@ _SIZE_KEYS = {"system_reserve", "mem_margin_min", "log_retention_size", "pull_mi
               "pull_max"}
 _DURATION_KEYS = {"default_grace", "pressure_sustain"}
 
+# What `build_providers` actually knows how to build. A group's provider defaults to the group's
+# own name (see `_cloud_target`), and that default is only real if it names one of these.
+KNOWN_PROVIDERS = frozenset({"modal"})
+
 
 @dataclass
 class CloudTarget:
@@ -76,7 +80,12 @@ def _cloud_target(name: str, raw: dict) -> CloudTarget:
 
     return CloudTarget(
         name=name,
-        provider=raw.get("provider") or name,
+        # A group's members are meant to be interchangeable, so they share one provider by
+        # default too: falling back to the target's own name instead would make every ungrouped
+        # target its own provider (harmless, since nothing else names it), but would make two
+        # grouped targets that both omit `provider =` resolve to two different providers and trip
+        # the "group mixes providers" check below on every config that relies on the default.
+        provider=raw.get("provider") or raw.get("group") or name,
         daily_budget=daily_budget,
         monthly_budget=monthly_budget,
         profile=raw.get("profile", ""),
@@ -199,5 +208,10 @@ def load_config(path: Path | None = None) -> Config:
         providers = {t.provider for t in members}
         if len(providers) > 1:
             raise ValueError(f"group {group!r} mixes providers ({', '.join(sorted(providers))}); "
-                             "a group's members have to be interchangeable")
+                             "a group's members have to be interchangeable — set provider = on "
+                             "each member, or use a group named after the provider they share")
+        (provider,) = providers
+        if provider not in KNOWN_PROVIDERS:
+            raise ValueError(f"group {group!r} defaults to unknown provider {provider!r}; set "
+                             "provider = on a member, or name the group after a real provider")
     return cfg
