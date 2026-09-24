@@ -18,7 +18,7 @@ from pasar.cloud.base import GpuRow, parse_gpu, price_list
 from pasar.cloud.bundle import Bundle, BundleError, EnvSpec, build_bundle, check_platform
 from pasar.cloud.cost import Ledger, estimate, hourly_rate
 from pasar.cloud.executor import CloudExecutor
-from pasar.cloud.group import choose, shortfall
+from pasar.cloud.group import choose, headroom, shortfall
 from pasar.cloud.lane import CloudDecision, CloudQueued, decide_cloud
 from pasar.cloud.pace import needs_more_time as _needs_more_time
 from pasar.config import CloudTarget, Config
@@ -1440,6 +1440,7 @@ class Daemon:
         self._sample_machine()
         self._drop_unreachable(now)
         self._expire_awaiting(now)
+        self._rebalance(now)
         self._release_settled(now)
         for _, ex in self._cloud_executors():
             # Before the statuses are read: an attempt that ended between two ticks left its own
@@ -1544,6 +1545,125 @@ class Daemon:
                 job.id, state=State.CANCELLED, reason="approval_expired",
                 summary=f"nobody approved it within {fmt_duration(target.approval_ttl)}")
             self._cloud_ended(job, State.CANCELLED)
+
+    def _rebalance(self, now: float) -> None:
+        """Move a group job that has not launched yet off an account that can no longer pay for
+        it, to the one `choose` would pick now. Runs every tick, so it reads records and cached
+        rates only.
+
+        Only jobs submitted to a group: naming an account is how somebody says they meant that
+        one. Only jobs that have never run (no attempt, no spend): once one has, it is pinned to
+        its account, because its checkpoint is on that account's volume, and a job that silently
+        restarted somewhere else would pay twice for the same work.
+
+        "Can pay for it" counts the jobs waiting on each account as well as the ledger's settled
+        and running money, which the submit-time choice cannot see: several quick submits to a
+        group all land on the fullest account, and this is what spreads them once that account
+        cannot pay for them all. Waiting jobs claim an account's money in the order the lane
+        would want it spent — jobs that cannot move first, then approved ones, then those still
+        awaiting, each by submit order — so it is always the most movable job that moves, and a
+        job moved to where it fits is still there on the next tick.
+
+        A job that fits nowhere stays where it is: the budget gate blocks it there with a reason,
+        and credit resets.
+        """
+        groups = self.cfg.groups()
+        waiting = [j for j in self.store.list_jobs([State.QUEUED, State.AWAITING])
+                   if self._is_cloud(j)]
+        movable = {j.id: bool(groups.get(j.spec.group)) and not self._has_run(j)
+                   for j in waiting}
+        waiting.sort(key=lambda j: (movable[j.id], j.state != State.QUEUED, j.id))
+        claimed: dict[str, float] = {}
+
+        def claim(name: str, dollars: float) -> None:
+            claimed[name] = claimed.get(name, 0.0) + dollars
+
+        for job in waiting:
+            if not movable[job.id]:
+                target = self.cfg.clouds.get(job.spec.target)
+                if target is not None:
+                    claim(target.name, self._need(target, job))
+                continue
+            # Where it is first, and only that account priced: the lane prices it there anyway,
+            # so a job that fits costs nothing extra to check.
+            here = self.cfg.clouds.get(job.spec.target)
+            if here is not None and not self._movable_to(job, [here]):
+                here = None
+            if here is not None:
+                need = self._need(here, job)
+                if headroom(self.ledger, here, claimed.get(here.name, 0.0)) >= need:
+                    claim(here.name, need)
+                    continue
+            candidates = self._movable_to(job, groups[job.spec.group])
+            if not candidates:
+                continue  # nothing can price it right now; the lane says so if it matters
+            # The largest ceiling of any candidate, as at submit: a price difference between
+            # accounts can only make the choice more conservative.
+            need = max(self._need(t, job) for t in candidates)
+            chosen = choose(candidates, self.ledger, need, self._running_on, claimed)
+            if chosen is None or chosen.name == job.spec.target:
+                claim(job.spec.target, need)
+                continue
+            self._move(job, chosen, need, here, claimed.get(job.spec.target, 0.0), now)
+            claim(chosen.name, need)
+
+    def _has_run(self, job: Job) -> bool:
+        """True if `job` has used its account: an attempt, or spend recorded against it."""
+        return bool(self.store.attempts(job.id) or self.store.cloud_spend_of_job(job.id))
+
+    def _need(self, target: CloudTarget, job: Job) -> float:
+        """`_ceiling`, or nothing for a job that cannot be priced on `target` right now."""
+        try:
+            return self._ceiling(target, job)
+        except (KeyError, ValueError):
+            return 0.0
+
+    def _movable_to(self, job: Job, members: list[CloudTarget]) -> list[CloudTarget]:
+        """The members of `job`'s group it could run on, by the rules `_resolve_group` chose by
+        at submit: a provider here, a price for its GPU, and an estimate under the account's
+        `max_job_cost`."""
+        out = []
+        for t in members:
+            if t.name not in self.executors:
+                continue
+            try:
+                est = estimate(self._hourly(t, job.spec.gpu), job.spec.est_runtime)
+            except (KeyError, ValueError):
+                continue
+            if est <= t.max_job_cost + PRICE_TOLERANCE:
+                out.append(t)
+        return out
+
+    def _move(self, job: Job, chosen: CloudTarget, need: float, here: CloudTarget | None,
+              claimed_here: float, now: float) -> None:
+        """Point `job` at `chosen`, and say so where a person can see it. An approved job goes
+        back to awaiting: the approvals row records a price but no account, and the approve
+        dialog names whose credit pays, so a yes given for one person's credit must not spend
+        another's."""
+        was = job.spec.target
+        who = f" ({chosen.owner})" if chosen.owner else ""
+        if here is None:
+            why = (self._unreachable(was)[0] if was not in self.executors
+                   else f"this run is over {was}'s max_job_cost")
+        else:
+            left = headroom(self.ledger, here, claimed_here)
+            why = (f"{was} has ${left:.2f} left this month"
+                   + (" after the jobs waiting ahead of it there" if claimed_here else "")
+                   + f", and this job needs up to ${need:.2f}")
+        values: dict = {"spec": replace(job.spec, target=chosen.name)}
+        text = f"job {job.id} moved from {was} to {chosen.name}{who} before launching: {why}"
+        if job.state == State.QUEUED:
+            self.store.drop_approval(job.id, len(self.store.attempts(job.id)) + 1)
+            whose = chosen.owner or chosen.name
+            values.update(
+                state=State.AWAITING, queue_time=now, reason="moved",
+                summary=(f"moved from {was} to {chosen.name}{who} before launching, because "
+                         f"{why}. It was approved to spend {was}'s credit, not {whose}'s, so "
+                         "approve it again for it to run"))
+            text += "; its approval was for the other account, so it waits to be approved again"
+        self.store.update_job(job.id, **values)
+        self.store.add_machine_event(now, "cloud_moved", text)
+        self.changed()
 
     def _pause_overdue(self, now: float) -> None:
         """Stop a cloud attempt that has used the run time its approval bought. The wrapper
