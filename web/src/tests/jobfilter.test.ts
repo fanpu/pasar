@@ -77,6 +77,12 @@ describe("matches", () => {
     expect(matches(queued, { ...EMPTY_FILTER, states: ["running"] })).toBe(false);
   });
 
+  it("an awaiting cloud job is its own bucket, not folded into queued", () => {
+    const awaiting = job({ state: "awaiting" });
+    expect(matches(awaiting, { ...EMPTY_FILTER, states: ["awaiting"] })).toBe(true);
+    expect(matches(awaiting, { ...EMPTY_FILTER, states: ["queued"] })).toBe(false);
+  });
+
   it("tags require ALL listed, by requires ANY listed", () => {
     const j = job({ tags: ["a", "b"], submitter: "opus" });
     expect(matches(j, { ...EMPTY_FILTER, tags: ["a"] })).toBe(true);
@@ -163,9 +169,10 @@ describe("stateCounts", () => {
       job({ id: 4, state: "completed", tags: ["y"] }),
       job({ id: 5, state: "failed", tags: ["x"] }),
       job({ id: 6, state: "cancelled", tags: ["x"] }),
+      job({ id: 7, state: "awaiting", tags: ["x"] }),
     ];
     const f: Filter = { ...EMPTY_FILTER, tags: ["x"], states: ["completed"] };
-    expect(stateCounts(jobs, f)).toEqual({ running: 2, queued: 1, completed: 0, failed: 1, cancelled: 1 });
+    expect(stateCounts(jobs, f)).toEqual({ running: 2, awaiting: 1, queued: 1, completed: 0, failed: 1, cancelled: 1 });
   });
 });
 

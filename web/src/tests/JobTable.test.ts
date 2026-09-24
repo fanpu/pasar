@@ -4,6 +4,7 @@ import JobTable from "../components/JobTable.svelte";
 import * as api from "../lib/api";
 import { EMPTY_FILTER, type Filter } from "../lib/jobfilter";
 import { GIB, job, NOW } from "./fixtures";
+import { awaitingFresh, awaitingReapproval, cloudJobView } from "./fixtures/cloud";
 
 vi.mock("../lib/api", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../lib/api")>();
@@ -363,5 +364,81 @@ describe("JobTable", () => {
     await rerender({ jobs: jobsForB, filter: { ...EMPTY_FILTER, tags: ["b"] }, sourceJobs: jobsForB });
 
     expect(screen.queryByText("cancelled 1")).toBeNull();
+  });
+
+  describe("cloud jobs", () => {
+    it("groups awaiting cloud jobs in their own heading, above Queued and below Running", () => {
+      const { container } = render(JobTable, {
+        jobs: [
+          job({ id: 1, state: "running", start_time: NOW - 600 }),
+          awaitingFresh,
+          job({ id: 2, state: "queued" }),
+        ],
+        pool: 105 * GIB,
+        now: NOW,
+        selected: null,
+        onopen: () => {},
+      });
+      const headings = Array.from(container.querySelectorAll("tr.group td")).map((td) => td.textContent);
+      expect(headings).toEqual(["Running", "Awaiting approval", "Queued"]);
+    });
+
+    it("orders multiple awaiting jobs like the queued group (bid, then queue_time)", () => {
+      const { container } = render(JobTable, {
+        jobs: [awaitingReapproval, awaitingFresh],
+        pool: 105 * GIB,
+        now: NOW,
+        selected: null,
+        onopen: () => {},
+      });
+      const table = container.querySelector("table")!;
+      const names = within(table).getAllByRole("row").slice(2).map((r) => r.textContent);
+      // Both bid 1000 (the fixture default); the earlier queue_time (awaitingReapproval) sorts first.
+      expect(names[0]).toContain("finetune-a");
+      expect(names[1]).toContain("sweep-wd-3");
+    });
+
+    it("shows a cloud badge next to the state pill on cloud rows, not on local ones", () => {
+      const { container } = render(JobTable, {
+        jobs: [job({ id: 1, state: "running", start_time: NOW - 600 }), awaitingFresh],
+        pool: 105 * GIB,
+        now: NOW,
+        selected: null,
+        onopen: () => {},
+      });
+      const rows = container.querySelectorAll("tr.row");
+      const localRow = Array.from(rows).find((r) => r.querySelector(".jname")?.textContent === "job");
+      const cloudRow = Array.from(rows).find((r) => r.querySelector(".jname")?.textContent === "sweep-wd-3");
+      expect(localRow?.querySelector(".cloudbadge")).toBeNull();
+      expect(cloudRow?.querySelector(".cloudbadge")).not.toBeNull();
+    });
+
+    it("shows GPU · target in the memory column for a cloud job instead of GiB", () => {
+      const { container } = render(JobTable, {
+        jobs: [awaitingFresh],
+        pool: 105 * GIB,
+        now: NOW,
+        selected: null,
+        onopen: () => {},
+      });
+      const table = container.querySelector("table")!;
+      expect(within(table).getByText("H100 · modal-a")).toBeInTheDocument();
+    });
+
+    it("shows elapsed vs approved cloud time for a running cloud job, not its plain estimate", () => {
+      const runningCloud = cloudJobView(
+        { id: 300, state: "running", start_time: NOW - 5000, run_time: 5000, est_runtime: 2 * 3600 },
+        { approved_seconds: 14400, full_seconds: 14400 },
+      );
+      const { container } = render(JobTable, {
+        jobs: [runningCloud],
+        pool: 105 * GIB,
+        now: NOW,
+        selected: null,
+        onopen: () => {},
+      });
+      const table = container.querySelector("table")!;
+      expect(within(table).getByText(/1h23/)).toHaveTextContent("1h23 / ~4h00");
+    });
   });
 });

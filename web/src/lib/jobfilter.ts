@@ -3,12 +3,12 @@
 import type { JobState, JobView } from "./types";
 
 export type SortKey = "id" | "name" | "state" | "bid" | "memory" | "time" | "submitted" | "ended" | "by";
-export type StateFilter = "running" | "queued" | "completed" | "failed" | "cancelled";
+export type StateFilter = "running" | "awaiting" | "queued" | "completed" | "failed" | "cancelled";
 export interface Sort { key: SortKey; desc: boolean }
 export interface Filter { q: string; states: StateFilter[]; tags: string[]; by: string[]; sort: Sort | null }
 
 export const EMPTY_FILTER: Filter = { q: "", states: [], tags: [], by: [], sort: null };
-export const STATE_FILTERS: StateFilter[] = ["running", "queued", "completed", "failed", "cancelled"];
+export const STATE_FILTERS: StateFilter[] = ["running", "awaiting", "queued", "completed", "failed", "cancelled"];
 
 const SORT_KEYS: SortKey[] = ["id", "name", "state", "bid", "memory", "time", "submitted", "ended", "by"];
 
@@ -53,11 +53,10 @@ export function isActive(f: Filter): boolean {
 }
 
 /** Maps a job's raw state onto a filter bucket: running and stopping both count as "running";
- * awaiting (cloud jobs waiting on a person to approve their cost) counts as "queued" until the
- * job list grows its own awaiting group. */
+ * every other state (including "awaiting" — a cloud job waiting on a person to approve its
+ * cost) maps onto its own same-named bucket. */
 function stateFilterOf(state: JobState): StateFilter {
   if (state === "running" || state === "stopping") return "running";
-  if (state === "awaiting") return "queued";
   return state;
 }
 
@@ -122,7 +121,7 @@ export function sortJobs(jobs: JobView[], s: Sort): JobView[] {
  * chip's count would become, given the other active filters. */
 export function stateCounts(jobs: JobView[], f: Filter): Record<StateFilter, number> {
   const base: Filter = { ...f, states: [] };
-  const counts: Record<StateFilter, number> = { running: 0, queued: 0, completed: 0, failed: 0, cancelled: 0 };
+  const counts: Record<StateFilter, number> = { running: 0, awaiting: 0, queued: 0, completed: 0, failed: 0, cancelled: 0 };
   for (const job of jobs) {
     if (matches(job, base)) counts[stateFilterOf(job.state)]++;
   }

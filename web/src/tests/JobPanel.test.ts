@@ -1,10 +1,11 @@
-import { render, screen, fireEvent, waitFor } from "@testing-library/svelte";
+import { render, screen, fireEvent, waitFor, within } from "@testing-library/svelte";
 import { describe, expect, it, vi, beforeEach } from "vitest";
 import JobPanel from "../components/JobPanel.svelte";
 import JobForm from "../components/JobForm.svelte";
 import * as api from "../lib/api";
 import { ApiError } from "../lib/api";
 import { attempt, job, jobDetail, NOW } from "./fixtures";
+import { cloudJobView, cloudPersist } from "./fixtures/cloud";
 import type { JobDetail } from "../lib/types";
 
 vi.mock("../lib/api", async (importOriginal) => {
@@ -389,5 +390,116 @@ describe("JobPanel", () => {
 
     await rerender({ id: 1, live: jobA });
     expect(await screen.findByText("note-1")).toBeInTheDocument();
+  });
+
+  describe("cloud facts", () => {
+    it("omits the Cloud block for a local job", async () => {
+      const liveJob = job({ id: 42, name: "llama-sft", state: "running", start_time: NOW - 600 });
+      vi.mocked(api.getJob).mockResolvedValue(baseDetail({ state: "running", start_time: NOW - 600 }));
+      const { container } = render(JobPanel, {
+        id: 42, live: liveJob, now: NOW, grafanaUrl: null, onclose: noop, onrestartwith: noopRestartWith,
+      });
+      await screen.findByText("llama-sft");
+      expect(container.querySelector(".cloudblock")).toBeNull();
+    });
+
+    it("shows target, GPU, phase and cost for a running cloud job", async () => {
+      const liveJob = cloudJobView(
+        { id: 261, name: "train-sft", state: "running", start_time: NOW - 600, run_time: 5000 },
+        {
+          target: "modal-a", gpu: "H100", phase: "running",
+          estimated_cost: 5, max_cost: 7, user_capped: false,
+          approved_seconds: 6750, full_seconds: 6750, job_cap: 10, job_spent: 3.2,
+        },
+      );
+      vi.mocked(api.getJob).mockResolvedValue(jobDetail({
+        id: 261, name: "train-sft", state: "running", start_time: NOW - 600, run_time: 5000, cloud: liveJob.cloud,
+      }));
+      const { container } = render(JobPanel, {
+        id: 261, live: liveJob, now: NOW, grafanaUrl: null, onclose: noop, onrestartwith: noopRestartWith,
+      });
+      await screen.findByText("train-sft");
+      const block = within(container.querySelector(".cloudblock")!);
+      expect(block.getByText("Cloud")).toBeInTheDocument();
+      expect(block.getByText("modal-a")).toBeInTheDocument();
+      expect(block.getByText("H100")).toBeInTheDocument();
+      expect(block.getByText("running")).toBeInTheDocument();
+      expect(block.getByText("$5.00")).toBeInTheDocument();
+      expect(block.getByText("up to $7.00")).toBeInTheDocument();
+      expect(block.getByText("1h52")).toBeInTheDocument(); // dur(6750)
+      expect(block.getByText("$3.20")).toBeInTheDocument();
+      expect(block.getByText("of $10.00")).toBeInTheDocument();
+    });
+
+    it("shows a needs-more-time fact only when the job's own pace has fallen behind", async () => {
+      const liveJob = cloudJobView(
+        { id: 262, name: "train-long", state: "running", start_time: NOW - 19000, run_time: 19000 },
+        { approved_seconds: 18000, full_seconds: 18000, needs_more_time: 1800 },
+      );
+      vi.mocked(api.getJob).mockResolvedValue(jobDetail({
+        id: 262, name: "train-long", state: "running", start_time: NOW - 19000, run_time: 19000, cloud: liveJob.cloud,
+      }));
+      const { container } = render(JobPanel, {
+        id: 262, live: liveJob, now: NOW, grafanaUrl: null, onclose: noop, onrestartwith: noopRestartWith,
+      });
+      await screen.findByText("train-long");
+      const block = within(container.querySelector(".cloudblock")!);
+      expect(block.getByText("needs more time")).toBeInTheDocument();
+      expect(block.getByText("+30m")).toBeInTheDocument();
+      // No approve/extend button here — that lives on the cloud card, not this read-only panel.
+      expect(block.queryByRole("button")).toBeNull();
+    });
+
+    it("shows a Modal console link only when console_url is set", async () => {
+      const withConsole = cloudJobView(
+        { id: 263, name: "eval-batch", state: "running", start_time: NOW - 600 },
+        { console_url: "https://modal.com/apps/placeholder/eval-batch" },
+      );
+      vi.mocked(api.getJob).mockResolvedValue(jobDetail({
+        id: 263, name: "eval-batch", state: "running", start_time: NOW - 600, cloud: withConsole.cloud,
+      }));
+      const { container } = render(JobPanel, {
+        id: 263, live: withConsole, now: NOW, grafanaUrl: null, onclose: noop, onrestartwith: noopRestartWith,
+      });
+      await screen.findByText("eval-batch");
+      const link = within(container.querySelector(".cloudblock")!).getByText("Modal ↗");
+      expect(link.closest("a")).toHaveAttribute("href", "https://modal.com/apps/placeholder/eval-batch");
+    });
+
+    it("shows each persist outcome: pulled, still on target, nothing saved, and a pull error", async () => {
+      const cases: [string, ReturnType<typeof cloudPersist>, string, string][] = [
+        [
+          "pulled",
+          cloudPersist({ bytes: 512 * 1024 * 1024, pulled_to: "/home/agent-3/pasar-pulled/220" }),
+          "pulled 0.5 GiB",
+          "→ /home/agent-3/pasar-pulled/220",
+        ],
+        [
+          "still-remote",
+          cloudPersist({ sweeps_at: NOW + 6 * 86400 }),
+          "at modal-a",
+          "until Sep 27",
+        ],
+        ["nothing", cloudPersist(), "nothing saved", ""],
+        ["errored", cloudPersist({ last_error: "network timeout" }), "pull failed", "network timeout"],
+      ];
+      for (const [id_, persist, expectV, expectS] of cases) {
+        const liveJob = cloudJobView(
+          { id: 270, name: `finished-${id_}`, state: "completed", end_time: NOW - 60 },
+          { persist },
+        );
+        vi.mocked(api.getJob).mockResolvedValue(jobDetail({
+          id: 270, name: `finished-${id_}`, state: "completed", end_time: NOW - 60, cloud: liveJob.cloud,
+        }));
+        const { container, unmount } = render(JobPanel, {
+          id: 270, live: liveJob, now: NOW, grafanaUrl: null, onclose: noop, onrestartwith: noopRestartWith,
+        });
+        await screen.findByText(`finished-${id_}`);
+        const block = within(container.querySelector(".cloudblock")!);
+        expect(block.getByText(expectV)).toBeInTheDocument();
+        if (expectS) expect(block.getByText(expectS)).toBeInTheDocument();
+        unmount();
+      }
+    });
   });
 });

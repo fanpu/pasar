@@ -1,7 +1,7 @@
 <script lang="ts">
   import { getJob, cancelJob, setBid, restartJob, getEvents, getGpu, getMetrics, getUsage, ApiError } from "../lib/api";
   import { mascot } from "../lib/mascot.svelte";
-  import { fmtGib, gib, hm, metric } from "../lib/format";
+  import { dur, fmtGib, gib, hm, metric } from "../lib/format";
   import { jobColor, JOB_COLORS } from "../lib/colors";
   import { eventRows } from "../lib/eventlog";
   import { progressSeries } from "../lib/series";
@@ -296,6 +296,66 @@
     return href.toString();
   }
 
+  interface CloudFact { l: string; v: string; s: string }
+
+  function money(v: number | null): string {
+    return v === null ? "–" : `$${v.toFixed(2)}`;
+  }
+
+  const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+  /** "Sep 26"-style label for a sweep/retention date — coarser than `hm` (hour:minute), which
+   * would read oddly for something days away. Uses local getters like the rest of format.ts;
+   * tests run with TZ=UTC so that's equivalent to UTC there. */
+  function dateLabel(ts: number): string {
+    const d = new Date(ts * 1000);
+    return `${MONTHS[d.getMonth()]} ${d.getDate()}`;
+  }
+
+  /** What a finished cloud job's persist dir left behind, in the same four shapes the cloud
+   * card's "recent results" line uses: pulled home, still on the target awaiting the retention
+   * sweep, nothing saved, or the last pull's own error. `null` (job.cloud.persist is `null`)
+   * until the job is terminal, in which case this fact is simply omitted. */
+  function persistFact(cloud: NonNullable<JobView["cloud"]>): CloudFact | null {
+    const p = cloud.persist;
+    if (p === null) return null;
+    if (p.last_error) return { l: "results", v: "pull failed", s: p.last_error };
+    if (p.pulled_to !== null) {
+      const stillRemote = p.sweeps_at !== null ? ` · still on ${cloud.target} until ${dateLabel(p.sweeps_at)}` : "";
+      return { l: "results", v: `pulled ${fmtGib(p.bytes)}`, s: `→ ${p.pulled_to}${stillRemote}` };
+    }
+    if (p.sweeps_at !== null) return { l: "results", v: `at ${cloud.target}`, s: `until ${dateLabel(p.sweeps_at)}` };
+    return { l: "results", v: "nothing saved", s: "" };
+  }
+
+  /** The cloud facts grid for a cloud job: null for a job that ran locally. No approve/reject or
+   * extend buttons here — those live on the cloud card, which a person reaches from the main
+   * page; this panel is read-only. */
+  function cloudFacts(job: JobView): CloudFact[] | null {
+    const c = job.cloud;
+    if (c === null) return null;
+    const facts: CloudFact[] = [
+      { l: "target", v: c.target, s: c.gpu },
+      {
+        l: "cost",
+        v: money(c.estimated_cost),
+        s: c.max_cost !== null ? `up to ${money(c.max_cost)}${c.user_capped ? " · your cap" : ""}` : "estimate unavailable",
+      },
+      {
+        l: "approved time",
+        v: c.approved_seconds !== null ? dur(c.approved_seconds) : "not yet approved",
+        s: c.full_seconds !== null && c.full_seconds !== c.approved_seconds ? `of ${dur(c.full_seconds)} total` : "",
+      },
+      { l: "job cap spent", v: money(c.job_spent), s: c.job_cap !== null ? `of ${money(c.job_cap)}` : "" },
+      { l: "phase", v: c.phase ?? "–", s: "" },
+    ];
+    if (c.needs_more_time !== null) {
+      facts.push({ l: "needs more time", v: `+${dur(c.needs_more_time)}`, s: "extend it from the cloud card" });
+    }
+    const results = persistFact(c);
+    if (results !== null) facts.push(results);
+    return facts;
+  }
+
   const memoryFormat = (v: number): string => `${gib(v)} GiB`;
   const powerFormat = (v: number): string => `${Math.round(v)} W`;
   const tempFormat = (v: number): string => `${Math.round(v)} °C`;
@@ -419,6 +479,24 @@
     <section data-tab="overview">
       <ReasonBox job={jobView} {detail} />
       <Facts job={jobView} {detail} {now} />
+      {#if jobView.cloud}
+        {@const cloud = jobView.cloud}
+        <div class="cloudblock">
+          <h3 class="cloudhead">Cloud</h3>
+          <div class="facts">
+            {#each cloudFacts(jobView) ?? [] as f (f.l)}
+              <div class="fact">
+                <div class="l">{f.l}</div>
+                <div class="v">{f.v}</div>
+                <div class="s">{f.s}</div>
+              </div>
+            {/each}
+          </div>
+          {#if cloud.console_url}
+            <a href={cloud.console_url} target="_blank" rel="noopener">Modal ↗</a>
+          {/if}
+        </div>
+      {/if}
       {#if detail}
         <AttemptsBar {detail} {now} />
       {/if}
@@ -513,5 +591,13 @@
 <style>
   h2:focus {
     outline: none;
+  }
+  .cloudhead {
+    margin: 14px 0 8px;
+    font-size: 13px;
+    font-weight: 900;
+    color: var(--ink-2);
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
   }
 </style>

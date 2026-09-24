@@ -9,6 +9,10 @@
   --fail: #cf4a5f; --fail-bg: #ffe6ea;
   --done: #3f82b5; --done-bg: #e5f1fa;
   --gray: #8d7f8b; --gray-bg: #f2edf0;
+  /* A cloud job waiting on a person to approve its cost (State.AWAITING). */
+  --await: #c9761f; --await-bg: #fdf0dd;
+  /* The small "runs in the cloud" badge next to a job's state pill — not a state colour. */
+  --cloud-ic: #5b9bd5;
   --j0: #3b8fd9; --j1: #d9577f; --j2: #8a63d2; --j3: #23a47a; --j4: #c9761f;
   --r: 22px;
 }
@@ -34,6 +38,7 @@ button { font: inherit; cursor: pointer; }
 .s-failed { background: var(--fail-bg); color: var(--fail); }
 .s-completed { background: var(--done-bg); color: var(--done); }
 .s-cancelled { background: var(--gray-bg); color: var(--gray); }
+.s-awaiting { background: var(--await-bg); color: var(--await); }
 
 .btn { background: var(--card); border: 1.5px solid var(--line-2); border-radius: 99px; padding: 7px 14px; font-weight: 800; color: var(--ink); }
 .btn.primary { background: var(--accent); border-color: var(--accent); color: #fff; }

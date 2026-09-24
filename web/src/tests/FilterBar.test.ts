@@ -3,7 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import FilterBar from "../components/FilterBar.svelte";
 import { EMPTY_FILTER, type Filter, type StateFilter } from "../lib/jobfilter";
 
-const ZERO_COUNTS: Record<StateFilter, number> = { running: 0, queued: 0, completed: 0, failed: 0, cancelled: 0 };
+const ZERO_COUNTS: Record<StateFilter, number> = { running: 0, awaiting: 0, queued: 0, completed: 0, failed: 0, cancelled: 0 };
 
 function filter(overrides: Partial<Filter> = {}): Filter {
   return { ...EMPTY_FILTER, ...overrides };

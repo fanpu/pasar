@@ -10,7 +10,7 @@
   import TagSummary from "./TagSummary.svelte";
   import type { JobView, SparkMap } from "../lib/types";
 
-  const ZERO_COUNTS: Record<StateFilter, number> = { running: 0, queued: 0, completed: 0, failed: 0, cancelled: 0 };
+  const ZERO_COUNTS: Record<StateFilter, number> = { running: 0, awaiting: 0, queued: 0, completed: 0, failed: 0, cancelled: 0 };
 
   interface Props {
     jobs: JobView[];
@@ -141,10 +141,15 @@
 
   const groups = $derived.by((): Group[] => {
     const running = jobs.filter(isLive).sort((a, b) => (a.start_time ?? 0) - (b.start_time ?? 0));
+    // Cloud jobs waiting on a person to approve their cost (State.AWAITING), grouped above
+    // Queued: a fresh submission and a paused re-approval are both something to act on now,
+    // where a queued job is just waiting its turn.
+    const awaiting = jobs.filter((j) => j.state === "awaiting").sort(queuedCompare);
     const queued = jobs.filter((j) => j.state === "queued").sort(queuedCompare);
     const finished = jobs.filter((j) => FINISHED_STATES.has(j.state)).sort((a, b) => (b.end_time ?? 0) - (a.end_time ?? 0));
     const result: Group[] = [];
     if (running.length > 0) result.push({ label: "Running", jobs: running });
+    if (awaiting.length > 0) result.push({ label: "Awaiting approval", jobs: awaiting });
     if (queued.length > 0) result.push({ label: "Queued", jobs: queued });
     if (finished.length > 0) result.push({ label: "Recently finished", jobs: finished });
     return result;
@@ -172,8 +177,11 @@
     return Math.min(100, (job.run_time / total) * 100);
   }
 
-  /** Expected total run time: projected from progress reports when the job sends them. */
+  /** Expected total run time: the approved cloud window for a cloud job (so its bar and "of ~"
+   * reading track what a person actually signed off on, not an estimate), else projected from
+   * progress reports when the job sends them. */
   function expected(job: JobView): number {
+    if (job.cloud !== null && job.cloud.approved_seconds !== null) return job.cloud.approved_seconds;
     return job.eta_source === "progress" ? job.expected_runtime : job.est_runtime;
   }
 
@@ -195,8 +203,13 @@
   }
 
   function cardMeta(job: JobView): string {
-    if (isLive(job)) return `${dur(job.run_time)} of ~${dur(expected(job))} · ${gib(job.usage ?? 0)}/${gib(job.limit)} GiB`;
-    if (job.state === "queued") return `${queuedStart(job)} · ${job.mode === "whole" ? "whole GPU" : fmtGib(job.limit)}`;
+    if (isLive(job)) {
+      const mem = job.cloud !== null ? `${job.cloud.gpu} · ${job.cloud.target}` : `${gib(job.usage ?? 0)}/${gib(job.limit)} GiB`;
+      return `${dur(job.run_time)} of ~${dur(expected(job))} · ${mem}`;
+    }
+    if (job.state === "queued" || job.state === "awaiting") {
+      return `${queuedStart(job)} · ${job.cloud !== null ? `${job.cloud.gpu} · ${job.cloud.target}` : job.mode === "whole" ? "whole GPU" : fmtGib(job.limit)}`;
+    }
     return `ran ${dur(job.run_time)} · ended ${hm(job.end_time ?? now)}`;
   }
 
@@ -210,6 +223,16 @@
     }
   }
 </script>
+
+{#snippet cloudBadge(job: JobView)}
+  {#if job.cloud !== null}
+    <span class="cloudbadge" title="runs in the cloud · {job.cloud.target}">
+      <svg viewBox="0 0 24 24" width="13" height="13" aria-hidden="true" focusable="false">
+        <path d="M7 18a4 4 0 0 1-.6-7.96 5 5 0 0 1 9.44-2A4.5 4.5 0 0 1 17.5 18H7Z" fill="currentColor" />
+      </svg>
+    </span>
+  {/if}
+{/snippet}
 
 {#snippet row(job: JobView)}
   <tr class="row" class:sel={selected === job.id} tabindex="0" onclick={() => open(job.id)} onkeydown={(e) => onActivate(e, job.id)}>
@@ -229,10 +252,12 @@
         </div>
       </div>
     </td>
-    <td><StatePill {job} /></td>
+    <td><span class="statecell"><StatePill {job} />{@render cloudBadge(job)}</span></td>
     <td><span class="bid" class:hi={job.bid > 1000}>★ {job.bid}</span></td>
     <td>
-      {#if job.mode === "whole"}
+      {#if job.cloud !== null}
+        <div class="small">{job.cloud.gpu} · {job.cloud.target}</div>
+      {:else if job.mode === "whole"}
         <div class="small">whole GPU</div>
         <div class="small faint">{fmtGib(job.limit)}</div>
       {:else if isLive(job)}
@@ -253,7 +278,7 @@
           <div class="small">{dur(job.run_time)} <span class="faint" title={expectedTitle(job)}>/ ~{dur(expected(job))}</span></div>
           <div class="bar"><i style="width: {timePct(job)}%; background: linear-gradient(90deg, #a9d8f5, #cdbcf5)"></i></div>
         </div>
-      {:else if job.state === "queued"}
+      {:else if job.state === "queued" || job.state === "awaiting"}
         <div class="small">{queuedStart(job)}</div>
         <div class="small faint">{queuedSub(job)}</div>
       {:else}
@@ -293,7 +318,7 @@
       </div>
     {/if}
     <div class="meta">
-      <StatePill {job} />
+      <StatePill {job} />{@render cloudBadge(job)}
       {#if job.state === "failed"}
         <span class="fail">{jobSub(job).text}</span> · {hm(job.end_time ?? now)}
       {:else}
@@ -400,6 +425,8 @@
   tr.row:hover td { background: #fff6f9; }
   tr.row.sel td { background: #fdf0f5; }
   tr.group td { border: 0; padding: 12px 10px 4px; font-size: 11.5px; font-weight: 900; color: var(--ink-3); text-transform: uppercase; letter-spacing: 0.6px; cursor: default; }
+  .statecell { display: inline-flex; align-items: center; gap: 5px; }
+  .cloudbadge { display: inline-flex; color: var(--cloud-ic); }
   .jid { display: flex; align-items: center; gap: 10px; }
   .jname { font-weight: 800; }
   .jsub { font-size: 12px; color: var(--ink-2); font-weight: 600; max-width: 320px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }

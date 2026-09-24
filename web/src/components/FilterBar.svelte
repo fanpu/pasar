@@ -165,6 +165,7 @@
   .st.off { background: transparent; border-style: dashed; color: var(--ink-3); }
   .st.on { border-color: transparent; color: #fff; }
   .st.on[data-state="running"] { background: var(--run); }
+  .st.on[data-state="awaiting"] { background: var(--await); }
   .st.on[data-state="queued"] { background: var(--queue); }
   .st.on[data-state="completed"] { background: var(--done); }
   .st.on[data-state="failed"] { background: var(--fail); }
