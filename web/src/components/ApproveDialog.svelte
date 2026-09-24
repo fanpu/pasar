@@ -24,13 +24,16 @@
 
   const title = $derived(extend ? `Give #${job.id} ${job.name} more time?` : `Approve #${job.id} ${job.name}?`);
   const label = $derived.by(() => {
-    if (extend) return c.job_cap === null ? "Give more time" : `Give more time · within ${money(c.job_cap)} cap`;
+    // `job_spent` already holds this attempt's reservation, so what is left under the cap is the
+    // most an extension can add; without a cap there's no ceiling to show, and no extension.
+    if (extend) return capLeft === null ? "Give more time" : `Give more time · up to ${money(capLeft)} more`;
     return c.max_cost === null ? "Approve" : `Approve · up to ${money(c.max_cost)}`;
   });
 
   // Nothing may be approved without its worst case on the button: a price that couldn't be had
-  // (the rate cache's last fetch failed, say) would otherwise approve at one nobody saw.
-  const unpriced = $derived(!extend && c.max_cost === null);
+  // (the rate cache's last fetch failed, say) would otherwise approve at one nobody saw, and an
+  // extension with no cap to measure it against has no worst case at all.
+  const unpriced = $derived(extend ? capLeft === null : c.max_cost === null);
 
   let busy = $state(false);
   let error = $state<string | null>(null);

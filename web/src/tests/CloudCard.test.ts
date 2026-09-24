@@ -148,7 +148,7 @@ describe("CloudCard", () => {
     const dialog = screen.getByRole("dialog", { name: "Give #212 train-long more time?" });
     expect(dialog.textContent).toContain("about 30m more");
     expect(dialog.textContent).toContain("priced at today's rate when you confirm");
-    await fireEvent.click(within(dialog).getByRole("button", { name: "Give more time · within $10.00 cap" }));
+    await fireEvent.click(within(dialog).getByRole("button", { name: "Give more time · up to $1.30 more" }));
     await waitFor(() => expect(api.approve).toHaveBeenCalledWith(212, true));
     await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
     expect(onnotice).toHaveBeenCalledWith("#212 got more time");
@@ -214,6 +214,20 @@ describe("ApproveDialog", () => {
     const dialog = screen.getByRole("dialog");
     expect(dialog.textContent).toContain("H100 on modal-a");
     expect(dialog.textContent).not.toContain("account");
+  });
+
+  it("puts the most an extension can add on its button, and won't extend a job with no cap", async () => {
+    const job = needsTime[0]; // $8.70 spent or held of a $10.00 cap
+    const { unmount } = render(ApproveDialog, { props: { job, target: cloudTarget(), extend: true, onclose: () => {} } });
+    expect(screen.getByRole("button", { name: "Give more time · up to $1.30 more" })).toBeEnabled();
+    unmount();
+
+    const uncapped = { ...job, cloud: { ...job.cloud!, job_cap: null } };
+    render(ApproveDialog, { props: { job: uncapped, target: null, extend: true, onclose: () => {} } });
+    const confirm = screen.getByRole("button", { name: /^Give more time/ });
+    expect(confirm).toBeDisabled();
+    await fireEvent.click(confirm);
+    expect(api.approve).not.toHaveBeenCalled();
   });
 
   it("names the submitter's own --max-cost when that is what shortens the run", () => {
