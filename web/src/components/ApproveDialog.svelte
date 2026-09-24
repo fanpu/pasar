@@ -107,5 +107,7 @@
   .err { color: var(--fail); font-weight: 800; font-size: 12.5px; margin: 10px 0 0; }
   .macts { display: flex; gap: 8px; margin-top: 16px; }
   .macts .btn { flex: 1; }
+  /* The worst-case figure reads as one phrase: give it the room rather than wrap it. */
+  .macts .btn.primary { flex: 2; white-space: nowrap; }
   .btn:disabled { opacity: .6; cursor: default; }
 </style>
