@@ -32,6 +32,14 @@ describe("format", () => {
     expect(reasonLabel("lost")).toBe("went missing");
     expect(reasonLabel(null)).toBe("");
     expect(reasonLabel("weird")).toBe("weird");
+    // A cloud job's reason reads as words too, never as its raw code.
+    for (const code of ["account_unusable", "time_limit", "job_cap", "cloud_preempted",
+      "price_rose", "pause_limit", "target_gone", "launch_error", "moved", "out_of_credit",
+      "approval_expired"]) {
+      expect(reasonLabel(code)).not.toBe(code);
+      expect(reasonLabel(code)).not.toMatch(/_/);
+    }
+    expect(reasonLabel("account_unusable")).toBe("its account refused to start it");
     expect(["oom", "gpu_oom", "kernel_oom"].every(isOom)).toBe(true);
     expect(isOom("exit")).toBe(false);
     expect(isOom(null)).toBe(false);

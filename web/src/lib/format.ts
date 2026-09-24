@@ -47,6 +47,18 @@ const REASON_LABELS: Record<string, string> = {
   launch_error: "couldn't start",
   cancelled: "cancelled",
   preempted: "preempted",
+  // cloud jobs only
+  time_limit: "paused at its approved run time",
+  job_cap: "at its job cap",
+  cloud_preempted: "the provider took the machine back",
+  price_rose: "the price rose since it was approved",
+  pause_limit: "paused too many times",
+  target_gone: "its cloud target is gone",
+  account_unusable: "its account refused to start it",
+  moved: "moved to another account",
+  out_of_credit: "out of credit",
+  rejected: "rejected",
+  approval_expired: "never approved in time",
 };
 
 export function reasonLabel(reason: string | null): string {
