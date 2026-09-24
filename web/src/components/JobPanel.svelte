@@ -3,6 +3,7 @@
   import { mascot } from "../lib/mascot.svelte";
   import { dur, fmtGib, gib, hm, metric } from "../lib/format";
   import { jobColor, JOB_COLORS } from "../lib/colors";
+  import { resultSize } from "../lib/cloud";
   import { eventRows } from "../lib/eventlog";
   import { progressSeries } from "../lib/series";
   import JobChip from "./JobChip.svelte";
@@ -321,7 +322,7 @@
     if (p.last_error) return { l: "results", v: "pull failed", s: p.last_error };
     if (p.pulled_to !== null) {
       const stillRemote = p.sweeps_at !== null ? ` · still on ${cloud.target} until ${dateLabel(p.sweeps_at)}` : "";
-      return { l: "results", v: `pulled ${fmtGib(p.bytes)}`, s: `→ ${p.pulled_to}${stillRemote}` };
+      return { l: "results", v: `pulled ${resultSize(p.bytes)}`, s: `→ ${p.pulled_to}${stillRemote}` };
     }
     if (p.sweeps_at !== null) return { l: "results", v: `at ${cloud.target}`, s: `until ${dateLabel(p.sweeps_at)}` };
     return { l: "results", v: "nothing saved", s: "" };

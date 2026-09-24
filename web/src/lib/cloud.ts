@@ -1,8 +1,16 @@
 // Small wording helpers for cloud jobs, shared by the Cloud card and the Approve dialog. Each one
 // reads only the fields the stream already carries (`cloud_view`, `persist_view`,
 // `cloud_status_view` in views.py) and never guesses a figure the daemon did not send.
-import { dur, fmtGib } from "./format";
+import { dur, fmtGib, GIB } from "./format";
 import type { CloudGpu, CloudJob, CloudPersist, CloudTarget, JobView } from "./types";
+
+/** A size of saved results: GiB as everywhere else, but small results (a metrics file, a
+ * LoRA adapter) in MiB or KiB rather than a "0.0 GiB" that reads as nothing at all. */
+export function resultSize(bytes: number | null | undefined): string {
+  if (bytes === null || bytes === undefined || bytes >= 0.1 * GIB) return fmtGib(bytes);
+  if (bytes >= 1024 ** 2) return `${(bytes / 1024 ** 2).toFixed(1)} MiB`;
+  return `${Math.max(1, Math.round(bytes / 1024))} KiB`;
+}
 
 /** Dollars with cents; "–" when the daemon could not price it. */
 export function money(v: number | null | undefined): string {
@@ -86,12 +94,12 @@ export function phaseLook(phase: CloudJob["phase"]): PhaseLook | null {
 export function persistLine(p: CloudPersist | null, target: string): string {
   if (p === null) return "nothing saved";
   if (p.pulled_to !== null) {
-    const pulled = `pulled ${fmtGib(p.bytes)} → ${p.pulled_to}`;
+    const pulled = `pulled ${resultSize(p.bytes)} → ${p.pulled_to}`;
     if (!p.remote_deleted && p.sweeps_at !== null) return `${pulled} · copy at ${target} until ${shortDate(p.sweeps_at)}`;
     return pulled;
   }
   if (p.swept_at !== null && (p.swept_bytes ?? 0) > 0) {
-    return `never pulled; ${fmtGib(p.swept_bytes)} deleted from ${target} on ${shortDate(p.swept_at)}`;
+    return `never pulled; ${resultSize(p.swept_bytes)} deleted from ${target} on ${shortDate(p.swept_at)}`;
   }
   if (p.remote_bytes === 0 || p.swept_at !== null || (p.sweeps_at === null && p.remote_bytes === null)) {
     return "nothing saved";

@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { ago, dur, fmtGib, gib, GIB, hm, isOom, metric, reasonLabel } from "../lib/format";
+import { resultSize } from "../lib/cloud";
 
 describe("format", () => {
   it("gib", () => {
@@ -44,5 +45,16 @@ describe("metric", () => {
     expect(metric(0)).toBe("0.000");
     expect(metric(0.00004)).toBe("4.0e-5");
     expect(metric(-0.00004)).toBe("-4.0e-5");
+  });
+});
+
+describe("resultSize", () => {
+  it("keeps GiB for real results and says small ones in MiB or KiB, never 0.0 GiB", () => {
+    expect(resultSize(1.2 * GIB)).toBe("1.2 GiB");
+    expect(resultSize(0.1 * GIB)).toBe("0.1 GiB");
+    expect(resultSize(12.5 * 1024 ** 2)).toBe("12.5 MiB");
+    expect(resultSize(4096)).toBe("4 KiB");
+    expect(resultSize(10)).toBe("1 KiB");
+    expect(resultSize(null)).toBe("–");
   });
 });
