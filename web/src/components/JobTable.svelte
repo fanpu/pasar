@@ -157,6 +157,7 @@
 
   const runningCount = $derived(jobs.filter((j) => j.state === "running").length);
   const queuedCount = $derived(jobs.filter((j) => j.state === "queued").length);
+  const awaitingCount = $derived(jobs.filter((j) => j.state === "awaiting").length);
 
   function jobSub(job: JobView): { text: string; failed: boolean } {
     if (job.state === "failed") {
@@ -343,7 +344,7 @@
     {#if active}
       <span class="dim">{jobs.length} match · of {total}</span>
     {:else}
-      <span class="dim">{runningCount} running · {queuedCount} queued</span>
+      <span class="dim">{runningCount} running · {queuedCount} queued{awaitingCount > 0 ? ` · ${awaitingCount} awaiting` : ""}</span>
     {/if}
     <span class="spacer"></span>
     <select class="sortsel" aria-label="sort" value={sortSelectValue} onchange={onSortSelect}>

@@ -367,6 +367,15 @@ describe("JobTable", () => {
   });
 
   describe("cloud jobs", () => {
+    it("counts awaiting jobs in the heading, only when there are some", () => {
+      const base = { pool: 105 * GIB, now: NOW, selected: null, onopen: () => {} };
+      const { unmount } = render(JobTable, { ...base, jobs: [job({ id: 1, state: "running", start_time: NOW - 60 }), awaitingFresh, awaitingReapproval] });
+      expect(screen.getByText("1 running · 0 queued · 2 awaiting")).toBeInTheDocument();
+      unmount();
+      render(JobTable, { ...base, jobs: [job({ id: 1, state: "running", start_time: NOW - 60 })] });
+      expect(screen.getByText("1 running · 0 queued")).toBeInTheDocument();
+    });
+
     it("groups awaiting cloud jobs in their own heading, above Queued and below Running", () => {
       const { container } = render(JobTable, {
         jobs: [
