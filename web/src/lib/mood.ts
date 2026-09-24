@@ -138,6 +138,31 @@ export function mood(input: {
     // "started", "cancelled": fall through — the toast covers those, not the mascot.
   }
 
+  // A cloud job awaiting a person's OK (State.AWAITING) gets a persistent reminder, ranked:
+  // - below the safety alarms above (memory pressure/over-limit, hot GPU) — those must always
+  //   win, since they're about the machine itself, not something a person merely needs to see.
+  // - below a fresh transition's one-off message (oom/failed/lost/preempted/completed), which
+  //   already clears itself within RECENT_SECONDS — a job that just finished still gets its
+  //   moment even if something else is also awaiting approval.
+  // - above the routine idle/busy/happy defaults below, since "something needs your OK" should
+  //   keep surfacing (it doesn't expire on its own) rather than being crowded out by "1 waiting
+  //   to start" or "Nothing running."
+  const awaiting = jobs.filter((j) => j.state === "awaiting");
+  if (awaiting.length > 0) {
+    const knownCosts = awaiting
+      .map((j) => j.cloud?.max_cost)
+      .filter((c): c is number => c !== null && c !== undefined);
+    const costSub = knownCosts.length > 0
+      ? ` · up to $${knownCosts.reduce((a, b) => a + b, 0).toFixed(2)}`
+      : "";
+    return {
+      state: "waiting",
+      say: "A cloud job wants your OK!",
+      sub: `${awaiting.length} awaiting${costSub}`,
+      banner: null,
+    };
+  }
+
   const running = jobs.filter((j) => j.state === "running" || j.state === "stopping");
   const queued = jobs.filter((j) => j.state === "queued");
 

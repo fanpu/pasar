@@ -4,6 +4,7 @@ import { latestTemp, mood, RECENT_SECONDS } from "../lib/mood";
 import type { Transition } from "../lib/transitions";
 import type { GpuSeries } from "../lib/types";
 import { GIB, job, NOW, status } from "./fixtures";
+import { cloudJobView } from "./fixtures/cloud";
 
 describe("mood", () => {
   it("1. connecting when status is null", () => {
@@ -122,6 +123,43 @@ describe("mood", () => {
     const recent: Transition = { kind: "started", job: running, at: NOW - 5 };
     const m = mood({ status: status(), jobs: [running], tempC: null, recent, now: NOW });
     expect(m.state).toBe("happy");
+  });
+
+  it("4.5. a cloud job awaiting approval wins over idle/busy/happy", () => {
+    const awaiting1 = cloudJobView({ id: 201, state: "awaiting" }, { max_cost: 8 });
+    const m = mood({ status: status(), jobs: [awaiting1], tempC: null, recent: null, now: NOW });
+    expect(m.state).toBe("waiting");
+    expect(m.say).toBe("A cloud job wants your OK!");
+    expect(m.sub).toBe("1 awaiting · up to $8.00");
+    expect(m.banner).toBeNull();
+  });
+
+  it("4.5. sums up-to cost over every awaiting job, skipping ones with an unknown max_cost", () => {
+    const awaiting1 = cloudJobView({ id: 201, state: "awaiting" }, { max_cost: 8 });
+    const awaiting2 = cloudJobView({ id: 202, state: "awaiting" }, { max_cost: 3.5 });
+    const awaiting3 = cloudJobView({ id: 203, state: "awaiting" }, { max_cost: null });
+    const m = mood({ status: status(), jobs: [awaiting1, awaiting2, awaiting3], tempC: null, recent: null, now: NOW });
+    expect(m.sub).toBe("3 awaiting · up to $11.50");
+  });
+
+  it("4.5. omits the cost when no awaiting job has a known max_cost", () => {
+    const awaiting1 = cloudJobView({ id: 201, state: "awaiting" }, { max_cost: null });
+    const m = mood({ status: status(), jobs: [awaiting1], tempC: null, recent: null, now: NOW });
+    expect(m.sub).toBe("1 awaiting");
+  });
+
+  it("4.5. memory pressure/hot alarms still win over an awaiting cloud job", () => {
+    const awaiting1 = cloudJobView({ id: 201, state: "awaiting" }, { max_cost: 8 });
+    const m = mood({ status: status({ pressure_since: NOW - 5 }), jobs: [awaiting1], tempC: null, recent: null, now: NOW });
+    expect(m.state).toBe("sweat");
+  });
+
+  it("4.5. a fresh transition's own message still wins over an awaiting cloud job", () => {
+    const awaiting1 = cloudJobView({ id: 201, state: "awaiting" }, { max_cost: 8 });
+    const finished = job({ id: 45, state: "completed", run_time: 3725, peak: 5.2 * GIB });
+    const recent: Transition = { kind: "completed", job: finished, at: NOW - 5 };
+    const m = mood({ status: status(), jobs: [awaiting1], tempC: null, recent, now: NOW });
+    expect(m.state).toBe("done");
   });
 
   it("5. idle when nothing is running or queued", () => {
