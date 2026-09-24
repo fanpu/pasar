@@ -1,6 +1,6 @@
 <script lang="ts">
   import * as api from "../lib/api";
-  import { gpuOn, money, runTimeHow } from "../lib/cloud";
+  import { gpuOn, money, ownerNote, runTimeHow } from "../lib/cloud";
   import { dur } from "../lib/format";
   import type { CloudTarget, JobView } from "../lib/types";
   import Modal from "./Modal.svelte";
@@ -70,7 +70,7 @@
   <div class="kv facts-list">
     <span class="k">GPU</span>
     <span class="v">
-      {c.gpu} on {c.target}{target?.owner ? ` · ${target.owner}'s account` : ""}
+      {c.gpu} on {c.target}{ownerNote(target?.owner)}
       {#if gpu}<span class="dim">({gpu.memory_gb != null ? `${gpu.memory_gb}GB · ` : ""}{money(gpu.hourly_rate)}/hour now)</span>{/if}
     </span>
 

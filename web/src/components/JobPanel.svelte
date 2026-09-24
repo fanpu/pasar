@@ -3,7 +3,7 @@
   import { mascot } from "../lib/mascot.svelte";
   import { dur, fmtGib, gib, hm, metric } from "../lib/format";
   import { jobColor, JOB_COLORS } from "../lib/colors";
-  import { money, persistLine } from "../lib/cloud";
+  import { money, ownerNote, persistLine } from "../lib/cloud";
   import { eventRows } from "../lib/eventlog";
   import { progressSeries } from "../lib/series";
   import JobChip from "./JobChip.svelte";
@@ -319,7 +319,7 @@
     const c = job.cloud;
     if (c === null) return null;
     const facts: CloudFact[] = [
-      { l: "target", v: c.target, s: c.gpu },
+      { l: "target", v: c.target, s: `${c.gpu}${ownerNote(c.owner)}` },
       {
         l: "cost",
         v: money(c.estimated_cost),

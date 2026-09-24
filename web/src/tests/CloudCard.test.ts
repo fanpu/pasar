@@ -28,7 +28,7 @@ describe("CloudCard", () => {
 
   it("shows each target's spend against its budgets, and its job cap", () => {
     render(CloudCard, { cloud: cloudBlock(), jobs: running, now: NOW });
-    expect(screen.getByText(/modal-a · \$6\.40 today \/ \$30\.00/)).toBeInTheDocument();
+    expect(screen.getByText(/modal-a · First Owner's account · \$6\.40 today \/ \$30\.00/)).toBeInTheDocument();
     expect(screen.getByText(/\$18\.20 this month \/ \$30\.00 · job cap \$10\.00/)).toBeInTheDocument();
     const bar = screen.getByRole("meter", { name: "modal-a this month" });
     expect(bar.querySelector("i")!.getAttribute("style")).toContain("width: 60.6");

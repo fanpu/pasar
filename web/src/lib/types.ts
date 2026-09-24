@@ -24,7 +24,11 @@ export interface CloudJob {
        | "time_limit" | "signal" | null;
   estimated_cost: number | null; max_cost: number | null; user_capped: boolean;
   approved_seconds: number | null; full_seconds: number | null;
-  job_cap: number | null; job_spent: number; console_url: string | null;
+  job_cap: number | null;
+  // Whose credit this runs on, and which group (if any) its target belongs to; both `null` once
+  // the target is no longer configured, like `job_cap`.
+  owner: string | null; group: string | null;
+  job_spent: number; console_url: string | null;
   needs_more_time: number | null;
   // Why an approved, queued job hasn't launched yet, if the last scheduling pass said.
   blocked: "budget" | "concurrency" | null;
@@ -76,9 +80,13 @@ export interface CloudGpu { name: string; hourly_rate: number; memory_gb: number
 export interface CloudTarget {
   name: string; provider: string; configured: boolean;
   owner: string; // whose account pays for this target
+  group: string; // the group (if any) this target belongs to; "" when it has none
   daily_budget: number; monthly_budget: number;
   spent_today: number; spent_month: number; committed: number;
   max_running: number; max_job_cost: number; running: number;
+  // The smaller of what the daily and the monthly budget still allow, and whether that is <= 0
+  // -- the same two figures the budget gate checks a launch against.
+  left: number; exhausted: boolean;
   rates: Record<string, number>;
   known_stored_bytes: number; known_stored_jobs: number;
   gpus: CloudGpu[];
