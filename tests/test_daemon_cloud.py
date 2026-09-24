@@ -4000,3 +4000,61 @@ def test_a_waiting_job_moves_off_an_account_refusing_every_launch(grouped, repo)
     assert moved.spec.target == "modal-b" and moved.reason == "moved"
     assert f"modal-a is refusing to launch anything: {SPEND_LIMIT}" in moved.summary
 
+
+def enforced(d, monkeypatch):
+    """A list that gets an entry every time the tick enforces spending."""
+    calls = []
+    real = d._enforce
+    monkeypatch.setattr(d, "_enforce", lambda now: (calls.append(now), real(now))[1])
+    return calls
+
+
+def test_one_job_that_cannot_be_rebalanced_does_not_stop_the_others(grouped, repo,
+                                                                     monkeypatch):
+    """`_rebalance` runs before the tick enforces anything: a job whose records make it raise
+    must not take every other job's move, and all spending enforcement, down with it."""
+    d = grouped
+    bad = d.submit(cloud_spec(repo, target="modal", est_runtime=3600))
+    good = d.submit(cloud_spec(repo, target="modal", est_runtime=3600))
+    assert bad.spec.target == good.spec.target == "modal-a"
+    spent(d, "modal-a", 25.0)  # neither fits there now; both fit on modal-b
+    real = d._movable_to
+
+    def movable_to(job, members):
+        if job.id == bad.id:
+            raise RuntimeError("a record nobody expected")
+        return real(job, members)
+
+    monkeypatch.setattr(d, "_movable_to", movable_to)
+    calls = enforced(d, monkeypatch)
+    d.tick()
+    assert d.job(bad.id).spec.target == "modal-a"
+    assert d.job(good.id).spec.target == "modal-b"
+    assert len(calls) == 1
+
+
+def test_one_refused_job_that_cannot_be_reconsidered_does_not_stop_the_others(grouped, repo,
+                                                                               monkeypatch):
+    d = grouped
+    bad = approved_group_job(d, repo)
+    good = approved_group_job(d, repo)
+    refuse_launches_on(d, "modal-a")
+    provider_of(d, "modal-b").ready = False
+    d._rates.clear()
+    d.tick()
+    d.tick()
+    assert d.job(bad.id).state is d.job(good.id).state is State.AWAITING
+    provider_of(d, "modal-b").ready = True
+    real = d._after_refusal
+
+    def after_refusal(job, summary, now):
+        if job.id == bad.id:
+            raise RuntimeError("a record nobody expected")
+        return real(job, summary, now)
+
+    monkeypatch.setattr(d, "_after_refusal", after_refusal)
+    calls = enforced(d, monkeypatch)
+    d.tick()
+    assert d.job(bad.id).spec.target == "modal-a"
+    assert d.job(good.id).spec.target == "modal-b"
+    assert len(calls) == 1

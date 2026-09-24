@@ -1849,38 +1849,37 @@ class Daemon:
         groups = self.cfg.groups()
         waiting = [j for j in self.store.list_jobs([State.QUEUED, State.AWAITING])
                    if self._is_cloud(j)]
-        movable = {j.id: bool(groups.get(j.spec.group)) and not self._has_run(j)
-                   for j in waiting}
+        movable = {j.id: self._may_move(j, groups) for j in waiting}
         waiting.sort(key=lambda j: (j.state != State.QUEUED, movable[j.id], j.id))
         claimed: dict[str, float] = {}
 
         def claim(name: str, dollars: float) -> None:
             claimed[name] = claimed.get(name, 0.0) + dollars
 
-        for job in waiting:
+        def place(job: Job) -> None:
             if not movable[job.id]:
                 target = self.cfg.clouds.get(job.spec.target)
                 if target is not None:
                     claim(target.name, self._need(target, job))
-                continue
+                return
             # Where it is first, and only that account priced: the lane prices it there anyway,
             # so a job that fits costs nothing extra to check.
             here = self.cfg.clouds.get(job.spec.target)
             if here is not None and not self._movable_to(job, [here]):
                 if self._rates_loading(here.name) and not self._prices(here.name, job):
                     claim(here.name, self._need(here, job))
-                    continue  # it may well fit here once its prices have loaded
+                    return  # it may well fit here once its prices have loaded
                 here = None
             if here is not None:
                 need = self._need(here, job)
                 if headroom(self.ledger, here, self._credit_named(here.name),
                             claimed.get(here.name, 0.0), self._health(here.name)) >= need:
                     claim(here.name, need)
-                    continue
+                    return
             candidates = [t for t in self._movable_to(job, groups[job.spec.group])
                           if not self._rates_loading(t.name)]
             if not candidates:
-                continue  # nothing can price it right now; the lane says so if it matters
+                return  # nothing can price it right now; the lane says so if it matters
             # The largest ceiling of any candidate, as at submit: a price difference between
             # accounts can only make the choice more conservative.
             need = max(self._need(t, job) for t in candidates)
@@ -1889,9 +1888,26 @@ class Daemon:
                             credit=self._credit_named, claimed=claimed, health=self._health)
             if chosen is None or chosen.name == job.spec.target:
                 claim(job.spec.target, need)
-                continue
+                return
             self._move(job, chosen, need, here, claimed.get(job.spec.target, 0.0), now)
             claim(chosen.name, need)
+
+        # One job at a time, each on its own: this runs before the tick enforces anything, so
+        # a job whose records make it raise is logged and skipped, never left to stop the rest.
+        for job in waiting:
+            try:
+                place(job)
+            except Exception:
+                log.exception("could not rebalance job %s", job.id)
+
+    def _may_move(self, job: Job, groups: dict[str, list[CloudTarget]]) -> bool:
+        """Whether `_rebalance` may move `job`: from a group, and never run. False, and logged,
+        for a job whose records cannot be read, which then stays where it is."""
+        try:
+            return bool(groups.get(job.spec.group)) and not self._has_run(job)
+        except Exception:
+            log.exception("could not tell whether job %s may move", job.id)
+            return False
 
     def _has_run(self, job: Job) -> bool:
         """True if `job` has used its account: an attempt, or spend recorded against it."""
@@ -2497,27 +2513,34 @@ class Daemon:
         refusal. Such a job is known from its records alone — awaiting, `account_unusable`,
         and still on the account its last attempt was refused by (one already moved is on
         another, waiting for its approval there) — so a restart loses nothing. Runs every
-        tick, from memory and cached rates only."""
+        tick, from memory and cached rates only, and before the tick enforces anything: a job
+        whose records make this raise is logged and skipped, never allowed to stop the rest."""
         for job in self.store.list_jobs([State.AWAITING]):
             if job.reason != ACCOUNT_UNUSABLE or not job.spec.group or not self._is_cloud(job):
                 continue
-            attempts = self.store.attempts(job.id)
-            if not attempts or attempts[-1].reason != ACCOUNT_UNUSABLE:
-                continue
-            refused_by = parse_unit(attempts[-1].unit)
-            if refused_by is None or refused_by[0] != job.spec.target:
-                continue
-            state, summary, moved = self._after_refusal(job, attempts[-1].summary, now)
-            if state == State.AWAITING and moved is None:
-                if summary != job.summary:  # still loading, or now failing to load
-                    self.store.update_job(job.id, summary=summary)
-                continue
-            extra: dict = {"spec": moved} if moved is not None else {}
-            if state == State.AWAITING:
-                extra["queue_time"] = now
-            self.store.update_job(job.id, state=state, summary=summary, **extra)
-            self._cloud_ended(job, state)
-            self.changed()
+            try:
+                self._reconsider(job, now)
+            except Exception:
+                log.exception("could not reconsider refused job %s", job.id)
+
+    def _reconsider(self, job: Job, now: float) -> None:
+        attempts = self.store.attempts(job.id)
+        if not attempts or attempts[-1].reason != ACCOUNT_UNUSABLE:
+            return
+        refused_by = parse_unit(attempts[-1].unit)
+        if refused_by is None or refused_by[0] != job.spec.target:
+            return
+        state, summary, moved = self._after_refusal(job, attempts[-1].summary, now)
+        if state == State.AWAITING and moved is None:
+            if summary != job.summary:  # still loading, or now failing to load
+                self.store.update_job(job.id, summary=summary)
+            return
+        extra: dict = {"spec": moved} if moved is not None else {}
+        if state == State.AWAITING:
+            extra["queue_time"] = now
+        self.store.update_job(job.id, state=state, summary=summary, **extra)
+        self._cloud_ended(job, state)
+        self.changed()
 
     def _waiting_claims(self, exclude: int) -> dict[str, float]:
         """Dollars the cloud jobs waiting on each account (queued or awaiting, other than job
