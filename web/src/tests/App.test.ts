@@ -7,12 +7,13 @@ import { AllJobs } from "../lib/alljobs.svelte";
 import { mascot } from "../lib/mascot.svelte";
 import { router } from "../lib/router.svelte";
 import { job, jobDetail, status } from "./fixtures";
+import { awaitingFresh, cloudBlock } from "./fixtures/cloud";
 
 vi.mock("../lib/api", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../lib/api")>();
   return {
     ...actual, getGpu: vi.fn(), getMascot: vi.fn(), getAllJobs: vi.fn(), getJob: vi.fn(),
-    getSparks: vi.fn(),
+    getSparks: vi.fn(), reject: vi.fn(),
   };
 });
 
@@ -36,6 +37,7 @@ describe("App", () => {
     vi.mocked(api.getAllJobs).mockReset().mockResolvedValue([]);
     vi.mocked(api.getJob).mockReset();
     vi.mocked(api.getSparks).mockReset().mockResolvedValue({});
+    vi.mocked(api.reject).mockReset().mockResolvedValue(undefined as never);
     vi.stubGlobal("EventSource", FakeEventSource);
     history.pushState({}, "", "/");
     // The router is a singleton, and pushState alone doesn't tell it anything — without this a
@@ -208,5 +210,45 @@ describe("App", () => {
     expect(router.search).toBe("?tag=sweep-a");
     pushSpy.mockRestore();
     replaceSpy.mockRestore();
+  });
+
+  describe("the cloud card", () => {
+    it("sits between the tiles and the schedule when the snapshot has a cloud block", async () => {
+      render(App);
+      FakeEventSource.last!.emit({ status: status(), jobs: [awaitingFresh], cloud: cloudBlock() });
+      const card = await screen.findByRole("region", { name: "Cloud" });
+      expect(within(card).getByText("Awaiting your OK")).toBeInTheDocument();
+      // Tiles above, the schedule chart (its own `.sec` card) right below.
+      expect(card.previousElementSibling).toHaveClass("tiles");
+      expect(card.nextElementSibling?.textContent).toMatch(/schedule/i);
+    });
+
+    it("isn't there when no cloud target is configured", async () => {
+      render(App);
+      FakeEventSource.last!.emit({ status: status(), jobs: [], cloud: null });
+      await screen.findByText("memory pool");
+      expect(screen.queryByRole("region", { name: "Cloud" })).toBeNull();
+    });
+
+    it("opens a job's panel from its name, as the table does", async () => {
+      vi.mocked(api.getJob).mockResolvedValue(jobDetail({ id: awaitingFresh.id, name: awaitingFresh.name }));
+      render(App);
+      FakeEventSource.last!.emit({ status: status(), jobs: [awaitingFresh], cloud: cloudBlock() });
+      const card = await screen.findByRole("region", { name: "Cloud" });
+      await fireEvent.click(within(card).getAllByRole("button", { name: awaitingFresh.name })[0]);
+      expect(router.route).toEqual({ name: "job", id: awaitingFresh.id });
+    });
+
+    it("puts what the card reports in the toast", async () => {
+      render(App);
+      FakeEventSource.last!.emit({ status: status(), jobs: [awaitingFresh], cloud: cloudBlock() });
+      const card = await screen.findByRole("region", { name: "Cloud" });
+      const row = card.querySelector<HTMLElement>(`[data-job="${awaitingFresh.id}"]`)!;
+      await fireEvent.click(within(row).getByRole("button", { name: "Reject" }));
+      const ask = await screen.findByRole("dialog", { name: `Reject #${awaitingFresh.id}?` });
+      await fireEvent.click(within(ask).getByRole("button", { name: "Reject" }));
+      await waitFor(() => expect(screen.getByRole("status")).toHaveTextContent(`#${awaitingFresh.id} rejected`));
+      expect(api.reject).toHaveBeenCalledWith(awaitingFresh.id);
+    });
   });
 });

@@ -14,6 +14,7 @@
   import Header from "./components/Header.svelte";
   import Banner from "./components/Banner.svelte";
   import Tiles from "./components/Tiles.svelte";
+  import CloudCard from "./components/CloudCard.svelte";
   import Timeline from "./components/Timeline.svelte";
   import JobTable from "./components/JobTable.svelte";
   import Toast from "./components/Toast.svelte";
@@ -198,6 +199,15 @@
 
   {#if live.snapshot}
     <Tiles status={live.snapshot.status} jobs={live.snapshot.jobs} gpu={live.gpu} />
+    {#if live.snapshot.cloud}
+      <CloudCard
+        cloud={live.snapshot.cloud}
+        jobs={live.snapshot.jobs}
+        now={live.snapshot.status.now}
+        onopen={(id) => router.go(`/jobs/${id}`)}
+        onnotice={(message) => enqueueToast(message, "happy")}
+      />
+    {/if}
     <Timeline
       jobs={live.snapshot.jobs}
       pool={live.snapshot.status.pool}
