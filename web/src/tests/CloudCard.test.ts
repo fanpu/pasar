@@ -186,6 +186,34 @@ describe("CloudCard", () => {
     expect(onnotice).toHaveBeenCalledWith("#202 rejected");
   });
 
+  it("won't close the approve dialog while its request is in flight", async () => {
+    let settle!: (j: typeof awaitingFresh) => void;
+    vi.mocked(api.approve).mockReturnValue(new Promise((resolve) => { settle = resolve; }));
+    render(CloudCard, { cloud: cloudBlock(), jobs: running, now: NOW });
+    await fireEvent.click(screen.getAllByRole("button", { name: /^Approve…/ })[0]);
+    await fireEvent.click(screen.getByRole("button", { name: "Approve · up to $8.00" }));
+    await fireEvent.keyDown(window, { key: "Escape" });
+    for (const close of screen.getAllByRole("button", { name: "Close" })) await fireEvent.click(close);
+    await fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
+    expect(screen.getByRole("dialog", { name: "Approve #201 sweep-wd-3?" })).toBeInTheDocument();
+    settle({ ...awaitingFresh, state: "queued" });
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+  });
+
+  it("won't close the reject question while its request is in flight", async () => {
+    let settle!: (j: typeof awaitingFresh) => void;
+    vi.mocked(api.reject).mockReturnValue(new Promise((resolve) => { settle = resolve; }));
+    const { container } = render(CloudCard, { cloud: cloudBlock(), jobs: running, now: NOW });
+    await fireEvent.click(within(row(container, 201)).getByRole("button", { name: /^Reject/ }));
+    await fireEvent.click(within(screen.getByRole("dialog")).getByRole("button", { name: "Reject" }));
+    await fireEvent.keyDown(window, { key: "Escape" });
+    for (const close of screen.getAllByRole("button", { name: "Close" })) await fireEvent.click(close);
+    await fireEvent.click(screen.getByRole("button", { name: "Keep it" }));
+    expect(screen.getByRole("dialog", { name: "Reject #201?" })).toBeInTheDocument();
+    settle({ ...awaitingFresh, state: "cancelled" });
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+  });
+
   it("opens a job's panel from its name", async () => {
     const onopen = vi.fn();
     render(CloudCard, { cloud: cloudBlock(), jobs: running, now: NOW, onopen });

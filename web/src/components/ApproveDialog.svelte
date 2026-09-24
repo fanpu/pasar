@@ -38,6 +38,13 @@
   let busy = $state(false);
   let error = $state<string | null>(null);
 
+  // Escape, the scrim, ✕ and Cancel all come through here: once the request is out, the dialog
+  // stays until the server answers, so its outcome (or refusal) is never lost.
+  function leave(): void {
+    if (busy) return;
+    onclose();
+  }
+
   async function confirm(): Promise<void> {
     if (busy || unpriced) return;
     busy = true;
@@ -54,7 +61,7 @@
   }
 </script>
 
-<Modal {title} {onclose}>
+<Modal {title} onclose={leave}>
   <div class="kv facts-list">
     <span class="k">GPU</span>
     <span class="v">
@@ -102,7 +109,7 @@
 
   {#if error}<p class="err" role="alert">{error}</p>{/if}
   <div class="macts">
-    <button class="btn" type="button" disabled={busy} onclick={onclose}>Cancel</button>
+    <button class="btn" type="button" disabled={busy} onclick={leave}>Cancel</button>
     <button class="btn primary" type="button" disabled={busy || unpriced} onclick={confirm}>{label}</button>
   </div>
 </Modal>

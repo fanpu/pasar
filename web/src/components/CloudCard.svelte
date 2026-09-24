@@ -76,8 +76,14 @@
     rejecting = job;
   }
 
+  // Like the approve dialog: nothing closes the question while its request is in flight.
+  function keepIt(): void {
+    if (rejectBusy) return;
+    rejecting = null;
+  }
+
   async function confirmReject(): Promise<void> {
-    if (rejecting === null) return;
+    if (rejecting === null || rejectBusy) return;
     const id = rejecting.id;
     rejectBusy = true;
     rejectError = null;
@@ -228,11 +234,11 @@
 {/if}
 
 {#if rejecting}
-  <Modal title="Reject #{rejecting.id}?" onclose={() => (rejecting = null)}>
+  <Modal title="Reject #{rejecting.id}?" onclose={keepIt}>
     <p class="rq">Reject #{rejecting.id}? It won't run.</p>
     {#if rejectError}<p class="err" role="alert">{rejectError}</p>{/if}
     <div class="macts">
-      <button class="btn" type="button" disabled={rejectBusy} onclick={() => (rejecting = null)}>Keep it</button>
+      <button class="btn" type="button" disabled={rejectBusy} onclick={keepIt}>Keep it</button>
       <button class="btn danger" type="button" disabled={rejectBusy} onclick={confirmReject}>Reject</button>
     </div>
   </Modal>
