@@ -14,10 +14,10 @@ from dataclasses import replace
 from pathlib import Path
 
 from pasar import gitinfo
-from pasar.cloud.base import Credit, GpuRow, parse_gpu, price_list
+from pasar.cloud.base import AccountUnusable, Credit, GpuRow, parse_gpu, price_list
 from pasar.cloud.bundle import Bundle, BundleError, EnvSpec, build_bundle, check_platform
 from pasar.cloud.cost import Ledger, estimate, hourly_rate
-from pasar.cloud.executor import CloudExecutor
+from pasar.cloud.executor import CloudExecutor, parse_unit
 from pasar.cloud.group import choose, headroom, shortfall
 from pasar.cloud.lane import CloudDecision, CloudQueued, decide_cloud
 from pasar.cloud.pace import needs_more_time as _needs_more_time
@@ -61,6 +61,9 @@ AUTO_PULL_TRIES = 3
 # does not wait: whoever asks for one has chosen when, and deleting by manifest keeps whatever
 # lands late either way (see `Daemon.pull`).
 PULL_SETTLE = 120
+# An attempt's `reason` when its account refused to start it before any sandbox existed (see
+# `AccountUnusable`): it never ran, so it spent nothing and left no checkpoint behind.
+ACCOUNT_UNUSABLE = "account_unusable"
 
 
 class NotFound(Exception):
@@ -885,13 +888,7 @@ class Daemon:
             raise ValueError(f"cloud group {group!r} has no provider on this pasard for any of "
                              "its accounts, so nothing can be submitted to it:\n"
                              + "\n".join(lines))
-        priced: dict[str, float] = {}
-        if spec.gpu:
-            for t in reachable:
-                try:
-                    priced[t.name] = estimate(self._hourly(t, spec.gpu), spec.est_runtime)
-                except (KeyError, ValueError):
-                    continue
+        priced = self._estimates(spec, reachable)
         fits = [t for t in reachable
                 if t.name in priced and priced[t.name] <= t.max_job_cost + PRICE_TOLERANCE]
         if not fits:
@@ -900,10 +897,35 @@ class Daemon:
         # The largest ceiling of any candidate, so the one chosen can afford the run at whichever
         # candidate's prices: a price difference can only make the choice more conservative.
         need = max(self._submit_ceiling(t, spec) for t in fits)
-        chosen = choose(fits, self.ledger, need, self._running_on, credit=self._credit_named)
+        chosen = choose(fits, self.ledger, need, self._running_on, credit=self._credit_named,
+                        health=self._health)
         if chosen is None:
             raise Conflict(self._no_account(group, members, fits, need))
         return replace(spec, target=chosen.name, group=group)
+
+    def _estimates(self, spec: JobSpec, targets: list[CloudTarget]) -> dict[str, float]:
+        """The run's estimate on each of `targets` that can price its GPU, by name."""
+        priced: dict[str, float] = {}
+        if spec.gpu:
+            for t in targets:
+                try:
+                    priced[t.name] = estimate(self._hourly(t, spec.gpu), spec.est_runtime)
+                except (KeyError, ValueError):
+                    continue
+        return priced
+
+    def _health(self, name: str) -> str | None:
+        """`Provider.health()` for the target called `name`: None when it can launch, and also
+        for one with no provider here, which is not this question — `_resolve_group` leaves
+        those out by name. Read from memory, so it is safe on the tick."""
+        ex = self.executors.get(name)
+        if ex is None:
+            return None
+        try:
+            return ex.provider.health()
+        except Exception:
+            log.exception("%s could not say whether it can launch", name)
+            return None
 
     def _submit_ceiling(self, target: CloudTarget, spec: JobSpec) -> float:
         """`_ceiling` for a job that does not exist yet, and so has spent nothing of its lifetime
@@ -919,11 +941,21 @@ class Daemon:
 
     def _no_account(self, group: str, members: list[CloudTarget], fits: list[CloudTarget],
                     need: float) -> str:
-        """The refusal for a group none of whose accounts has the month's headroom for a job:
-        every account, whose it is, what it has left, and how to queue for one regardless."""
+        """The refusal for a group none of whose accounts will take a job: every account, whose it
+        is, what it has left or why it refuses every launch, and how to queue for one regardless.
+        The first line names the cause, since money and a refusing account are fixed by
+        different people doing different things."""
         candidates = {t.name for t in fits}
+        rows = shortfall(members, self.ledger, credit=self._credit_named,
+                         health=self._health)
         lines = []
-        for r in shortfall(members, self.ledger, credit=self._credit_named):
+        for r in rows:
+            if r.unusable is not None:
+                # Its balance is beside the point: it refuses every launch, and topping it up
+                # may not be what fixes that.
+                lines.append(f"  {r.name}  ({r.owner or 'no owner set'})  refusing to launch "
+                             f"anything: {r.unusable}")
+                continue
             line = (f"  {r.name}  ({r.owner or 'no owner set'})  ${r.left:.2f} left of "
                     f"${r.budget:.2f} this month")
             if r.name not in candidates:
@@ -932,7 +964,15 @@ class Daemon:
             elif (credit := self._credit_named(r.name)) is not None and credit.exhausted:
                 line += "  (out of credit, its provider says)"
             lines.append(line)
-        return (f"no {group} account can afford this job (it needs up to ${need:.2f}):\n"
+        refusing = sum(1 for r in rows if r.unusable is not None)
+        if refusing == len(rows):
+            head = f"every {group} account is refusing to launch anything:\n"
+        elif refusing:
+            head = (f"no {group} account can take this job (it needs up to ${need:.2f}); some are "
+                    "refusing to launch anything and the rest cannot run it:\n")
+        else:
+            head = f"no {group} account can afford this job (it needs up to ${need:.2f}):\n"
+        return (head
                 + "\n".join(lines)
                 + "\nsubmit to one by name with --on <account> to queue for it anyway")
 
@@ -1745,7 +1785,7 @@ class Daemon:
             if here is not None:
                 need = self._need(here, job)
                 if headroom(self.ledger, here, self._credit_named(here.name),
-                            claimed.get(here.name, 0.0)) >= need:
+                            claimed.get(here.name, 0.0), self._health(here.name)) >= need:
                     claim(here.name, need)
                     continue
             candidates = self._movable_to(job, groups[job.spec.group])
@@ -1754,8 +1794,9 @@ class Daemon:
             # The largest ceiling of any candidate, as at submit: a price difference between
             # accounts can only make the choice more conservative.
             need = max(self._need(t, job) for t in candidates)
+            # Never onto an account refusing every launch (`health`): it has no usable money.
             chosen = choose(candidates, self.ledger, need, self._running_on,
-                            credit=self._credit_named, claimed=claimed)
+                            credit=self._credit_named, claimed=claimed, health=self._health)
             if chosen is None or chosen.name == job.spec.target:
                 claim(job.spec.target, need)
                 continue
@@ -1801,6 +1842,8 @@ class Daemon:
         if here is None:
             why = (self._unreachable(was)[0] if was not in self.executors
                    else f"this run is over {was}'s max_job_cost")
+        elif (bad := self._health(was)) is not None:
+            why = f"{was} is refusing to launch anything: {bad}"
         elif (credit := self._credit_named(was)) is not None and credit.exhausted:
             why = f"{was} is out of credit, its provider says"
         else:
@@ -1934,6 +1977,10 @@ class Daemon:
         elif lost:
             kind, reason = EndKind.FAILED, "lost"
             summary = "the job's process disappeared (did pasard or the machine restart?)"
+        elif self._is_cloud(job) and st is not None and st.result == ACCOUNT_UNUSABLE:
+            # Above the pause: it never ran, so there is no run time to have paused at.
+            kind, reason = EndKind.FAILED, ACCOUNT_UNUSABLE
+            summary = f"{job.spec.target} refused to start it: {st.refusal}"
         elif (self._is_cloud(job) and st is not None and st.result == "success"
               and st.exit_code == 0 and not st.signal):
             # An attempt whose wrapper reported a clean exit has finished, even if a pause was
@@ -1993,6 +2040,7 @@ class Daemon:
         self.oom_killed.discard(job_id)
         self.usage.pop(job_id, None)
         self.cloud_units.pop(job_id, None)
+        moved = None  # the job's spec on another account, if a refusal moves it there
         if kind == EndKind.COMPLETED:
             state, retries_used = State.COMPLETED, job.retries_used
         elif kind == EndKind.CANCELLED:
@@ -2019,9 +2067,14 @@ class Daemon:
                 # until the cap is raised, and whoever reads this should know that up front.
                 reason = "job_cap"
                 summary = self._cap_reached(job, self.cfg.clouds[job.spec.target], now)
+        elif reason == ACCOUNT_UNUSABLE:
+            retries_used = job.retries_used
+            state, summary, moved = self._after_refusal(job, summary, now)
         else:
             state, retries_used = self._retry_state(job)
         extra = {}
+        if moved is not None:
+            extra["spec"] = moved
         if state == State.AWAITING:
             # It starts waiting for a person now, and approval_ttl is measured from here.
             extra["queue_time"] = now
@@ -2190,6 +2243,115 @@ class Daemon:
                               retries_used=retries_used)
         self._cloud_ended(job, state)
 
+    def _refused_at_launch(self, job: Job, n: int, unit: str, now: float, why: str) -> None:
+        """`_fail_launch` for a launch its account refused outright (`AccountUnusable`), which
+        may yet move the job to a sibling account rather than fail it: see `_after_refusal`."""
+        summary = f"{job.spec.target} refused to start it: {why}"
+        self.store.insert_attempt(Attempt(job.id, n, unit, now, end_time=now,
+                                          end_kind=EndKind.FAILED, reason=ACCOUNT_UNUSABLE,
+                                          summary=summary))
+        state, summary, moved = self._after_refusal(job, summary, now)
+        extra: dict = {"spec": moved} if moved is not None else {}
+        if state == State.AWAITING:
+            extra["queue_time"] = now
+        self.store.update_job(job.id, state=state, reason=ACCOUNT_UNUSABLE, summary=summary,
+                              **extra)
+        self._cloud_ended(job, state)
+
+    def _after_refusal(self, job: Job, summary: str,
+                       now: float) -> tuple[State, str, JobSpec | None]:
+        """What becomes of a job whose account has just refused to start it (its attempt is
+        already recorded as refused): `(state, summary, moved)`, `moved` being its spec on a
+        sibling account, or None if it stays put.
+
+        It moves only if it came from a group and no attempt of it has ever run — every one was
+        refused before a sandbox existed — because only then has it spent nothing and left no
+        checkpoint behind: a job that has run is pinned to the account whose volume holds its
+        checkpoint, and moving it would start it over on somebody else's credit. Each account is
+        tried once, so a group none of whose accounts will launch fails the job promptly, naming
+        every refusal, instead of passing it round for ever.
+
+        The approval moves with it, at the price agreed to: whoever approved the job agreed to
+        run it once at that price on any of the group's accounts, which is what submitting to the
+        group asked for. A sibling that costs more is caught by `_over_the_approval` at launch
+        and sent back for approval like any other price rise."""
+        attempts = self.store.attempts(job.id)
+        earlier = [a for a in attempts if a.reason != ACCOUNT_UNUSABLE]
+        if earlier:
+            return State.FAILED, f"{summary}. {self._pinned(earlier)}", None
+        if not job.spec.group:
+            return State.FAILED, summary, None
+        tried = {unit[0] for unit in map(parse_unit, (a.unit for a in attempts)) if unit}
+        left = [t for t in self.cfg.groups().get(job.spec.group, []) if t.name not in tried]
+        chosen, skipped = self._sibling(job, left)
+        if chosen is None:
+            everywhere = "; ".join(a.summary for a in attempts)
+            if skipped:
+                everywhere += (f"; no other {job.spec.group} account could take it: "
+                               + "; ".join(skipped))
+            else:
+                everywhere += f"; no other {job.spec.group} account is left to try"
+            return State.FAILED, everywhere, None
+        last = attempts[-1].n
+        approval = next((r for r in self.store.approvals(job.id) if r["attempt"] == last), None)
+        if approval is None:
+            # Nothing to carry over, so nothing may launch it without a person looking first.
+            state = State.AWAITING
+        else:
+            self.store.add_approval(job.id, last + 1, now, approval["estimated_cost"],
+                                    approval["max_cost"], approval["hourly_rate"])
+            state = State.QUEUED
+        return state, f"{summary}; moved to {chosen.name}", replace(job.spec, target=chosen.name)
+
+    @staticmethod
+    def _pinned(earlier: list[Attempt]) -> str:
+        """Why a refused job stays where it is, from what its earlier attempts really did."""
+        ran = [a for a in earlier if a.reason != "launch_error"]
+        if ran:
+            where = sorted({u[0] for u in map(parse_unit, (a.unit for a in ran)) if u})
+            return (f"It has already run on {', '.join(where)}, whose volume holds anything it "
+                    "saved, so it is not moved to another account")
+        reasons = ", ".join(sorted({a.reason or "no reason" for a in earlier}))
+        return (f"An earlier attempt of it failed for another reason ({reasons}), and a job is "
+                "only moved to another account when its account refused every attempt it had")
+
+    def _sibling(self, job: Job,
+                 members: list[CloudTarget]) -> tuple[CloudTarget | None, list[str]]:
+        """The account `_resolve_group` would pick for `job` among `members`, and why each of
+        the others could not take it (`"name: why"`), which is what a job that ends up with none
+        tells whoever reads its summary. Held to the same rules as a submit, except that the job
+        exists by now, so each account is asked for its real ceiling for it (`_ceiling`)."""
+        skipped: dict[str, str] = {}
+        priced = self._estimates(job.spec, members)
+        fits = []
+        for t in members:
+            why = self._health(t.name)
+            if t.name not in self.executors:
+                skipped[t.name] = "no provider on this pasard"
+            elif why is not None:
+                skipped[t.name] = f"refusing to launch anything: {why}"
+            elif t.name not in priced:
+                skipped[t.name] = f"has no price for {job.spec.gpu}"
+            elif priced[t.name] > t.max_job_cost + PRICE_TOLERANCE:
+                skipped[t.name] = "the run is over its max_job_cost"
+            else:
+                fits.append(t)
+        chosen = None
+        try:
+            need = max((self._ceiling(t, job) for t in fits), default=0.0)
+        except (KeyError, ValueError):
+            fits = []
+        if fits:
+            chosen = choose(fits, self.ledger, need, self._running_on,
+                            credit=self._credit_named, health=self._health)
+        if chosen is None:
+            for r in shortfall(fits, self.ledger, credit=self._credit_named):
+                credit = self._credit_named(r.name)
+                skipped[r.name] = ("out of credit, its provider says"
+                                   if credit is not None and credit.exhausted
+                                   else f"only ${r.left:.2f} left of ${r.budget:.2f} this month")
+        return chosen, [f"{t.name}: {skipped[t.name]}" for t in members if t.name in skipped]
+
     def _launch(self, job: Job, now: float) -> None:
         prior = self.store.attempts(job.id)
         n = len(prior) + 1
@@ -2245,9 +2407,12 @@ class Daemon:
             if k not in env and k in os.environ:
                 env[k] = os.environ[k]
         # A cloud attempt's persist dir is shared by every attempt of the job, so a second one
-        # really may have a checkpoint waiting: this is the flag that tells the job to look.
+        # really may have a checkpoint waiting: this is the flag that tells the job to look. Not
+        # after attempts its account only refused, though: those never ran, and a job moved to
+        # another account by one has nothing there at all.
+        ran = any(a.reason != ACCOUNT_UNUSABLE for a in self.store.attempts(job.id))
         env.update(PASAR_JOB_ID=str(job.id), PASAR_ATTEMPT=str(n),
-                   PASAR_RESUMING="1" if n > 1 else "0",
+                   PASAR_RESUMING="1" if ran else "0",
                    PASAR_GRACE_SECONDS=str(job.spec.grace))
         return env
 
@@ -2274,10 +2439,17 @@ class Daemon:
         self.store.add_machine_event(
             now, "price_rise", f"job {job.id} was approved at up to ${was:.2f} for this run "
             f"but now costs ${costs:.2f}; it is waiting for approval again")
-        self.store.update_job(
-            job.id, state=State.AWAITING, queue_time=now, reason="price_rose",
-            summary=f"the price rose to ${costs:.2f}, above the ${was:.2f} approved for this "
-                    "run; approve it again to run at the new price")
+        summary = (f"the price rose to ${costs:.2f}, above the ${was:.2f} approved for this "
+                   "run; approve it again to run at the new price")
+        prior = self.store.attempts(job.id)
+        if prior and prior[-1].reason == ACCOUNT_UNUSABLE:
+            # The price did not move; the job did. Whoever approves it again should know it is
+            # somebody else's account they are agreeing to spend on, and why.
+            summary = (f"{prior[-1].summary}; moved to {target.name}, where it costs "
+                       f"${costs:.2f}, above the ${was:.2f} approved for this run; approve it "
+                       f"again to run on {target.name} at that price")
+        self.store.update_job(job.id, state=State.AWAITING, queue_time=now,
+                              reason="price_rose", summary=summary)
         return True
 
     def _launch_cloud(self, job: Job, target: CloudTarget, ex: CloudExecutor, now: float) -> None:
@@ -2323,7 +2495,10 @@ class Daemon:
                                                           gpu=job.spec.gpu, env=env,
                                                           limit=target.max_runtime)))
         except LaunchError as e:
-            self._fail_launch(job, n, pending, now, str(e))
+            if isinstance(e.__cause__, AccountUnusable):
+                self._refused_at_launch(job, n, pending, now, str(e.__cause__))
+            else:
+                self._fail_launch(job, n, pending, now, str(e))
             return
         unit = ex.unit_of(job.id, n)
         try:

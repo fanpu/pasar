@@ -16,21 +16,32 @@ from pasar.config import CloudTarget
 # What the provider's own books say an account has used, by target name; None where it cannot
 # say. `Daemon.cloud_credit`, cached — never a network call of its own.
 CreditOf = Callable[[str], Credit | None]
+# Each account's `Provider.health()`, by target name: None when it can launch, or why it cannot.
+HealthOf = Callable[[str], str | None]
 
 
 def _no_credit(_name: str) -> None:
     return None
 
 
+def _healthy(_name: str) -> str | None:
+    return None
+
+
 def headroom(ledger: Ledger, target: CloudTarget, credit: Credit | None = None,
-             claimed: float = 0.0) -> float:
+             claimed: float = 0.0, health: str | None = None) -> float:
     """Dollars left on `target` this month: its budget, less what is already settled and what
     running attempts have already promised, and less `claimed` — what jobs waiting on it that
     the ledger cannot see yet will need. Never negative — an overspent account has no headroom,
     and how far past the line it went is not a number any caller here can use.
 
     `credit` is the provider's own figure for the account, where it has one: an account it says
-    is past its free allowance has no headroom at all, whatever the ledger thinks."""
+    is past its free allowance has no headroom at all, whatever the ledger thinks.
+
+    `health` is the account's `Provider.health()`: an account that refuses every launch has no
+    usable money, whatever its balance says, so anything but None is no headroom at all."""
+    if health is not None:
+        return 0.0
     used = ledger.settled_month(target.name) + ledger.committed(target.name)
     if credit is not None:
         if credit.exhausted:
@@ -45,12 +56,12 @@ def headroom(ledger: Ledger, target: CloudTarget, credit: Credit | None = None,
     # `claimed` is money for jobs that have not launched, so neither view has seen it yet: it
     # is added to whichever of the two is larger.
     return max(0.0, target.monthly_budget - used - claimed)
-    return max(0.0, target.monthly_budget - used)
 
 
 def choose(members: list[CloudTarget], ledger: Ledger, need: float,
            running: Callable[[str], int], credit: CreditOf = _no_credit,
-           claimed: Mapping[str, float] | None = None) -> CloudTarget | None:
+           claimed: Mapping[str, float] | None = None,
+           health: HealthOf = _healthy) -> CloudTarget | None:
     """The fullest account, by monthly headroom, that can still pay for the whole run, or None if
     none can. Only the monthly budget is checked; the launch-time gate also checks the daily one,
     so it may still refuse the account this returns.
@@ -66,13 +77,16 @@ def choose(members: list[CloudTarget], ledger: Ledger, need: float,
 
     `credit` gives the provider's own figure for each account (see `headroom`), and `claimed`
     dollars per account already spoken for by jobs waiting on it (see `headroom`).
+
+    `health` is each account's `Provider.health()` by name; an account it has a reason for is
+    never chosen, however much it has left.
     """
     claimed = claimed or {}
 
     def left(t: CloudTarget) -> float:
         return headroom(ledger, t, credit(t.name), claimed.get(t.name, 0.0))
 
-    fits = [t for t in members if left(t) >= need]
+    fits = [t for t in members if health(t.name) is None and left(t) >= need]
     if not fits:
         return None
     free = [t for t in fits if running(t.name) < t.max_running]
@@ -87,10 +101,17 @@ class Shortfall:
     owner: str
     left: float
     budget: float
+    unusable: str | None = None  # why it refuses every launch, if it does: see `headroom`
 
 
-def shortfall(members: list[CloudTarget], ledger: Ledger,
-              credit: CreditOf = _no_credit) -> list[Shortfall]:
-    """What every account has left, for the message a person reads when none of them is enough."""
-    return [Shortfall(t.name, t.owner, headroom(ledger, t, credit(t.name)), t.monthly_budget)
-            for t in members]
+def shortfall(members: list[CloudTarget], ledger: Ledger, credit: CreditOf = _no_credit,
+              health: HealthOf = _healthy) -> list[Shortfall]:
+    """What every account has left, for the message a person reads when none of them is enough
+    — and, for an account refusing to launch, why, since that is fixed by somebody doing
+    something quite different from topping up credit."""
+    rows = []
+    for t in members:
+        why = health(t.name)
+        rows.append(Shortfall(t.name, t.owner, headroom(ledger, t, credit(t.name), health=why),
+                              t.monthly_budget, why))
+    return rows
