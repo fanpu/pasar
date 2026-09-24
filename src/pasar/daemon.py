@@ -1793,6 +1793,11 @@ class Daemon:
 
         A job that fits nowhere stays where it is: the budget gate blocks it there with a reason,
         and credit resets.
+
+        An account whose provider has not loaded its first price list (`_rates_loading`) is
+        neither a reason to move nor a place to move to: not being able to price a job there
+        only means the table has not landed yet, and moving would drop an approval somebody gave
+        for nothing. On a pasard just started, one account's table often lands before another's.
         """
         groups = self.cfg.groups()
         waiting = [j for j in self.store.list_jobs([State.QUEUED, State.AWAITING])
@@ -1815,6 +1820,9 @@ class Daemon:
             # so a job that fits costs nothing extra to check.
             here = self.cfg.clouds.get(job.spec.target)
             if here is not None and not self._movable_to(job, [here]):
+                if self._rates_loading(here.name) and not self._prices(here.name, job):
+                    claim(here.name, self._need(here, job))
+                    continue  # it may well fit here once its prices have loaded
                 here = None
             if here is not None:
                 need = self._need(here, job)
@@ -1822,7 +1830,8 @@ class Daemon:
                             claimed.get(here.name, 0.0), self._health(here.name)) >= need:
                     claim(here.name, need)
                     continue
-            candidates = self._movable_to(job, groups[job.spec.group])
+            candidates = [t for t in self._movable_to(job, groups[job.spec.group])
+                          if not self._rates_loading(t.name)]
             if not candidates:
                 continue  # nothing can price it right now; the lane says so if it matters
             # The largest ceiling of any candidate, as at submit: a price difference between

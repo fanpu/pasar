@@ -3295,6 +3295,46 @@ def test_a_job_moved_off_an_account_that_cannot_price_it_says_so(grouped, repo, 
     assert "max_job_cost" not in moved.summary
 
 
+def test_a_job_stays_on_an_account_whose_prices_have_not_loaded_yet(grouped, repo):
+    """On a pasard just started, one account's price list lands before another's. Not being able
+    to price a job on the one still loading is no reason to move it, least of all when moving
+    drops the approval somebody gave it."""
+    d = grouped
+    spent(d, "modal-b", 5.0)  # the fuller account, so the group picks it
+    job = approved_group_job(d, repo)
+    assert job.spec.target == "modal-b"
+    provider_of(d, "modal-b").ready = False
+    d._rates.clear()
+    d.tick()
+    after = d.job(job.id)
+    assert after.spec.target == "modal-b" and after.state is State.QUEUED
+    assert [a["attempt"] for a in d.store.approvals(job.id)] == [1]
+    assert moves(d) == [] and after.reason != "moved"
+    provider_of(d, "modal-b").ready = True  # its table lands
+    d.tick()
+    assert d.job(job.id).state is State.RUNNING
+    assert parse_unit(d.store.current_attempt(job.id).unit)[0] == "modal-b"
+    assert moves(d) == []
+
+
+def test_a_job_is_not_moved_to_an_account_whose_prices_have_not_loaded_yet(make_group, repo):
+    """Even one whose config pins a price for the GPU: until its own table has landed, nothing
+    says what else that account can or cannot run."""
+    d = make_group(b={"rates": {"gpu_hour_cost_h100": 3.95, "cpu_hour_cost_sandbox": 0.14,
+                                "mem_gib_hour_cost_sandbox": 0.024}})
+    job = d.submit(cloud_spec(repo, target="modal", est_runtime=3600))
+    assert job.spec.target == "modal-a"
+    provider_of(d, "modal-b").ready = False
+    d._rates.clear()
+    spent(d, "modal-a", 25.0)  # $5 left there, and the job needs $7.92
+    d.tick()
+    assert d.job(job.id).spec.target == "modal-a"
+    assert moves(d) == []
+    provider_of(d, "modal-b").ready = True
+    d.tick()
+    assert d.job(job.id).spec.target == "modal-b"
+
+
 def test_a_job_moved_off_an_account_whose_job_cap_it_is_over_says_so(grouped, repo):
     job = grouped.submit(cloud_spec(repo, target="modal", est_runtime=3600))
     assert job.spec.target == "modal-a"
