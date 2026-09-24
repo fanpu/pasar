@@ -11,11 +11,26 @@ def test_launch_sets_limit_env_and_log_separator(daemon, executor, make_spec):
     assert daemon.job(1).state == State.RUNNING
     req = executor.launched[0]
     assert req.unit == "pasar-job-1-1"
-    assert req.mem_max == reservation(24 * GiB, daemon.pool, daemon.cfg)
     env = json.loads((daemon.job_dir(1) / "launch.json").read_text())["env"]
     assert env["A"] == "1" and env["PASAR_ATTEMPT"] == "1" and env["PASAR_RESUMING"] == "0"
-    assert env["PASAR_MEM_LIMIT_BYTES"] == str(req.mem_max)
+    assert env["PASAR_MEM_LIMIT_BYTES"] == str(reservation(24 * GiB, daemon.pool, daemon.cfg))
     assert (daemon.job_dir(1) / "output.log").read_text().startswith("──── attempt 1")
+
+
+def test_shared_job_gets_the_whole_gpu_cgroup_cap(daemon, executor, make_spec):
+    # A shared job's reservation is what it is scheduled and watched against, not a hard cap:
+    # its MemoryMax is the same machine-safety cap a whole-GPU job gets, so the kernel does not
+    # kill it the moment it runs past its estimate while the machine has room.
+    daemon.submit(make_spec(mem_request=24 * GiB))
+    daemon.submit(make_spec())
+    daemon.tick()
+    executor.exit("pasar-job-1-1", code=0)
+    daemon.tick()
+    daemon.tick()
+    shared, whole = executor.launched
+    assert shared.unit == "pasar-job-1-1" and whole.unit == "pasar-job-2-1"
+    assert shared.mem_max == whole.mem_max == daemon.pool
+    assert shared.mem_max > daemon.limit(daemon.job(1))
 
 
 def test_whole_gpu_job_has_no_mem_limit_env(daemon, make_spec):

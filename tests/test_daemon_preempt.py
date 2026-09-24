@@ -3,6 +3,7 @@ import os
 from pasar.executor.base import UnitState
 from pasar.models import EndKind, State
 from pasar.units import GiB
+from pasar.views import job_view, schedule_projection
 
 
 def test_higher_bid_alone_does_not_preempt(daemon, executor, make_spec):
@@ -117,6 +118,53 @@ def test_over_limit_job_killed_only_under_sustained_pressure(daemon, executor, p
     assert "12.0 GiB limit" in job.summary and "15.0 GiB" in job.summary
     kinds = [e["kind"] for e in daemon.store.machine_events()]
     assert "oom_kill" in kinds and "pressure" in kinds
+
+
+def test_shared_job_past_its_estimate_keeps_running_while_the_machine_has_room(
+        daemon, executor, probe, clock, make_spec):
+    # Asks for 30 GiB (limit 33 GiB), uses 40 GiB, and the machine is otherwise idle.
+    daemon.submit(make_spec(mem_request=30 * GiB))
+    daemon.tick()
+    cg = executor.units["pasar-job-1-1"].control_group
+    probe.cg_mem[cg] = 1 * GiB
+    probe.cg_pids[cg] = [4242]
+    probe.gpu = {4242: 39 * GiB}
+    for _ in range(10):
+        clock.advance(60)
+        daemon.tick()
+    assert executor.killed == [] and executor.stopped == []
+    job = daemon.job(1)
+    assert job.state == State.RUNNING and job.reason is None
+    now = clock()
+    view = job_view(daemon, job, now, schedule_projection(daemon, now))
+    assert view["over_limit"] and view["usage"] == 40 * GiB and view["limit"] == 33 * GiB
+    assert not [e for e in daemon.store.machine_events() if e["kind"] == "oom_kill"]
+
+
+def test_sustained_pressure_kills_only_the_job_furthest_over_its_limit(
+        daemon, executor, probe, clock, make_spec):
+    daemon.submit(make_spec(mem_request=10 * GiB))  # job 1, limit 12 GiB
+    daemon.submit(make_spec(mem_request=20 * GiB))  # job 2, limit 22 GiB
+    daemon.submit(make_spec(mem_request=10 * GiB))  # job 3, limit 12 GiB
+    daemon.tick()
+    for n, (pid, used) in enumerate([(1, 14 * GiB), (2, 29 * GiB), (3, 11 * GiB)], start=1):
+        cg = executor.units[f"pasar-job-{n}-1"].control_group
+        probe.cg_mem[cg] = 1 * GiB
+        probe.cg_pids[cg] = [pid]
+        probe.gpu[pid] = used
+    clock.advance(60)
+    daemon.tick()
+    probe.psi = 25.0
+    daemon.tick()  # pressure starts
+    clock.advance(29)
+    daemon.tick()
+    assert executor.killed == []  # not sustained for 30 s yet
+    clock.advance(2)
+    daemon.tick()
+    assert executor.killed == ["pasar-job-2-1"]  # 8 GiB over beats 3 GiB over
+    daemon.tick()
+    assert daemon.job(2).state == State.FAILED and daemon.job(2).reason == "oom"
+    assert daemon.job(1).state == State.RUNNING and daemon.job(3).state == State.RUNNING
 
 
 def test_oom_killed_job_is_not_chosen_as_a_same_tick_preemption_victim(

@@ -30,7 +30,7 @@ class LaunchRequest:
     unit: str
     job_dir: str  # contains launch.json
     log_path: str
-    mem_max: int | None  # cgroup memory limit in bytes (CPU-side backstop)
+    mem_max: int | None  # cgroup MemoryMax in bytes: the whole pool, a machine-safety cap
     grace: int  # seconds between SIGTERM and SIGKILL when stopped
     cloud: CloudLaunchInfo | None = None  # set only for attempts run on rented hardware
 

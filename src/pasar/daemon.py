@@ -2409,11 +2409,12 @@ class Daemon:
         n = len(prior) + 1
         unit = f"pasar-job-{job.id}-{n}"
         d = self.job_dir(job.id)
-        # The cgroup cap must be stable regardless of transient external GPU usage: unlike
-        # limit() (used for scheduling and the watchdog), a whole-GPU job's MemoryMax is the
-        # full pool, not pool - external, or it would shrink/grow as foreign processes come
-        # and go and could even go to zero.
-        mem_max = reservation(job.spec.mem_request, self.pool, self.cfg)
+        # The cgroup cap only keeps a job from taking the machine down, so every job gets the
+        # full pool, as a whole-GPU job would. A shared job may run past its reservation while
+        # the machine has room: the watchdog alone stops it, and only under sustained pressure.
+        # The cap must also be stable: unlike limit(), it is not pool - external, or it would
+        # shrink/grow as foreign processes come and go and could even go to zero.
+        mem_max = reservation(None, self.pool, self.cfg)
         try:
             base = {k: os.environ[k] for k in _BASE_ENV_KEYS if k in os.environ}
             # Drop any PASAR_* keys the submitter's own environment happened to carry (e.g. a
@@ -2427,7 +2428,7 @@ class Daemon:
                 PASAR_JOB_DIR=str(d), PASAR_GRACE_SECONDS=str(job.spec.grace),
             )
             if job.spec.mem_request is not None:
-                env["PASAR_MEM_LIMIT_BYTES"] = str(mem_max)
+                env["PASAR_MEM_LIMIT_BYTES"] = str(self.limit(job))
             _write_private(d / "launch.json",
                            json.dumps({"command": job.spec.command, "cwd": job.spec.cwd, "env": env}))
             with (d / "output.log").open("a") as f:
