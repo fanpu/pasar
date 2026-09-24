@@ -54,9 +54,12 @@
       + `${money(t.spent_month)} this month / ${money(t.monthly_budget)} · job cap ${money(t.max_job_cost)}`;
   }
 
+  // `job_spent` counts a live attempt at the ceiling reserved for it, not what it has burnt yet
+  // (see `Ledger.job_spent`), so a job a minute in must not read as having spent it all.
   function spentLine(job: JobView): string {
     const c = job.cloud!;
-    return c.job_cap === null ? `${money(c.job_spent)} so far` : `${money(c.job_spent)} so far · cap ${money(c.job_cap)}`;
+    const held = `${money(c.job_spent)} spent or held`;
+    return c.job_cap === null ? held : `${held} · cap ${money(c.job_cap)}`;
   }
 
   function flaggedToExtend(job: JobView): boolean {

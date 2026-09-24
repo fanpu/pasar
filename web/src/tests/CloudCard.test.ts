@@ -60,7 +60,7 @@ describe("CloudCard", () => {
     expect(rows[0].classList.contains("flag")).toBe(true);
     expect(rows[0].textContent).toContain("needs ~30m more");
     expect(rows[0].textContent).toContain("5h16 / 5h00 approved");
-    expect(rows[0].textContent).toContain("$8.70 so far · cap $10.00");
+    expect(rows[0].textContent).toContain("$8.70 spent or held · cap $10.00");
     expect(within(row(run, 210)).getByText("starting")).toBeInTheDocument();
     expect(row(run, 210).textContent).toContain("30s / 2h00 approved");
 
