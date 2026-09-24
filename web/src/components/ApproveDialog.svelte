@@ -50,7 +50,7 @@
   <div class="kv facts-list">
     <span class="k">GPU</span>
     <span class="v">
-      {c.gpu} on {c.target}
+      {c.gpu} on {c.target}{target?.owner ? ` · ${target.owner}'s account` : ""}
       {#if gpu}<span class="dim">({gpu.memory_gb != null ? `${gpu.memory_gb}GB · ` : ""}{money(gpu.hourly_rate)}/hour now)</span>{/if}
     </span>
 

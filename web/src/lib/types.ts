@@ -73,6 +73,7 @@ export interface CloudGpu { name: string; hourly_rate: number; memory_gb: number
 /** One configured cloud target, as `cloud_status_view` and `GET /api/cloud` show it. */
 export interface CloudTarget {
   name: string; provider: string; configured: boolean;
+  owner: string; // whose account pays for this target
   daily_budget: number; monthly_budget: number;
   spent_today: number; spent_month: number; committed: number;
   max_running: number; max_job_cost: number; running: number;

@@ -2534,6 +2534,12 @@ def test_the_cloud_status_counts_what_is_known_to_be_stored_per_target(cloud, re
     assert target["known_stored_bytes"] == 1000 and target["known_stored_jobs"] == 1
 
 
+def test_the_cloud_status_says_whose_account_pays_for_each_target(make_cloud, clock):
+    daemon, _ = make_cloud(owner="First Owner")
+    [target] = cloud_status_view(daemon, clock.t, {})["targets"]
+    assert target["owner"] == "First Owner"
+
+
 # ---- the per-job lifetime cap
 
 H100_RATE = hourly_rate(FakeProvider().rates(), "h100", 1)  # $5.278/hour

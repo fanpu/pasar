@@ -318,6 +318,8 @@ def cloud_status_view(daemon, now: float, projection: dict) -> dict:
         targets.append({
             "name": name,
             "provider": target.provider,
+            # Whose account pays for this target, for the web UI's approve dialog to say so.
+            "owner": target.owner,
             "configured": name in daemon.executors,
             "daily_budget": target.daily_budget,
             "monthly_budget": target.monthly_budget,

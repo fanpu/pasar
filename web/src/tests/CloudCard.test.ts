@@ -117,7 +117,7 @@ describe("CloudCard", () => {
 
     const dialog = screen.getByRole("dialog", { name: "Approve #202 finetune-a?" });
     const text = dialog.textContent!;
-    expect(text).toContain("A100 on modal-a");
+    expect(text).toContain("A100 on modal-a · First Owner's account");
     expect(text).toContain("40GB · $1.60/hour now");
     expect(text).toContain("1h00");
     expect(text).toContain("of the 1h30 it asked for; the job cap cuts it short");
@@ -200,6 +200,13 @@ describe("ApproveDialog", () => {
     render(ApproveDialog, { props: { job: unpriced, target: cloudTarget(), onclose: () => {} } });
     expect(screen.getByText("can't be priced right now")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Approve" })).toBeInTheDocument();
+  });
+
+  it("leaves the account out when the target is no longer listed", () => {
+    render(ApproveDialog, { props: { job: awaitingFresh, target: null, onclose: () => {} } });
+    const dialog = screen.getByRole("dialog");
+    expect(dialog.textContent).toContain("H100 on modal-a");
+    expect(dialog.textContent).not.toContain("account");
   });
 
   it("names the submitter's own --max-cost when that is what shortens the run", () => {

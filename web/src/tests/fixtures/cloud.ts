@@ -14,6 +14,7 @@ export function cloudTarget(overrides: Partial<CloudTarget> = {}): CloudTarget {
   return {
     name: "modal-a",
     provider: "modal",
+    owner: "First Owner",
     configured: true,
     daily_budget: 30,
     monthly_budget: 30,
