@@ -22,7 +22,7 @@ from pasar.config import CloudTarget, Config
 from pasar.daemon import CLOUD_RATE_TTL, PAUSE_LIMIT, PULL_SETTLE, Conflict, Daemon
 from pasar.db import Store
 from pasar.executor.base import UnitState
-from pasar.models import EndKind, JobSpec, State
+from pasar.models import Attempt, EndKind, JobSpec, State
 from pasar.units import GiB
 from pasar.views import cloud_status_view, cloud_view
 from tests.fakes_cloud import FakeProvider, launch_request, run_now
@@ -3012,6 +3012,80 @@ def test_a_job_that_has_run_is_never_moved(grouped, repo):
     after = d.job(job.id)
     assert after.spec.target == first
     assert after.state is State.FAILED and "spend limit" in after.summary
+    assert f"already run on {first}" in after.summary
+
+
+def test_a_job_whose_earlier_attempt_never_launched_is_not_said_to_have_a_checkpoint(grouped,
+                                                                                      repo):
+    """Pinned all the same — only a job every one of whose attempts its account refused is ever
+    moved — but the summary says what really happened, not that a checkpoint exists."""
+    d = grouped
+    job = approved_group_job(d, repo)
+    first = job.spec.target
+    now = d.clock()
+    d.store.insert_attempt(Attempt(job.id, 1, f"cloud:{first}:pending", now, end_time=now,
+                                   end_kind=EndKind.FAILED, reason="launch_error",
+                                   summary="no capacity"))
+    d.store.add_approval(job.id, 2, now, 1.0, 2.0, H100_RATE)
+    refuse_launches_on(d, first)
+    for _ in range(3):
+        d.tick()
+    after = d.job(job.id)
+    assert after.spec.target == first and after.state is State.FAILED
+    assert "checkpoint" not in after.summary and "already run" not in after.summary
+    assert "launch_error" in after.summary
+
+
+def test_a_refused_job_whose_sibling_is_out_of_budget_says_so(grouped, repo):
+    d = grouped
+    job = approved_group_job(d, repo)
+    first = job.spec.target
+    other = "modal-b" if first == "modal-a" else "modal-a"
+    spent(d, other, 29.9)
+    refuse_launches_on(d, first)
+    for _ in range(3):
+        d.tick()
+    after = d.job(job.id)
+    assert after.state is State.FAILED
+    assert "spend limit" in after.summary
+    assert f"{other}: only $0.10 left of $30.00 this month" in after.summary
+
+
+def test_a_refused_job_whose_sibling_is_refusing_too_says_so(grouped, repo):
+    d = grouped
+    job = approved_group_job(d, repo)
+    first = job.spec.target
+    other = "modal-b" if first == "modal-a" else "modal-a"
+    refuse_launches_on(d, first)
+    provider_of(d, other).health_note = "token rejected"
+    for _ in range(3):
+        d.tick()
+    after = d.job(job.id)
+    assert after.state is State.FAILED
+    assert f"{other}: refusing to launch anything: token rejected" in after.summary
+    assert len(d.store.attempts(job.id)) == 1  # the sibling was never tried: it would refuse
+
+
+def test_a_job_moved_to_a_pricier_sibling_waits_for_approval_there(make_group, repo):
+    """The approval carried over is for the price agreed to, not for whatever a sibling charges:
+    a dearer one sends the job back to a person, and says it moved as well as why."""
+    d = make_group(b={"rates": {"gpu_hour_cost_h100": 9.0}})
+    job = approved_group_job(d, repo)
+    assert job.spec.target == "modal-a"  # a tie on headroom goes to config order
+    refuse_launches_on(d, "modal-a")
+    d.tick()
+    d.tick()
+    after = d.job(job.id)
+    assert after.spec.target == "modal-b"
+    assert after.state is State.AWAITING and after.reason == "price_rose"
+    assert "modal-a refused to start it" in after.summary and "spend limit" in after.summary
+    assert "moved to modal-b" in after.summary
+    attempts = d.store.attempts(job.id)
+    assert [parse_unit(a.unit)[0] for a in attempts] == ["modal-a"]  # nothing on modal-b
+    assert provider_of(d, "modal-b").boxes == {}
+    d.approve(job.id)                      # a person agrees to modal-b's price
+    d.tick()
+    assert d.job(job.id).state is State.RUNNING
 
 
 def test_a_job_named_to_one_account_is_not_moved_when_it_refuses(grouped, repo):
@@ -3062,3 +3136,5 @@ def test_a_group_whose_accounts_all_refuse_says_so_at_submit(grouped, repo):
         d.submit(cloud_spec(repo, target="modal", est_runtime=600))
     msg = str(e.value)
     assert "spend limit" in msg and "modal-a" in msg and "modal-b" in msg
+    # Nothing here is about money, so the refusal must not say it is.
+    assert "afford" not in msg and "refusing to launch" in msg.splitlines()[0]

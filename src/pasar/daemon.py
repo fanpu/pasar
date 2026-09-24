@@ -864,11 +864,14 @@ class Daemon:
 
     def _no_account(self, group: str, members: list[CloudTarget], fits: list[CloudTarget],
                     need: float) -> str:
-        """The refusal for a group none of whose accounts has the month's headroom for a job:
-        every account, whose it is, what it has left, and how to queue for one regardless."""
+        """The refusal for a group none of whose accounts will take a job: every account, whose it
+        is, what it has left or why it refuses every launch, and how to queue for one regardless.
+        The first line names the cause, since money and a refusing account are fixed by
+        different people doing different things."""
         candidates = {t.name for t in fits}
+        rows = shortfall(members, self.ledger, self._health)
         lines = []
-        for r in shortfall(members, self.ledger, self._health):
+        for r in rows:
             if r.unusable is not None:
                 # Its balance is beside the point: it refuses every launch, and topping it up
                 # may not be what fixes that.
@@ -881,7 +884,15 @@ class Daemon:
                 line += ("  (no provider on this pasard)" if r.name not in self.executors
                          else "  (the run is over its max_job_cost)")
             lines.append(line)
-        return (f"no {group} account can afford this job (it needs up to ${need:.2f}):\n"
+        refusing = sum(1 for r in rows if r.unusable is not None)
+        if refusing == len(rows):
+            head = f"every {group} account is refusing to launch anything:\n"
+        elif refusing:
+            head = (f"no {group} account can take this job (it needs up to ${need:.2f}); some are "
+                    "refusing to launch anything and the rest cannot run it:\n")
+        else:
+            head = f"no {group} account can afford this job (it needs up to ${need:.2f}):\n"
+        return (head
                 + "\n".join(lines)
                 + "\nsubmit to one by name with --on <account> to queue for it anyway")
 
@@ -1951,19 +1962,21 @@ class Daemon:
         group asked for. A sibling that costs more is caught by `_over_the_approval` at launch
         and sent back for approval like any other price rise."""
         attempts = self.store.attempts(job.id)
-        if any(a.reason != ACCOUNT_UNUSABLE for a in attempts):
-            pinned = (f"{summary}. It has run on {job.spec.target} before, and its checkpoint "
-                      "is there, so it cannot move to another account")
-            return State.FAILED, pinned, None
+        earlier = [a for a in attempts if a.reason != ACCOUNT_UNUSABLE]
+        if earlier:
+            return State.FAILED, f"{summary}. {self._pinned(earlier)}", None
         if not job.spec.group:
             return State.FAILED, summary, None
         tried = {unit[0] for unit in map(parse_unit, (a.unit for a in attempts)) if unit}
-        left = [t for t in self.cfg.groups().get(job.spec.group, [])
-                if t.name not in tried and t.name in self.executors]
-        chosen = self._sibling(job, left)
+        left = [t for t in self.cfg.groups().get(job.spec.group, []) if t.name not in tried]
+        chosen, skipped = self._sibling(job, left)
         if chosen is None:
-            everywhere = ("; ".join(a.summary for a in attempts)
-                          + f"; no other {job.spec.group} account is left that could take it")
+            everywhere = "; ".join(a.summary for a in attempts)
+            if skipped:
+                everywhere += (f"; no other {job.spec.group} account could take it: "
+                               + "; ".join(skipped))
+            else:
+                everywhere += f"; no other {job.spec.group} account is left to try"
             return State.FAILED, everywhere, None
         last = attempts[-1].n
         approval = next((r for r in self.store.approvals(job.id) if r["attempt"] == last), None)
@@ -1976,18 +1989,50 @@ class Daemon:
             state = State.QUEUED
         return state, f"{summary}; moved to {chosen.name}", replace(job.spec, target=chosen.name)
 
-    def _sibling(self, job: Job, members: list[CloudTarget]) -> CloudTarget | None:
-        """The account `_resolve_group` would pick for `job` among `members`, or None if none
-        can take it. Held to the same rules, except that the job exists by now, so each account
-        is asked for its real ceiling for it (`_ceiling`)."""
+    @staticmethod
+    def _pinned(earlier: list[Attempt]) -> str:
+        """Why a refused job stays where it is, from what its earlier attempts really did."""
+        ran = [a for a in earlier if a.reason != "launch_error"]
+        if ran:
+            where = sorted({u[0] for u in map(parse_unit, (a.unit for a in ran)) if u})
+            return (f"It has already run on {', '.join(where)}, whose volume holds anything it "
+                    "saved, so it is not moved to another account")
+        reasons = ", ".join(sorted({a.reason or "no reason" for a in earlier}))
+        return (f"An earlier attempt of it failed for another reason ({reasons}), and a job is "
+                "only moved to another account when its account refused every attempt it had")
+
+    def _sibling(self, job: Job,
+                 members: list[CloudTarget]) -> tuple[CloudTarget | None, list[str]]:
+        """The account `_resolve_group` would pick for `job` among `members`, and why each of
+        the others could not take it (`"name: why"`), which is what a job that ends up with none
+        tells whoever reads its summary. Held to the same rules as a submit, except that the job
+        exists by now, so each account is asked for its real ceiling for it (`_ceiling`)."""
+        skipped: dict[str, str] = {}
         priced = self._estimates(job.spec, members)
-        fits = [t for t in members
-                if t.name in priced and priced[t.name] <= t.max_job_cost + PRICE_TOLERANCE]
+        fits = []
+        for t in members:
+            why = self._health(t.name)
+            if t.name not in self.executors:
+                skipped[t.name] = "no provider on this pasard"
+            elif why is not None:
+                skipped[t.name] = f"refusing to launch anything: {why}"
+            elif t.name not in priced:
+                skipped[t.name] = f"has no price for {job.spec.gpu}"
+            elif priced[t.name] > t.max_job_cost + PRICE_TOLERANCE:
+                skipped[t.name] = "the run is over its max_job_cost"
+            else:
+                fits.append(t)
+        chosen = None
         try:
             need = max((self._ceiling(t, job) for t in fits), default=0.0)
         except (KeyError, ValueError):
-            return None
-        return choose(fits, self.ledger, need, self._running_on, self._health) if fits else None
+            fits = []
+        if fits:
+            chosen = choose(fits, self.ledger, need, self._running_on, self._health)
+        if chosen is None:
+            for r in shortfall(fits, self.ledger):
+                skipped[r.name] = f"only ${r.left:.2f} left of ${r.budget:.2f} this month"
+        return chosen, [f"{t.name}: {skipped[t.name]}" for t in members if t.name in skipped]
 
     def _launch(self, job: Job, now: float) -> None:
         prior = self.store.attempts(job.id)
@@ -2076,10 +2121,17 @@ class Daemon:
         self.store.add_machine_event(
             now, "price_rise", f"job {job.id} was approved at up to ${was:.2f} for this run "
             f"but now costs ${costs:.2f}; it is waiting for approval again")
-        self.store.update_job(
-            job.id, state=State.AWAITING, queue_time=now, reason="price_rose",
-            summary=f"the price rose to ${costs:.2f}, above the ${was:.2f} approved for this "
-                    "run; approve it again to run at the new price")
+        summary = (f"the price rose to ${costs:.2f}, above the ${was:.2f} approved for this "
+                   "run; approve it again to run at the new price")
+        prior = self.store.attempts(job.id)
+        if prior and prior[-1].reason == ACCOUNT_UNUSABLE:
+            # The price did not move; the job did. Whoever approves it again should know it is
+            # somebody else's account they are agreeing to spend on, and why.
+            summary = (f"{prior[-1].summary}; moved to {target.name}, where it costs "
+                       f"${costs:.2f}, above the ${was:.2f} approved for this run; approve it "
+                       f"again to run on {target.name} at that price")
+        self.store.update_job(job.id, state=State.AWAITING, queue_time=now,
+                              reason="price_rose", summary=summary)
         return True
 
     def _launch_cloud(self, job: Job, target: CloudTarget, ex: CloudExecutor, now: float) -> None:
