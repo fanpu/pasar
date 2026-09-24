@@ -15,7 +15,7 @@ test.afterAll(async ({ request }) => {
 
 test("dashboard shows the mascot, tiles, timeline and jobs", async ({ page }) => {
   await page.goto("/");
-  await expect(page.getByText(/cooking|packed|waiting/)).toBeVisible({ timeout: 15_000 });
+  await expect(page.getByText(/cooking|packed|\bwaiting/)).toBeVisible({ timeout: 15_000 });
   await expect(page.getByText("memory pool")).toBeVisible();
   await expect(page.getByText("alpha").filter({ visible: true }).first()).toBeVisible();
   await expect(page.getByText("★ 1500").filter({ visible: true }).first()).toBeVisible();
