@@ -45,6 +45,8 @@ class JobSpec:
     submitter: str = ""
     env: dict[str, str] | None = None  # never persisted in the database
     target: str = "local"
+    group: str = ""                 # cloud only: the group `--on` named, resolved at submit to
+                                     # the one account in `target`; empty if `--on` named that
     gpu: str | None = None          # cloud only: "H100" or "H100:4"
     env_keys: list[str] = field(default_factory=list)  # cloud only: env vars to pass through
     data: list[str] = field(default_factory=list)      # cloud only: local paths to upload

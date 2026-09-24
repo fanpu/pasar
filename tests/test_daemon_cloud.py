@@ -2765,3 +2765,129 @@ def test_the_job_view_carries_the_cap_and_what_the_job_has_spent(cloud, repo, cl
         estimate(H100_RATE, 5400))
     spend(daemon, provider, clock, job.id, 2.0)
     assert cloud_view(daemon, daemon.job(job.id))["job_spent"] == pytest.approx(2.0)
+
+
+# ---- submitting to a group of accounts
+
+
+@pytest.fixture
+def make_group(tmp_path, clock, executor, probe, platform_check):
+    """Two interchangeable accounts, modal-a (alice's) and modal-b (bob's), in group "modal",
+    each with $30 a month. `reachable` names the ones that have a provider on this pasard."""
+    data = tmp_path / "group-data"
+    data.mkdir()
+
+    def make(reachable=("modal-a", "modal-b"), a=None, b=None):
+        base = {"provider": "modal", "group": "modal", "daily_budget": 30.0,
+                "monthly_budget": 30.0, "max_running": 2}
+        cfg = Config(clouds={
+            "modal-a": CloudTarget(**{**base, "name": "modal-a", "owner": "alice", **(a or {})}),
+            "modal-b": CloudTarget(**{**base, "name": "modal-b", "owner": "bob", **(b or {})}),
+        })
+        daemon = Daemon(cfg, Store(data / "pasar.db"), executor, probe, data, clock=clock,
+                        providers={name: FakeProvider() for name in reachable},
+                        platform_check=platform_check, background=run_now)
+        daemon.pull_settle = 0
+        return daemon
+
+    return make
+
+
+@pytest.fixture
+def grouped(make_group):
+    return make_group()
+
+
+def spent(daemon, target, dollars):
+    """A finished, billed attempt on `target` this month, so its headroom is `dollars` less."""
+    job_id = daemon.store.insert_job(
+        JobSpec(command="x", est_runtime=60, cwd="/tmp", target=target, gpu="H100"), 1000,
+        daemon.clock(), None)
+    daemon.store.update_job(job_id, state=State.COMPLETED)
+    daemon.ledger.record(target, job_id, 1, estimated=dollars, billed=dollars)
+
+
+def test_submitting_to_a_group_picks_a_member_and_records_both(grouped, repo):
+    job = grouped.submit(cloud_spec(repo, target="modal", est_runtime=600))
+    assert job.spec.target in ("modal-a", "modal-b")
+    assert job.spec.group == "modal"
+    assert job.state == State.AWAITING
+    stored = grouped.job(job.id).spec
+    assert (stored.target, stored.group) == (job.spec.target, "modal")
+
+
+def test_a_group_submit_packs_onto_the_account_already_in_use(grouped, repo):
+    # modal-b is second in config order, so only the packing rule can pick it
+    spent(grouped, "modal-b", 25.0)
+    job = grouped.submit(cloud_spec(repo, target="modal", est_runtime=600))
+    assert job.spec.target == "modal-b"
+
+
+def test_a_group_submit_prefers_an_account_with_a_free_slot(make_group, repo):
+    daemon = make_group(a={"max_running": 1}, b={"max_running": 1})
+    start(daemon, repo, target="modal-a")  # modal-a is fuller, but now has no slot
+    job = daemon.submit(cloud_spec(repo, target="modal", est_runtime=600))
+    assert job.spec.target == "modal-b"
+
+
+def test_a_group_submit_is_refused_when_no_account_can_afford_it(grouped, repo):
+    """Queueing for three weeks until credit resets is a job you forget you submitted."""
+    for name in ("modal-a", "modal-b"):
+        spent(grouped, name, 29.9)
+    with pytest.raises(Conflict) as e:
+        grouped.submit(cloud_spec(repo, target="modal", est_runtime=3600))
+    msg = str(e.value)
+    assert "modal-a" in msg and "modal-b" in msg
+    assert "alice" in msg and "bob" in msg
+    assert "$0.10" in msg and "$30.00" in msg
+    assert f"${estimate(H100_RATE, 5400):.2f}" in msg  # what it needs: the padded ceiling
+    assert "--on" in msg                                # the escape hatch is in the message
+    assert grouped.store.list_jobs([State.AWAITING]) == []
+
+
+def test_submitting_to_a_named_account_still_queues_when_it_cannot_afford_it(grouped, repo):
+    """The explicit form is how you say 'I know, do it anyway'; the budget gate stops it later."""
+    spent(grouped, "modal-a", 29.9)
+    job = grouped.submit(cloud_spec(repo, target="modal-a", est_runtime=3600))
+    assert job.spec.target == "modal-a" and job.spec.group == ""
+    assert job.state == State.AWAITING
+
+
+def test_a_name_that_is_neither_a_target_nor_a_group_is_refused_naming_both(grouped, repo):
+    with pytest.raises(ValueError, match="nowhere") as e:
+        grouped.submit(cloud_spec(repo, target="nowhere"))
+    assert "modal-a" in str(e.value) and "groups: modal" in str(e.value)
+
+
+def test_a_group_submit_skips_an_account_whose_job_cap_the_estimate_is_over(make_group, repo):
+    # 1h of H100 is $5.28: over modal-a's $5 cap, so the fuller modal-a is not a candidate
+    daemon = make_group(a={"max_job_cost": 5.0})
+    spent(daemon, "modal-a", 20.0)
+    job = daemon.submit(cloud_spec(repo, target="modal", est_runtime=3600))
+    assert job.spec.target == "modal-b"
+
+
+def test_a_group_submit_over_every_accounts_job_cap_gets_the_cap_refusal(grouped, repo):
+    # 3h of H100 is $15.83, over both $10 caps: the refusal is the one a named account gives,
+    # with its figures and its advice, rather than a claim that nobody has the money
+    with pytest.raises(ValueError) as e:
+        grouped.submit(cloud_spec(repo, target="modal", est_runtime=3 * 3600))
+    msg = str(e.value)
+    assert "$15.83" in msg and "max_job_cost" in msg and "modal-a" in msg
+    assert grouped.store.list_jobs() == []
+
+
+def test_a_group_submit_skips_an_account_without_a_provider(make_group, repo):
+    daemon = make_group(reachable=("modal-b",))
+    spent(daemon, "modal-a", 20.0)  # the fuller one, if only it could be reached
+    job = daemon.submit(cloud_spec(repo, target="modal", est_runtime=600))
+    assert job.spec.target == "modal-b"
+
+
+def test_a_group_with_no_reachable_account_says_so_rather_than_blaming_money(make_group, repo):
+    daemon = make_group(reachable=())
+    with pytest.raises(ValueError, match="no provider") as e:
+        daemon.submit(cloud_spec(repo, target="modal", est_runtime=600))
+    msg = str(e.value)
+    assert "modal-a" in msg and "modal-b" in msg
+    assert "configured but its provider could not be set up" in msg

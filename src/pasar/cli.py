@@ -327,8 +327,9 @@ def build_parser() -> Parser:
     s.add_argument("--cwd", default=None)
     s.add_argument("--no-env", action="store_true", help="don't pass your environment")
     s.add_argument("--on", dest="target", default="local",
-                   help="run on this cloud target instead of the local GPU (e.g. modal); lands "
-                        "awaiting approval instead of running right away")
+                   help="run on this cloud target instead of the local GPU (e.g. modal), or on "
+                        "one account of a group of them, picked at submit; lands awaiting "
+                        "approval instead of running right away")
     s.add_argument("--gpu", help="cloud only: GPU type, e.g. H100 or H100:4")
     s.add_argument("--data", action="append", default=[],
                    help="cloud only: not wired up yet (rejected) — a cloud job's input data "

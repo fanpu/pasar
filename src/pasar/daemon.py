@@ -18,6 +18,7 @@ from pasar.cloud.base import GpuRow, parse_gpu, price_list
 from pasar.cloud.bundle import Bundle, BundleError, EnvSpec, build_bundle, check_platform
 from pasar.cloud.cost import Ledger, estimate, hourly_rate
 from pasar.cloud.executor import CloudExecutor
+from pasar.cloud.group import choose, shortfall
 from pasar.cloud.lane import CloudDecision, CloudQueued, decide_cloud
 from pasar.cloud.pace import needs_more_time as _needs_more_time
 from pasar.config import CloudTarget, Config
@@ -713,10 +714,17 @@ class Daemon:
     def _submit_cloud(self, spec: JobSpec) -> Job:
         """A cloud job is checked, priced and packaged before it exists, so a mistake costs
         nothing, and lands awaiting a person's approval rather than in the queue."""
+        members = self.cfg.groups().get(spec.target)
+        if members is not None:
+            spec = self._resolve_group(spec, members)
+        else:
+            spec = replace(spec, group="")  # only a resolved group may say it came from one
         target = self.cfg.clouds.get(spec.target)
         if target is None:
             known = ", ".join(sorted(self.cfg.clouds)) or "none configured"
-            raise ValueError(f"unknown cloud target {spec.target!r} (known targets: {known})")
+            groups = ", ".join(sorted(self.cfg.groups()))
+            raise ValueError(f"unknown cloud target {spec.target!r} (known targets: {known}"
+                             + (f"; groups: {groups})" if groups else ")"))
         if spec.target not in self.executors:
             # Configured but unusable: saying "unknown" here would send someone to fix a config
             # file that is already right.
@@ -779,6 +787,76 @@ class Daemon:
             (d / "git.diff").write_text(diff)
         self.changed()
         return self.job(job_id)
+
+    def _resolve_group(self, spec: JobSpec, members: list[CloudTarget]) -> JobSpec:
+        """Turn `--on <group>` into one concrete account, here at submit where nothing has been
+        spent. Everything downstream — the lane, the budget gate, the approval, the ledger — only
+        ever sees the concrete target, which is why none of it needs to know groups exist, and
+        every check `_submit_cloud` makes of a named target is still made of the one chosen.
+
+        A member is a candidate only if it has a provider here and the run's estimate fits under
+        its `max_job_cost`. When nothing is left to choose between for a reason that isn't money
+        this month, the spec goes on as if it named the first member that could at least price
+        it, so the refusal is the one that account gives (a missing or unpriced GPU, or the job
+        cap with the GPUs that would fit). Only a candidate short of monthly headroom is refused
+        here, because queueing for credit that resets in three weeks is a job nobody remembers
+        submitting; naming an account instead of the group still queues for it."""
+        group = spec.target
+        reachable = [t for t in members if t.name in self.executors]
+        if not reachable:
+            lines = [f"  {why}: {fix}" for why, fix in map(self._unreachable,
+                                                         (t.name for t in members))]
+            raise ValueError(f"cloud group {group!r} has no provider on this pasard for any of "
+                             "its accounts, so nothing can be submitted to it:\n"
+                             + "\n".join(lines))
+        priced: dict[str, float] = {}
+        if spec.gpu:
+            for t in reachable:
+                try:
+                    priced[t.name] = estimate(self._hourly(t, spec.gpu), spec.est_runtime)
+                except (KeyError, ValueError):
+                    continue
+        fits = [t for t in reachable
+                if t.name in priced and priced[t.name] <= t.max_job_cost + PRICE_TOLERANCE]
+        if not fits:
+            stand_in = next((t for t in reachable if t.name in priced), reachable[0])
+            return replace(spec, target=stand_in.name, group=group)
+        # The largest ceiling of any candidate, so the one chosen can afford the run at whichever
+        # candidate's prices: a price difference can only make the choice more conservative.
+        need = max(self._submit_ceiling(t, spec) for t in fits)
+        chosen = choose(fits, self.ledger, need, self._running_on)
+        if chosen is None:
+            raise Conflict(self._no_account(group, members, fits, need))
+        return replace(spec, target=chosen.name, group=group)
+
+    def _submit_ceiling(self, target: CloudTarget, spec: JobSpec) -> float:
+        """`_ceiling` for a job that does not exist yet, and so has spent nothing of its lifetime
+        cap: the price of the target's window, or the dollar cap, whichever is lower."""
+        cap = target.max_job_cost if spec.max_cost is None else min(spec.max_cost,
+                                                                      target.max_job_cost)
+        return min(self._cost(target, spec.gpu, self._window(spec, target)), cap)
+
+    def _running_on(self, name: str) -> int:
+        """How many attempts are live on the target called `name`, as the cloud lane counts
+        them against its `max_running`."""
+        return sum(1 for j in self.store.list_jobs(ACTIVE) if j.spec.target == name)
+
+    def _no_account(self, group: str, members: list[CloudTarget], fits: list[CloudTarget],
+                    need: float) -> str:
+        """The refusal for a group none of whose accounts has the month's headroom for a job:
+        every account, whose it is, what it has left, and how to queue for one regardless."""
+        candidates = {t.name for t in fits}
+        lines = []
+        for r in shortfall(members, self.ledger):
+            line = (f"  {r.name}  ({r.owner or 'no owner set'})  ${r.left:.2f} left of "
+                    f"${r.budget:.2f} this month")
+            if r.name not in candidates:
+                line += ("  (no provider on this pasard)" if r.name not in self.executors
+                         else "  (the run is over its max_job_cost)")
+            lines.append(line)
+        return (f"no {group} account can afford this job (it needs up to ${need:.2f}):\n"
+                + "\n".join(lines)
+                + "\nsubmit to one by name with --on <account> to queue for it anyway")
 
     def approve(self, job_id: int, extend: bool = False) -> Job:
         """Let one attempt run, at today's price. Approval is per attempt: a paused or reclaimed
@@ -1774,7 +1852,7 @@ class Daemon:
                     log.warning("job %s has no price on %s; leaving it queued", job.id, name)
                     continue
                 queued.append(CloudQueued(job.id, job.bid, job.queue_time, price))
-            running = sum(1 for j in self.store.list_jobs(ACTIVE) if j.spec.target == name)
+            running = self._running_on(name)
             # settled_* and committed, never spent_*: the first pair excludes open attempts,
             # which committed() is already pricing, so each attempt is counted exactly once.
             decision = decide_cloud(queued, running, target,

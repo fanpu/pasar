@@ -34,3 +34,15 @@ def test_spec_defaults_to_local():
 def test_awaiting_is_neither_active_nor_terminal():
     from pasar.daemon import ACTIVE
     assert State.AWAITING not in ACTIVE and State.AWAITING not in TERMINAL
+
+
+def test_spec_roundtrip_keeps_the_group():
+    spec = JobSpec(command="x", est_runtime=1, cwd="/tmp", target="modal-a", group="modal")
+    assert JobSpec.from_json(spec.to_json()).group == "modal"
+
+
+def test_a_spec_stored_before_groups_existed_still_loads():
+    old = ('{"command": "x", "est_runtime": 1, "cwd": "/tmp", "target": "modal", '
+           '"gpu": "H100"}')
+    spec = JobSpec.from_json(old)
+    assert spec.target == "modal" and spec.group == ""

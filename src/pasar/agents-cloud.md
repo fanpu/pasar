@@ -201,7 +201,7 @@ Extra flags, cloud jobs only:
 
 | Flag | Meaning |
 |---|---|
-| `--on TARGET` | Which configured cloud target to run on. Omit for the local GPU. |
+| `--on TARGET` | Which configured cloud target to run on, or a group of them (pasar picks one account at submit). Omit for the local GPU. |
 | `--gpu TYPE` | **Required** for a cloud job, e.g. `H100` or `H100:4`. |
 | `--env KEY` | Repeatable. Pass this environment variable through to the sandbox by name (unlike a local job, a cloud job's environment is *not* captured wholesale). |
 | `--data PATH` | Not wired up yet: rejected with an error. A cloud job's input data has to arrive with the provider work (e.g. a volume mount in the target's config), not through `pasar submit`. |
@@ -218,6 +218,7 @@ A submit is also refused when:
 - the estimate (`--time` × the rate) is over the job cap. The error names the GPUs on that target
   whose estimate for the same run would fit. Don't shorten `--time` to squeeze under it: the
   estimate should be honest, and the cap covers every later attempt anyway.
+- `--on` named a group and none of its accounts has the month's budget for the job; ask the user.
 
 ## Approval, and what's waiting
 
