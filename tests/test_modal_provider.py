@@ -493,17 +493,51 @@ def test_list_returns_our_handles_with_their_tags(provider, tmp_path):
 
 def test_rates_are_served_from_memory_after_the_first_call(provider, tmp_path):
     p, sdk = provider
-    first = p.rates()
-    assert first["gpu_hour_cost_t4"] == 0.59
+    assert _wait(lambda: p.rates())   # warmed on a thread when the provider was built
+    assert p.rates()["gpu_hour_cost_t4"] == 0.59
     sdk.rates_value = {"gpu_hour_cost_t4": 99.0}
     assert p.rates()["gpu_hour_cost_t4"] == 0.59  # still cached; a thread refreshes it later
+
+
+def test_the_first_rates_call_never_waits_on_the_network(tmp_path):
+    """`rates()` is read on the daemon's tick, and the first call used to fetch Modal's price
+    list right there. Now the provider starts that fetch on a thread when it is built, and a
+    call before it lands gets an empty table, which every caller reads as "can't price it right
+    now" rather than waiting."""
+    sdk = FakeSDK()
+    gate = threading.Event()
+    callers: list[str] = []
+    real = sdk.Workspace.from_context
+
+    def slow(*, client=None):
+        callers.append(threading.current_thread().name)
+        gate.wait(5)
+        return real(client=client)
+
+    sdk.Workspace.from_context = staticmethod(slow)
+    p = ModalProvider(_target(), tmp_path / "state", sdk=sdk)
+    try:
+        assert p.rates() == {}
+        assert threading.current_thread().name not in callers
+        gate.set()
+        assert _wait(lambda: p.rates().get("gpu_hour_cost_t4") == 0.59)
+        assert threading.current_thread().name not in callers
+    finally:
+        gate.set()
+        p.close()
+
+
+def _fresh_rates(p):
+    """The price list as a fetch made now would have it, for tests that change the fake's
+    rates after the provider has already warmed its table."""
+    return p._fetch_rates()
 
 
 def test_rates_are_aliased_so_a_gpu_spelt_with_a_dash_is_priced(provider, tmp_path):
     """`--gpu A100-80GB` becomes the key `gpu_hour_cost_a100-80gb`, and Modal spells its own with
     underscores; an unpriced GPU refuses to estimate, so the job would never start."""
     p, _sdk = provider
-    rates = p.rates()
+    rates = _fresh_rates(p)
     assert rates["gpu_hour_cost_a100-80gb"] == 2.5
     assert rates["gpu_hour_cost_a100_80gb"] == 2.5
 
@@ -515,7 +549,7 @@ def test_a10_and_rtx_pro_6000_are_aliased_to_modals_own_billing_spelling(provide
     p, sdk = provider
     sdk.rates_value = {**sdk.rates_value, "gpu_hour_cost_a10g": 1.1,
                        "gpu_hour_cost_rtx6000": 6.0}
-    rates = p.rates()
+    rates = _fresh_rates(p)
     assert rates["gpu_hour_cost_a10"] == 1.1
     assert rates["gpu_hour_cost_rtx-pro-6000"] == 6.0
 
@@ -524,7 +558,7 @@ def test_a10_and_rtx_pro_6000_are_aliased_to_modals_own_billing_spelling(provide
 def test_gpus_collapses_aliases_to_one_row_named_as_gpu_accepts_it(provider, tmp_path):
     p, sdk = provider
     sdk.rates_value = {"gpu_hour_cost_a100_80gb": 2.5, "gpu_hour_cost_a100-80gb": 2.5}
-    rows = {r.name: r for r in p.gpus(p.rates())}
+    rows = {r.name: r for r in p.gpus(_fresh_rates(p))}
     assert list(rows) == ["A100-80GB"]
     assert rows["A100-80GB"].hourly_rate == 2.5
     assert rows["A100-80GB"].memory_gb == 80
@@ -533,7 +567,7 @@ def test_gpus_collapses_aliases_to_one_row_named_as_gpu_accepts_it(provider, tmp
 def test_gpus_uses_modals_own_name_for_a10_and_rtx_pro_6000(provider, tmp_path):
     p, sdk = provider
     sdk.rates_value = {"gpu_hour_cost_a10g": 1.1, "gpu_hour_cost_rtx6000": 6.0}
-    rows = {r.name: r for r in p.gpus(p.rates())}
+    rows = {r.name: r for r in p.gpus(_fresh_rates(p))}
     assert set(rows) == {"A10", "RTX-PRO-6000"}
     assert rows["A10"].memory_gb == 24
     assert rows["RTX-PRO-6000"].memory_gb == 96
@@ -546,7 +580,7 @@ def test_gpus_excludes_endpoint_and_cpu_memory_rates(provider, tmp_path):
         "mem_gib_hour_cost_sandbox": 0.024, "volume_storage_gib_month_cost": 0.05,
         "endpoints_llama_3_1_8b_instruct": 0.1,
     }
-    names = {r.name for r in p.gpus(p.rates())}
+    names = {r.name for r in p.gpus(_fresh_rates(p))}
     assert names == {"H100"}
 
 
@@ -555,7 +589,7 @@ def test_gpus_lists_an_unknown_gpu_with_its_memory_blank(provider, tmp_path):
     vanishing from `pasar cloud`."""
     p, sdk = provider
     sdk.rates_value = {"gpu_hour_cost_b400": 9.0}
-    rows = {r.name: r for r in p.gpus(p.rates())}
+    rows = {r.name: r for r in p.gpus(_fresh_rates(p))}
     assert rows["B400"].hourly_rate == 9.0
     assert rows["B400"].memory_gb is None
 
@@ -564,7 +598,7 @@ def test_gpus_sort_by_price(provider, tmp_path):
     p, sdk = provider
     sdk.rates_value = {"gpu_hour_cost_h100": 3.95, "gpu_hour_cost_t4": 0.59,
                        "gpu_hour_cost_h200": 4.5}
-    rows = p.gpus(p.rates())
+    rows = p.gpus(_fresh_rates(p))
     assert [r.name for r in rows] == ["T4", "H100", "H200"]
     assert [r.hourly_rate for r in rows] == sorted(r.hourly_rate for r in rows)
 
@@ -630,7 +664,7 @@ def test_the_provider_passes_its_own_client_to_every_call(tmp_path, monkeypatch)
         assert box.kwargs["client"] is sdk.clients["alice"]
         assert sdk.app_clients == [sdk.clients["alice"]]
         assert all(c is sdk.clients["alice"] for c in sdk.volume_clients)
-        p.rates()
+        assert _wait(lambda: p.rates())  # warmed on a thread, with alice's client
         assert sdk.workspace_clients == [sdk.clients["alice"]]
         p.credit()  # whose credit it reads is the whole point of reading it
         assert sdk.workspace_clients == [sdk.clients["alice"]] * 2

@@ -184,6 +184,9 @@ class ModalProvider:
         # Only a test sets this, to hold a launch in the window between handing back a handle and
         # the sandbox existing — the one window where a terminate has nothing to terminate.
         self._pause_before_create = threading.Event()
+        # Start fetching the price list now, off whatever thread built this: `rates()` is read on
+        # the daemon's tick and never fetches for itself.
+        self._refresh_rates_soon()
 
     # ---- the Provider protocol: preparing to run
     def prepare_image(self, env: EnvSpec) -> str:
@@ -612,17 +615,17 @@ class ModalProvider:
 
     # ---- the Provider protocol: what it costs
     def rates(self) -> dict[str, float]:
-        """Modal's live price list. The first call fetches it; later ones are served from memory
-        and refreshed on a thread, because this is read on the daemon's tick."""
+        """Modal's live price list, always from memory and never a network call, because this is
+        read on the daemon's tick. The provider starts fetching it on a thread when it is built;
+        until that lands, or while every fetch fails, this is an empty table, which callers read
+        as "can't price it right now" (and a fresh fetch is started). A table older than
+        `RATE_TTL` is still served while a thread refreshes it."""
         now = self.clock()
         with self._lock:
             cached, age = dict(self._rates), now - self._rates_at
-        if cached and age < RATE_TTL:
-            return cached
-        if cached:
+        if not cached or age >= RATE_TTL:
             self._refresh_rates_soon()
-            return cached
-        return self._fetch_rates()
+        return cached
 
     def _fetch_rates(self) -> dict[str, float]:
         raw = dict(self.sdk.Workspace.from_context(client=self.client).billing.rates())

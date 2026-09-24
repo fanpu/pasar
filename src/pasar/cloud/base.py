@@ -243,7 +243,9 @@ class Provider(Protocol):
         """List handles the provider still knows about, with the tags each was launched with."""
 
     def rates(self) -> dict[str, float]:
-        """Return this provider's current price list, keyed by billing dimension."""
+        """Return this provider's current price list, keyed by billing dimension. Read on the
+        daemon's tick, so it answers from memory; an empty (or partial) table is a provider that
+        cannot price something right now, never a reason to wait."""
 
     def gpus(self, rates: dict[str, float]) -> list[GpuRow]:
         """This target's GPUs as clean rows, built from `rates` — typically a caller's own
