@@ -47,7 +47,7 @@ class Provider(FakeProvider):
 
 def build(data: Path):
     target = CloudTarget(name=TARGET, provider="fake", owner="First Owner", daily_budget=30.0,
-                         monthly_budget=30.0, max_running=3, max_job_cost=10.0)
+                         monthly_budget=30.0, max_running=2, max_job_cost=10.0)
     cfg = Config(data_dir=str(data), pull_dir=str(data / "pulls"), pull_min_free=0, tick=1.0,
                  clouds={TARGET: target})
     (data / "jobs").mkdir(parents=True, exist_ok=True)
@@ -105,6 +105,11 @@ def seed(daemon: Daemon, provider: FakeProvider) -> None:
     provider.start(handle_of(daemon, sweep))
     daemon.tick()
     del local, warm
+    # Approved, but the target is already running all it may: it waits to launch.
+    held = daemon.submit(cloud_spec(name="pretrain-cont", tags=["pretrain"], submitter="agent-3",
+                                    est_runtime=3600))
+    daemon.approve(held.id)
+    daemon.tick()
 
     daemon.submit(cloud_spec(name="rlhf-policy", tags=["rlhf"], submitter="agent-1",
                              est_runtime=2700))
