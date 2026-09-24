@@ -588,6 +588,25 @@ def test_snapshot_recent_cloud_jobs_are_capped_at_five_newest_first(client, clou
     assert [j["id"] for j in recent] == list(reversed(ids))[:5]
 
 
+def test_snapshot_recent_cloud_jobs_go_by_when_they_finished_not_when_they_last_ran(
+        client, cloud_daemon, cloud_provider, cloud_cwd, clock):
+    # A paused job rejected at its re-approval finished when it was rejected, however long ago
+    # its last attempt ended.
+    paused = submit_cloud(client, cloud_cwd, name="paused").json()["id"]
+    client.post(f"/api/jobs/{paused}/approve")
+    cloud_daemon.tick()
+    handle = cloud_daemon.store.current_attempt(paused).unit.rsplit(":", 1)[1]
+    cloud_provider.reclaim(handle)
+    cloud_daemon.tick()  # paused: back to awaiting
+    assert cloud_daemon.job(paused).state == "awaiting"
+    clock.advance(60)
+    done = finish_cloud_job(client, cloud_daemon, cloud_provider, cloud_cwd, name="done")
+    clock.advance(60)
+    client.post(f"/api/jobs/{paused}/reject")
+    recent = stream_snapshot(client)["cloud"]["recent"]
+    assert [j["id"] for j in recent] == [paused, done]
+
+
 def test_snapshot_recent_cloud_jobs_never_include_local_jobs(client, cloud_daemon, cloud_provider,
                                                               cloud_cwd, tmp_path):
     local_id = submit(client, tmp_path).json()["id"]

@@ -355,19 +355,17 @@ RECENT_CLOUD_LIMIT = 5
 
 
 def _recent_cloud_jobs(daemon, now: float, projection: dict, limit: int = RECENT_CLOUD_LIMIT):
-    """Up to `limit` most recently finished cloud jobs, newest first. `cloud_finished` (stamped
-    the moment a cloud job goes terminal — see `Daemon._cloud_ended`) is the source of which jobs
-    to even look at, so this never walks every local job ever run; each one's own end time is its
-    current attempt's `end_time` where that survived, else the stamp itself (a job cancelled or
-    rejected while awaiting approval never ran an attempt at all)."""
+    """Up to `limit` most recently finished cloud jobs, newest first, by their `cloud_finished`
+    stamp: set the moment a cloud job goes terminal (see `Daemon._cloud_ended`), so it is when
+    the job finished even for one that never ran or was paused long before it was cancelled or
+    rejected — not its last attempt's end. That table is also the source of which jobs to even
+    look at, so this never walks every local job ever run."""
     candidates: list[tuple[float, Job]] = []
     for job_id, ts in daemon.store.cloud_finished().items():
         job = daemon.store.get_job(job_id)
         if job is None or job.state not in TERMINAL or job.spec.target == LOCAL:
             continue
-        att = daemon.store.current_attempt(job_id)
-        ended = att.end_time if att and att.end_time else ts
-        candidates.append((ended, job))
+        candidates.append((ts, job))
     candidates.sort(key=lambda pair: pair[0], reverse=True)
     return [job_view(daemon, job, now, projection) for _, job in candidates[:limit]]
 
