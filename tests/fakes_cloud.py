@@ -44,6 +44,7 @@ class _Sandbox:
     out: bytes = b""
     exit_code: int | None = None
     by_provider: bool = False
+    unusable: str | None = None
 
 
 class FakeProvider:
@@ -69,7 +70,12 @@ class FakeProvider:
         self.deleted_persist: list[int] = []
         self.recursive_deletes: list[int] = []
         self.deleted_files: list[tuple[int, str]] = []
-        self.fail_launch: str | None = None
+        # A message (raised as a RuntimeError) or an exception to raise as it is.
+        self.fail_launch: str | Exception | None = None
+        # Set to refuse every launch the way Modal refuses an account past its spend limit: a
+        # handle comes back, and the attempt behind it has already ended without a sandbox.
+        self.refuse: str | None = None
+        self.health_note: str | None = None  # what `health()` says; set by a refusal
         self.next_id = 1
         # Pull test hooks: a callback run from inside `download_persist` (to prove a pull made
         # from within it — i.e. one already in flight — is refused) and a way to make it write
@@ -89,10 +95,18 @@ class FakeProvider:
 
     def launch(self, req: CloudLaunch) -> str:
         if self.fail_launch:
-            raise RuntimeError(self.fail_launch)
+            raise (self.fail_launch if isinstance(self.fail_launch, Exception)
+                   else RuntimeError(self.fail_launch))
         handle = f"sb-{self.next_id}"
         self.next_id += 1
         self.boxes[handle] = _Sandbox(req)
+        if self.refuse:
+            self.health_note = self.refuse
+            box = self.boxes[handle]
+            box.phase, box.exit_code, box.unusable = Phase.EXITED, 1, self.refuse
+            box.out = f"pasar: fake could not start this attempt: {self.refuse}\n".encode()
+        else:
+            self.health_note = None
         return handle
 
     def status(self, handle: str) -> CloudStatus:
@@ -100,7 +114,10 @@ class FakeProvider:
         if b is None:
             return CloudStatus(Phase.GONE)
         return CloudStatus(b.phase, b.exit_code, b.by_provider, gpu_type=b.req.gpu,
-                           console_url=f"https://fake/{handle}")
+                           console_url=f"https://fake/{handle}", unusable=b.unusable)
+
+    def health(self) -> str | None:
+        return self.health_note
 
     def read_output(self, handle: str, cursor: int) -> tuple[bytes, int]:
         b = self.boxes.get(handle)

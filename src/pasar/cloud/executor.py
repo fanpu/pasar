@@ -316,13 +316,18 @@ class CloudExecutor:
                 result = "exit-code"
         else:
             code, signal = st.exit_code, None
-            if rec.asked_to_stop:
+            if st.unusable is not None:
+                # Refused before any sandbox existed, so it cannot also have been stopped or
+                # reclaimed: there was nothing to stop.
+                result = "account_unusable"
+            elif rec.asked_to_stop:
                 result = "stopped"
             elif st.ended_by_provider:
                 result = "reclaimed"
             else:
                 result = "success" if code == 0 else "exit-code"
-        return UnitState(unit, True, result, code, signal, None, st.console_url or None)
+        return UnitState(unit, True, result, code, signal, None, st.console_url or None,
+                         refusal=st.unusable if result == "account_unusable" else None)
 
     def _state_path(self, job_id: int, attempt: int) -> Path:
         """One file per attempt, so a relaunch can never read the attempt before it."""

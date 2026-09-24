@@ -139,6 +139,19 @@ class Phase(StrEnum):
     GONE = "gone"
 
 
+class AccountUnusable(Exception):
+    """The account refused to start an attempt for a reason that is the account's and not the
+    job's — a workspace past its spend limit, credentials it no longer accepts — so every other
+    launch on it would be refused the same way.
+
+    Only ever raised (or reported, as `CloudStatus.unusable`) for a refusal that came before any
+    sandbox existed: nothing was spent and the job has no checkpoint there, which is what makes
+    it safe for the daemon to move a job refused this way to another account in its group.
+    Anything that might be this one job's bad luck — no capacity, a rate limit, a bad GPU name —
+    is an ordinary failure instead.
+    """
+
+
 @dataclass
 class CloudStatus:
     phase: Phase
@@ -147,6 +160,9 @@ class CloudStatus:
     gpu_type: str = ""
     console_url: str = ""
     times: dict[str, float] = field(default_factory=dict)  # phase -> unix time
+    # Why the account refused to start this attempt, when it ended that way: see
+    # `AccountUnusable`, whose rules this follows. None for every other ending.
+    unusable: str | None = None
 
 
 @dataclass(frozen=True)
@@ -169,10 +185,22 @@ class Provider(Protocol):
         """Build or reuse an image for this environment; return an image key to pass to launch()."""
 
     def launch(self, req: CloudLaunch) -> str:
-        """Start the attempt and return a handle; raises if the provider refuses to schedule it."""
+        """Start the attempt and return a handle; raises if the provider refuses to schedule it
+        (`AccountUnusable` when the refusal is the account's, not the job's)."""
 
     def status(self, handle: str) -> CloudStatus:
         """Report the attempt's current phase; Phase.GONE once the provider has forgotten it."""
+
+    def health(self) -> str | None:
+        """None when this account can run jobs, or a human-readable reason why it cannot.
+
+        Distinct from the account's credit: an account can report full credit and still refuse
+        every launch (a workspace spend limit at zero does exactly that). Only a real launch
+        attempt reveals it, so this is set from a refusal (see `AccountUnusable`) and cleared by the next
+        success — or once enough time has passed that it is worth letting one launch find out
+        again, since an account out of the rotation is never launched on to clear it. Read from
+        memory on the daemon's tick: it must never make a call of its own.
+        """
 
     def read_output(self, handle: str, cursor: int) -> tuple[bytes, int]:
         """Return the attempt's combined stdout and stderr from byte offset `cursor` onward, and

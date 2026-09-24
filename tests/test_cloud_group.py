@@ -126,3 +126,31 @@ def test_shortfall_reports_every_account_with_its_owner(store, ledger, clock):
     rows = shortfall([a], ledger)
     assert rows[0].name == "a" and rows[0].owner == "First Owner"
     assert rows[0].left == pytest.approx(0.4) and rows[0].budget == 30.0
+
+
+# ---- an account that refuses to launch
+
+
+def test_an_unhealthy_account_has_no_headroom_and_is_never_chosen(ledger):
+    """Whatever its balance says, an account that refuses every launch has no usable money."""
+    a, b = _target("a", 30.0), _target("b", 30.0)
+    health = {"a": "has exceeded its spend limit"}.get
+    assert headroom(ledger, a, health=health("a")) == 0.0
+    assert headroom(ledger, b, health=health("b")) == 30.0
+    # a is first in config order, so only its health can pass it over
+    assert choose([a, b], ledger, need=1.0, running=lambda _: 0, health=health).name == "b"
+
+
+def test_choose_returns_none_when_every_account_is_unhealthy(ledger):
+    a, b = _target("a", 30.0), _target("b", 30.0)
+    assert choose([a, b], ledger, need=0.0, running=lambda _: 0,
+                  health=lambda _: "spend limit") is None
+
+
+def test_shortfall_says_why_an_unhealthy_account_has_nothing(ledger):
+    """"Out of credit" and "refusing every launch" are fixed by different people doing different
+    things, so the refusal a person reads must not lump them together."""
+    a, b = _target("a", 30.0), _target("b", 30.0)
+    rows = shortfall([a, b], ledger, health={"a": "has exceeded its spend limit"}.get)
+    assert rows[0].unusable == "has exceeded its spend limit" and rows[0].left == 0.0
+    assert rows[1].unusable is None and rows[1].left == 30.0

@@ -11,8 +11,18 @@ class NotFoundError(Exception):
     pass
 
 
+class ResourceExhaustedError(Exception):
+    """Modal's RESOURCE_EXHAUSTED: a workspace spend limit, but also a rate limit or a quota."""
+
+
+class AuthError(Exception):
+    """Modal's UNAUTHENTICATED: the account's credentials were refused."""
+
+
 class _Exceptions:
     NotFoundError = NotFoundError
+    ResourceExhaustedError = ResourceExhaustedError
+    AuthError = AuthError
 
 
 class FakeImage:
@@ -283,6 +293,10 @@ class FakeSDK:
                             "cpu_hour_cost_sandbox": 0.1419,
                             "mem_gib_hour_cost_sandbox": 0.024}
         self.create_error = None
+        # The name of the class in `exception` that `create_error` is raised as; a plain
+        # RuntimeError when unset, which is what a refusal the SDK did not classify looks like.
+        self.create_error_type = None
+        self.list_error = None  # a test sets this to make Sandbox.list raise
         self.created = threading.Event()
         # Keyed by token_id, not by profile name: this fake never sees a profile, only the
         # credentials modal_profile.credentials() read out of it. A test that wants
@@ -303,7 +317,9 @@ class FakeSDK:
             @staticmethod
             def create(*args, **kwargs):
                 if sdk.create_error:
-                    raise RuntimeError(sdk.create_error)
+                    kind = (getattr(sdk.exception, sdk.create_error_type)
+                            if sdk.create_error_type else RuntimeError)
+                    raise kind(sdk.create_error)
                 box = FakeSandbox(sdk, args, kwargs)
                 sdk.sandboxes.append(box)
                 sdk.created.set()
@@ -314,6 +330,10 @@ class FakeSDK:
                 # Like the real thing, a listing only sees the account its client belongs to:
                 # a sandbox launched on one account is invisible to a listing on another.
                 sdk.list_clients.append(client)
+                if sdk.list_error:
+                    kind = (getattr(sdk.exception, sdk.create_error_type)
+                            if sdk.create_error_type else RuntimeError)
+                    raise kind(sdk.list_error)
                 for box in sdk.sandboxes:
                     if box.kwargs.get("client") is not client:
                         continue

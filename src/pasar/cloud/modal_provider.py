@@ -46,6 +46,16 @@ JOIN_TIMEOUT = 10       # seconds close() waits for every watcher thread, in tot
 MAX_DEAD_BOXES = 64     # finished attempts kept around before the oldest are dropped
 DEFAULT_PYTHON = "3.12"  # only the interpreter uv runs under; the job's own comes from its lock
 POLL_INTERVAL = 0.05    # seconds a watcher sleeps between checks it cannot block on
+# Seconds an account that refused to launch stays out of the rotation before one launch is let
+# through to find out whether it still does. Nothing else would ever clear it: a refusal is only
+# undone by a success, and nothing is launched on an account out of the rotation. A retry that is
+# refused again costs nothing — no sandbox exists — and moves that job on to a sibling.
+HEALTH_RETRY = 3600
+# How a refusal that is the account's, not the job's, reads in any exception's message. Matched on
+# the message rather than on `ResourceExhaustedError`: Modal raises that same type for a rate limit
+# or a concurrency quota, which pass on their own, and the message survives an SDK that re-wraps
+# the error in a type of its own.
+ACCOUNT_REFUSALS = ("spend limit", "spending limit")
 TERMINAL = (Phase.EXITED, Phase.GONE)
 
 # A rate key's basename -> the name Modal's own `gpu=` accepts, for the GPUs whose rate-key
@@ -82,6 +92,7 @@ class _Snapshot:
     ended_by_provider: bool = False
     console_url: str = ""
     times: dict[str, float] = field(default_factory=dict)
+    unusable: str | None = None  # the account refused to start it; see `AccountUnusable`
 
 
 class _Box:
@@ -154,6 +165,8 @@ class ModalProvider:
         self._rates_at = 0.0
         self._rates_thread: threading.Thread | None = None
         self._closing = False
+        # (why, when) for the last launch this account refused as an account; see `health`.
+        self._refused: tuple[str, float] | None = None
         # Only a test sets this, to hold a launch in the window between handing back a handle and
         # the sandbox existing — the one window where a terminate has nothing to terminate.
         self._pause_before_create = threading.Event()
@@ -238,7 +251,13 @@ class ModalProvider:
                 # the job's own log — and end the attempt.
                 log.exception("could not start %s", box.handle)
                 box.write(f"pasar: modal could not start this attempt: {e}\n".encode())
-                box.phase(Phase.EXITED, self.clock, exit_code=1)
+                # Only a fresh launch can have been refused before any sandbox existed: a box
+                # re-attaching after a restart is following one that may well be running.
+                why = self._classify(e) if box.req is not None else None
+                if why is not None:
+                    with self._lock:
+                        self._refused = (why, self.clock())
+                box.phase(Phase.EXITED, self.clock, exit_code=1, unusable=why)
                 return
             if sb is None:
                 box.phase(Phase.GONE, self.clock)
@@ -299,8 +318,32 @@ class ModalProvider:
         # from waking up during shutdown and creating a sandbox nobody would ever follow.
         while self._pause_before_create.is_set() and not self._closing:
             time.sleep(0.005)
-        return self.sdk.Sandbox.create("bash", "-c", entry_script(req), client=self.client,
-                                       **kwargs)
+        sb = self.sdk.Sandbox.create("bash", "-c", entry_script(req), client=self.client,
+                                     **kwargs)
+        with self._lock:
+            self._refused = None  # it launched, so whatever refused before has been fixed
+        return sb
+
+    def _classify(self, e: Exception) -> str | None:
+        """Why this account cannot run anything, if `e` says so, or None if it could just as
+        well be this one job's bad luck. Wrong one way, a group keeps handing jobs to an account
+        that fails every one of them; wrong the other, a healthy account leaves the group over
+        one transient error — so only a refusal that can only be the account's counts: a spend
+        limit (by message; see `ACCOUNT_REFUSALS`) or credentials Modal no longer accepts."""
+        text = str(e) or type(e).__name__
+        if any(phrase in text.lower() for phrase in ACCOUNT_REFUSALS):
+            return text
+        if isinstance(e, getattr(self.sdk.exception, "AuthError", ())):
+            return f"modal refused this account's credentials: {text}"
+        return None
+
+    def health(self) -> str | None:
+        """See `Provider.health`. Answers from memory: this is read on the daemon's tick."""
+        with self._lock:
+            refused = self._refused
+        if refused is None or self.clock() - refused[1] >= HEALTH_RETRY:
+            return None
+        return refused[0]
 
     def _modal_app(self):
         with self._lock:
@@ -475,7 +518,8 @@ class ModalProvider:
             snap = box.snap
             return CloudStatus(snap.phase, snap.exit_code, snap.ended_by_provider,
                                gpu_type=box.req.gpu if box.req else "",
-                               console_url=snap.console_url, times=dict(snap.times))
+                               console_url=snap.console_url, times=dict(snap.times),
+                               unusable=snap.unusable)
 
     def read_output(self, handle: str, cursor: int) -> tuple[bytes, int]:
         box = self._attach(handle)

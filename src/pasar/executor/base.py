@@ -44,6 +44,9 @@ class UnitState:
     signal: str | None
     control_group: str | None
     console_url: str | None = None  # cloud only: where a person can watch the sandbox
+    # cloud only: why the account refused to start the attempt at all, when `result` is
+    # "account_unusable" (see `pasar.cloud.base.AccountUnusable`)
+    refusal: str | None = None
 
 
 class Executor(Protocol):

@@ -14,6 +14,7 @@ from pathlib import Path
 
 import pytest
 
+from pasar.cloud.base import AccountUnusable
 from pasar.cloud.cost import estimate, hourly_rate
 from pasar.cloud.executor import parse_unit
 from pasar.cloud.modal_provider import ModalProvider
@@ -2931,3 +2932,133 @@ def test_a_group_with_no_reachable_account_says_so_rather_than_blaming_money(mak
     msg = str(e.value)
     assert "modal-a" in msg and "modal-b" in msg
     assert "configured but its provider could not be set up" in msg
+
+
+# ---- an account that refuses to launch
+
+
+SPEND_LIMIT = "Workspace ac-1 has exceeded its spend limit"
+
+
+def provider_of(daemon, name):
+    return daemon.executors[name].provider
+
+
+def refuse_launches_on(daemon, name, why=SPEND_LIMIT):
+    """Every launch on `name` is refused before a sandbox exists, the way Modal refuses a
+    workspace past its spend limit: the attempt starts, then ends without ever having run."""
+    provider_of(daemon, name).refuse = why
+
+
+def approved_group_job(daemon, repo, **kw):
+    job = daemon.submit(cloud_spec(repo, target="modal", est_runtime=600, **kw))
+    daemon.approve(job.id)
+    return job
+
+
+def test_a_job_refused_by_its_account_is_re_resolved_not_failed(grouped, repo):
+    """Nothing was spent and there is no checkpoint, so the group should just use a sibling."""
+    d = grouped
+    job = approved_group_job(d, repo)
+    first = job.spec.target
+    refuse_launches_on(d, first)
+    d.tick()   # launched on `first`, which refuses it
+    d.tick()   # the refusal is read, and the job moves and launches on the other account
+    moved = d.job(job.id)
+    assert moved.spec.target != first and moved.spec.group == "modal"
+    assert moved.state is State.RUNNING
+    refused, running = d.store.attempts(job.id)
+    assert refused.reason == "account_unusable" and "spend limit" in refused.summary
+    assert parse_unit(refused.unit)[0] == first
+    assert parse_unit(running.unit)[0] == moved.spec.target
+    # It never ran, so there is nothing on the new account to resume from.
+    box = provider_of(d, moved.spec.target).boxes[handle_of(d, job.id)]
+    assert box.req.env["PASAR_RESUMING"] == "0"
+    # The approval carries over at the price agreed to, so the price-rise guard still holds.
+    first_ok, second_ok = d.store.approvals(job.id)
+    assert second_ok["attempt"] == 2
+    assert second_ok["hourly_rate"] == first_ok["hourly_rate"]
+
+
+def test_a_job_refused_everywhere_fails_and_says_why(grouped, repo):
+    d = grouped
+    job = approved_group_job(d, repo)
+    for name in ("modal-a", "modal-b"):
+        refuse_launches_on(d, name)
+    for _ in range(4):
+        d.tick()
+    failed = d.job(job.id)
+    assert failed.state is State.FAILED and failed.reason == "account_unusable"
+    assert "spend limit" in failed.summary
+    assert "modal-a" in failed.summary and "modal-b" in failed.summary
+    # One try per account, and no more: an unusable group must not spin.
+    assert len(d.store.attempts(job.id)) == 2
+
+
+def test_a_job_that_has_run_is_never_moved(grouped, repo):
+    """Its checkpoint lives on its own account's volume and nowhere else; a sibling would start
+    it over from scratch on somebody else's credit."""
+    d = grouped
+    job = approved_group_job(d, repo)
+    first = job.spec.target
+    d.tick()
+    provider_of(d, first).reclaim(handle_of(d, job.id))
+    d.tick()
+    assert d.job(job.id).state is State.AWAITING
+    d.approve(job.id)
+    refuse_launches_on(d, first)
+    for _ in range(3):
+        d.tick()
+    after = d.job(job.id)
+    assert after.spec.target == first
+    assert after.state is State.FAILED and "spend limit" in after.summary
+
+
+def test_a_job_named_to_one_account_is_not_moved_when_it_refuses(grouped, repo):
+    """Naming the account is how somebody says it has to be that one."""
+    d = grouped
+    refuse_launches_on(d, "modal-a")
+    job = d.submit(cloud_spec(repo, target="modal-a", est_runtime=600))
+    d.approve(job.id)
+    for _ in range(3):
+        d.tick()
+    after = d.job(job.id)
+    assert after.spec.target == "modal-a"
+    assert after.state is State.FAILED and "spend limit" in after.summary
+
+
+def test_a_refusal_at_the_launch_call_itself_moves_the_job_too(grouped, repo):
+    """A provider that refuses synchronously, before handing back any handle."""
+    d = grouped
+    job = approved_group_job(d, repo)
+    first = job.spec.target
+    provider_of(d, first).fail_launch = AccountUnusable(SPEND_LIMIT)
+    d.tick()
+    moved = d.job(job.id)
+    assert moved.spec.target != first
+    assert moved.state in (State.QUEUED, State.RUNNING)
+    d.tick()
+    assert d.job(job.id).state is State.RUNNING
+
+
+def test_a_group_submit_passes_over_an_account_that_refused_to_launch(grouped, repo):
+    """A refusal is the only way pasar can see this, and once seen, new jobs avoid it."""
+    d = grouped
+    refuse_launches_on(d, "modal-a")
+    named = d.submit(cloud_spec(repo, target="modal-a", est_runtime=600))
+    d.approve(named.id)
+    d.tick()
+    d.tick()
+    assert provider_of(d, "modal-a").health() is not None
+    # modal-a is first in config order and just as full, so only its health passes it over
+    assert d.submit(cloud_spec(repo, target="modal", est_runtime=600)).spec.target == "modal-b"
+
+
+def test_a_group_whose_accounts_all_refuse_says_so_at_submit(grouped, repo):
+    d = grouped
+    for name in ("modal-a", "modal-b"):
+        provider_of(d, name).health_note = SPEND_LIMIT
+    with pytest.raises(Conflict) as e:
+        d.submit(cloud_spec(repo, target="modal", est_runtime=600))
+    msg = str(e.value)
+    assert "spend limit" in msg and "modal-a" in msg and "modal-b" in msg

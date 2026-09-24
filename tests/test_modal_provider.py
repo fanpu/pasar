@@ -168,6 +168,99 @@ def test_a_launch_that_fails_ends_the_attempt_with_the_reason_in_its_log(provide
     assert data.endswith(b"\n")  # the pump only ever consumes whole lines
 
 
+SPEND_LIMIT = "Workspace ac-1 has exceeded its spend limit"
+
+
+def _refused(p, sdk, tmp_path, error=SPEND_LIMIT, kind="ResourceExhaustedError", job_id=1):
+    """Launch one attempt into a `Sandbox.create` that raises `error` as `kind`, and wait for
+    the attempt to end."""
+    sdk.create_error, sdk.create_error_type = error, kind
+    p.prepare_image(EnvSpec({}, "img"))
+    handle = p.launch(launch_request(tmp_path, job_id=job_id))
+    assert _wait(lambda: p.status(handle).phase is Phase.EXITED)
+    return handle
+
+
+def test_a_spend_limit_refusal_marks_the_account_unusable(provider, tmp_path):
+    """Only a real launch can see this: the account's billing reads exactly like a healthy
+    one's."""
+    p, sdk = provider
+    handle = _refused(p, sdk, tmp_path)
+    assert p.health() is not None and "spend limit" in p.health()
+    st = p.status(handle)
+    assert st.unusable is not None and "spend limit" in st.unusable
+    assert sdk.sandboxes == []  # refused before any sandbox existed: nothing was spent
+
+
+def test_a_spend_limit_is_recognised_by_its_message_under_any_type(provider, tmp_path):
+    """A type match alone misses the same refusal re-wrapped on its way out of the SDK."""
+    p, sdk = provider
+    _refused(p, sdk, tmp_path, kind=None)
+    assert "spend limit" in p.health()
+
+
+def test_refused_credentials_mark_the_account_unusable(provider, tmp_path):
+    p, sdk = provider
+    _refused(p, sdk, tmp_path, error="token rejected", kind="AuthError")
+    assert "token rejected" in p.health()
+
+
+@pytest.mark.parametrize("error, kind", [
+    ("no capacity for H100 right now", None),
+    # RESOURCE_EXHAUSTED is also how Modal says "slow down" or "too many at once": both pass on
+    # their own, and taking the account out of the group for one would be taking it out for
+    # nothing.
+    ("rate limit exceeded, retry later", "ResourceExhaustedError"),
+    ("too many concurrent GPUs for this workspace", "ResourceExhaustedError"),
+])
+def test_an_ordinary_launch_failure_does_not_mark_the_account_unusable(provider, tmp_path,
+                                                                       error, kind):
+    """A bad GPU type or a transient error is this job's problem, not the account's; taking an
+    account out of rotation for one is how a whole group goes dark over nothing."""
+    p, sdk = provider
+    handle = _refused(p, sdk, tmp_path, error=error, kind=kind)
+    assert p.health() is None
+    assert p.status(handle).unusable is None
+
+
+def test_a_successful_launch_clears_the_mark(provider, tmp_path):
+    p, sdk = provider
+    _refused(p, sdk, tmp_path)
+    assert p.health() is not None
+    sdk.create_error = None
+    p.launch(launch_request(tmp_path, job_id=2))
+    sdk.wait_for_sandbox()
+    assert _wait(lambda: p.health() is None)
+
+
+def test_an_unusable_account_is_tried_again_after_a_while(tmp_path):
+    """Nothing is ever launched on an account out of the rotation, so without this a spend
+    limit somebody raised would keep it out for good."""
+    sdk = FakeSDK()
+    clock = _FakeClock()
+    p = ModalProvider(_target(), tmp_path / "state", sdk=sdk, clock=clock, sleep=clock.sleep)
+    try:
+        _refused(p, sdk, tmp_path)
+        clock.now += modal_provider.HEALTH_RETRY - 1
+        assert p.health() is not None
+        clock.now += 1
+        assert p.health() is None
+    finally:
+        p.close()
+
+
+def test_a_failure_to_find_a_running_attempt_never_marks_it_refused(provider, tmp_path):
+    """Re-attaching after a restart follows a sandbox that may well exist and be billing; an
+    error there is not a refusal to launch, and must never be reported as one — a refused job
+    is moved to another account."""
+    p, sdk = provider
+    sdk.list_error, sdk.create_error_type = SPEND_LIMIT, "ResourceExhaustedError"
+    handle = "h-1-1-abcd"
+    assert _wait(lambda: p.status(handle).phase in (Phase.EXITED, Phase.GONE))
+    assert p.status(handle).unusable is None
+    assert p.health() is None
+
+
 def test_a_watcher_that_dies_still_ends_the_attempt(provider, tmp_path):
     """A box left in a phase nothing will move again wedges the job for ever: the daemon sees
     `done=False` on every tick while the sandbox goes on billing to its own timeout."""
