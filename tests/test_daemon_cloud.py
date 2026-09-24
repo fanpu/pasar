@@ -2469,6 +2469,28 @@ def test_persist_is_only_on_a_finished_cloud_job(cloud, repo):
     assert persist_of(daemon, job.id) is None  # running
 
 
+def test_persist_says_nothing_is_at_the_provider_for_a_job_that_never_launched(cloud, repo):
+    # Rejected straight from awaiting: no attempt, so no persist dir to pull or sweep.
+    daemon, _ = cloud
+    job = daemon.submit(cloud_spec(repo))
+    daemon.reject(job.id)
+    view = persist_of(daemon, job.id)
+    assert view["remote_bytes"] == 0 and view["sweeps_at"] is None and view["files"] is None
+
+
+def test_persist_still_waits_on_a_paused_job_rejected_at_its_reapproval(cloud, repo):
+    # A paused job's checkpoint is still at the provider: rejected, it is results to pull.
+    daemon, provider = cloud
+    job_id = start(daemon, repo)
+    provider.persist(job_id, "checkpoint.pt", b"weights")
+    provider.reclaim(handle_of(daemon, job_id))
+    daemon.tick()
+    assert daemon.job(job_id).state == State.AWAITING
+    daemon.pull_settle = 3600  # its pull not due yet: the checkpoint is still at the provider
+    daemon.reject(job_id)
+    assert persist_of(daemon, job_id)["sweeps_at"] is not None
+
+
 def test_persist_says_where_a_pulled_job_landed_and_that_nothing_is_left(cloud, repo, clock):
     daemon, provider = cloud
     roomy(daemon)
