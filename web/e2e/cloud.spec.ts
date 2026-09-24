@@ -46,6 +46,8 @@ test("approving a cloud job goes through the dialog and its worst case", async (
   await expect(dialog).toBeHidden();
   await expect(row).toHaveCount(0);
   expect(["queued", "running"]).toContain(await stateOf(request, id));
+  // It never vanishes from the card: approved, it waits to launch (or runs) in the next section.
+  await expect(page.getByRole("region", { name: "Cloud" }).locator(`[data-section="running"] [data-job="${id}"]`)).toBeVisible();
 });
 
 test("reject asks first, and Keep it keeps the job waiting", async ({ page, request }) => {

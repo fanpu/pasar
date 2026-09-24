@@ -25,14 +25,28 @@
     return cloud.targets.find((t) => t.name === job.cloud?.target) ?? null;
   }
 
-  // Jobs flagged as needing more time first (they want a person), then the rest, newest first.
+  // Jobs flagged as needing more time first (they want a person), then the rest, newest first,
+  // then approved jobs still waiting to launch — so a job a person just approved never vanishes
+  // from the card between leaving "Awaiting your OK" and starting.
   const running = $derived.by(() => {
     const flagged = new Set(cloud.needs_time.map((j) => j.id));
+    const newest = (a: JobView, b: JobView) => b.id - a.id;
     const rest = jobs
       .filter((j) => j.cloud !== null && (j.state === "running" || j.state === "stopping") && !flagged.has(j.id))
-      .sort((a, b) => b.id - a.id);
-    return [...cloud.needs_time, ...rest];
+      .sort(newest);
+    const launching = jobs.filter((j) => j.cloud !== null && j.state === "queued").sort(newest);
+    return [...cloud.needs_time, ...rest, ...launching];
   });
+
+  const WAITING_LOOK = { cls: "s-queued", icon: "◷", text: "waiting to launch" };
+
+  /** Why an approved job hasn't launched yet, as the last scheduling pass said. */
+  function heldBy(job: JobView): string {
+    const c = job.cloud!;
+    if (c.blocked === "concurrency") return `${c.target} is running all it may`;
+    if (c.blocked === "budget") return `${c.target}'s budget is spent`;
+    return "launches on the next pass";
+  }
 
   function pct(part: number, whole: number): number {
     return whole > 0 ? Math.max(0, Math.min(100, (part / whole) * 100)) : 0;
@@ -186,7 +200,7 @@
         <div class="stitle">Running in the cloud <span class="count">{running.length}</span></div>
         {#each running as job (job.id)}
           {@const c = job.cloud!}
-          {@const look = phaseLook(c.phase)}
+          {@const look = job.state === "queued" ? WAITING_LOOK : phaseLook(c.phase)}
           {@const flag = flaggedToExtend(job)}
           <div class="crow" class:flag data-job={job.id}>
             <JobChip id={job.id} tags={job.tags} />
@@ -203,7 +217,10 @@
               {/if}
             </div>
             <div class="timebar">
-              {#if c.approved_seconds !== null}
+              {#if job.state === "queued"}
+                <div class="t">{c.approved_seconds === null ? "approved" : `${dur(c.approved_seconds)} approved`}</div>
+                <div class="t held">{heldBy(job)}</div>
+              {:else if c.approved_seconds !== null}
                 <div class="t">{dur(elapsed(job))} / {dur(c.approved_seconds)} approved</div>
                 <div class="bar"><i class:over={flag} style="width: {pct(elapsed(job), c.approved_seconds)}%"></i></div>
               {:else}
@@ -301,6 +318,7 @@
   .phase-wrap { min-width: 150px; flex: none; }
   .timebar { width: 160px; flex: none; }
   .timebar .t { font-size: 11.5px; font-weight: 700; color: var(--ink-2); margin-bottom: 3px; }
+  .timebar .held { color: var(--ink-3); margin: 0; }
   .timebar .bar { height: 7px; border-radius: 99px; background: #f4ecf0; overflow: hidden; }
   .timebar .bar i { display: block; height: 100%; border-radius: 99px; background: linear-gradient(90deg, #a9d8f5, #cdbcf5); }
   .timebar .bar i.over { background: var(--stop); }

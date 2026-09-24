@@ -69,6 +69,7 @@ export function cloudJob(overrides: Partial<CloudJob> = {}): CloudJob {
     job_spent: 0,
     console_url: null,
     needs_more_time: null,
+    blocked: null,
     persist: null,
     ...overrides,
   };
@@ -189,6 +190,20 @@ const runningNeedsMoreTime = cloudJobView(
   },
 );
 
+/** Approved, but not launched yet: the target is already running as many jobs as it may. */
+export const queuedApproved = cloudJobView(
+  {
+    id: 213,
+    name: "sweep-wd-4",
+    state: "queued",
+    submitter: "agent-3",
+    submit_time: NOW - 300,
+    queue_time: NOW - 120,
+    est_runtime: 2 * 3600,
+  },
+  { estimated_cost: 3.1, max_cost: 6.5, approved_seconds: 2 * 3600, full_seconds: 2 * 3600, blocked: "concurrency" },
+);
+
 export const needsTime: JobView[] = [runningNeedsMoreTime];
 export const running: JobView[] = [runningStarting, runningWithConsole, runningNeedsMoreTime];
 
@@ -277,7 +292,27 @@ const recentCancelled = cloudJobView(
   { phase: null, job_spent: 0.1, persist: cloudPersist() },
 );
 
-export const recent: JobView[] = [recentCompleted, recentFailed, recentCancelled];
+/** Completed a moment ago; its results are still at the target, waiting for their pull. */
+const recentAtTarget = cloudJobView(
+  {
+    id: 223,
+    name: "eval-batch-2",
+    state: "completed",
+    reason: "exit",
+    summary: "",
+    submitter: "agent-2",
+    submit_time: NOW - 5000,
+    queue_time: NOW - 5000,
+    start_time: NOW - 4000,
+    end_time: NOW - 30,
+    run_time: 3970,
+    est_runtime: 3600,
+    attempts: 1,
+  },
+  { phase: null, job_spent: 1.9, persist: cloudPersist({ sweeps_at: NOW + 3 * 86400 }) },
+);
+
+export const recent: JobView[] = [recentAtTarget, recentCompleted, recentFailed, recentCancelled];
 
 export function cloudBlock(overrides: Partial<CloudBlock> = {}): CloudBlock {
   return {

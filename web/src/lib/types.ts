@@ -26,6 +26,8 @@ export interface CloudJob {
   approved_seconds: number | null; full_seconds: number | null;
   job_cap: number | null; job_spent: number; console_url: string | null;
   needs_more_time: number | null;
+  // Why an approved, queued job hasn't launched yet, if the last scheduling pass said.
+  blocked: "budget" | "concurrency" | null;
   persist: CloudPersist | null;
 }
 

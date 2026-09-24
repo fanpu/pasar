@@ -5,7 +5,7 @@ import CloudCard from "../components/CloudCard.svelte";
 import * as api from "../lib/api";
 import { ApiError } from "../lib/api";
 import { NOW } from "./fixtures";
-import { awaitingFresh, awaitingReapproval, cloudBlock, cloudTarget, needsTime, recent, running } from "./fixtures/cloud";
+import { awaitingFresh, awaitingReapproval, cloudBlock, cloudTarget, needsTime, queuedApproved, recent, running } from "./fixtures/cloud";
 
 vi.mock("../lib/api", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../lib/api")>();
@@ -68,7 +68,25 @@ describe("CloudCard", () => {
     expect(row(res, 220).textContent).toContain("pulled 0.5 GiB → /home/agent-3/pasar-pulled/220");
     expect(row(res, 221).textContent).toContain("copy at modal-a until Sep 27");
     expect(row(res, 222).textContent).toContain("nothing saved");
+    expect(row(res, 223).textContent).toContain("at modal-a until Sep 24 · pulling…");
     expect(within(row(res, 220)).getByText("completed")).toBeInTheDocument();
+  });
+
+  it("keeps an approved job that hasn't launched yet in view, saying it waits to launch and why", () => {
+    const { container } = render(CloudCard, { cloud: cloudBlock(), jobs: [...running, queuedApproved], now: NOW });
+    const run = section(container, "running");
+    expect(run.querySelectorAll(".crow").length).toBe(4);
+    const waiting = row(run, 213);
+    expect(within(waiting).getByText("waiting to launch")).toBeInTheDocument();
+    expect(waiting.textContent).toContain("modal-a is running all it may");
+    expect(waiting.textContent).toContain("2h00 approved");
+    expect(within(waiting).queryByRole("button", { name: /more time/i })).toBeNull();
+  });
+
+  it("says a queued job waits on the budget when that's what holds it", () => {
+    const onBudget = { ...queuedApproved, cloud: { ...queuedApproved.cloud!, blocked: "budget" as const } };
+    const { container } = render(CloudCard, { cloud: cloudBlock(), jobs: [onBudget], now: NOW });
+    expect(row(section(container, "running"), 213).textContent).toContain("modal-a's budget is spent");
   });
 
   it("links the provider's console only when the job has one", () => {
@@ -248,7 +266,7 @@ describe("CloudCard", () => {
     const onopen = vi.fn();
     render(CloudCard, { cloud: cloudBlock(), jobs: running, now: NOW, onopen });
     await fireEvent.click(screen.getByRole("button", { name: recent[0].name }));
-    expect(onopen).toHaveBeenCalledWith(220);
+    expect(onopen).toHaveBeenCalledWith(recent[0].id);
   });
 });
 
