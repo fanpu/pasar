@@ -315,6 +315,12 @@ class Daemon:
             log.exception("%s could not say whether its rates have loaded", name)
             return False
 
+    @staticmethod
+    def _still_loading(names: list[str]) -> str:
+        """Why a submit that needs prices `names` have not loaded yet is refused."""
+        return (f"prices for {', '.join(names)} are still loading on this pasard (it fetches them "
+                "when it starts); try again in a few seconds")
+
     def cloud_credit(self, target: CloudTarget) -> Credit | None:
         """What `target`'s provider says the account has used this billing cycle, or None when
         it cannot say — a provider without `caps.credit`, a read not made yet or that failed, or
@@ -862,6 +868,8 @@ class Daemon:
         try:
             rate = self._hourly(target, spec.gpu)
         except KeyError as e:
+            if self._rates_loading(target.name):
+                raise Conflict(self._still_loading([target.name])) from None
             raise ValueError(f"{spec.target} has no price for --gpu {spec.gpu}: {e}") from None
         est = estimate(rate, spec.est_runtime)
         # The estimate, not the padded ceiling: a job expected to fit under the lifetime cap is
@@ -913,7 +921,12 @@ class Daemon:
         it, so the refusal is the one that account gives (a missing or unpriced GPU, or the job
         cap with the GPUs that would fit). Only a candidate short of monthly headroom is refused
         here, because queueing for credit that resets in three weeks is a job nobody remembers
-        submitting; naming an account instead of the group still queues for it."""
+        submitting; naming an account instead of the group still queues for it.
+
+        A member whose prices have not loaded yet (`_rates_loading`) cannot be judged, so when
+        no other member takes the job it is refused as "still loading, try again" rather than
+        with a price or budget reason that only the missing table made true. When another member
+        does take it, it goes there; `_rebalance` moves it later if that one cannot pay."""
         group = spec.target
         reachable = [t for t in members if t.name in self.executors]
         if not reachable:
@@ -923,9 +936,12 @@ class Daemon:
                              "its accounts, so nothing can be submitted to it:\n"
                              + "\n".join(lines))
         priced = self._estimates(spec, reachable)
+        loading = [t.name for t in reachable if self._rates_loading(t.name)]
         fits = [t for t in reachable
                 if t.name in priced and priced[t.name] <= t.max_job_cost + PRICE_TOLERANCE]
         if not fits:
+            if loading:
+                raise Conflict(self._still_loading(loading))
             stand_in = next((t for t in reachable if t.name in priced), reachable[0])
             return replace(spec, target=stand_in.name, group=group)
         # The largest ceiling of any candidate, so the one chosen can afford the run at whichever
@@ -934,6 +950,8 @@ class Daemon:
         chosen = choose(fits, self.ledger, need, self._running_on, credit=self._credit_named,
                         health=self._health)
         if chosen is None:
+            if loading:
+                raise Conflict(self._still_loading(loading))
             raise Conflict(self._no_account(group, members, fits, need))
         return replace(spec, target=chosen.name, group=group)
 

@@ -2975,6 +2975,49 @@ def spent(daemon, target, dollars):
     daemon.ledger.record(target, job_id, 1, estimated=dollars, billed=dollars)
 
 
+def test_a_submit_before_any_prices_have_loaded_says_to_try_again(grouped, repo):
+    """Right after pasard starts, not "has no price for H100": nothing is known yet either way."""
+    d = grouped
+    for name in ("modal-a", "modal-b"):
+        provider_of(d, name).ready = False
+    with pytest.raises(Conflict) as e:
+        d.submit(cloud_spec(repo, target="modal"))
+    msg = str(e.value)
+    assert "prices for modal-a, modal-b are still loading" in msg
+    assert "try again in a few seconds" in msg and "no price" not in msg
+    assert d.store.list_jobs() == []
+    for name in ("modal-a", "modal-b"):
+        provider_of(d, name).ready = True
+    assert d.submit(cloud_spec(repo, target="modal")).spec.target == "modal-a"
+
+
+def test_a_group_submit_is_not_refused_for_money_while_a_member_is_still_loading(grouped, repo):
+    """modal-a cannot pay for it; modal-b might, and nobody can say until its prices land."""
+    d = grouped
+    spent(d, "modal-a", 29.9)
+    provider_of(d, "modal-b").ready = False
+    with pytest.raises(Conflict) as e:
+        d.submit(cloud_spec(repo, target="modal", est_runtime=3600))
+    assert "prices for modal-b are still loading" in str(e.value)
+    assert "left" not in str(e.value)
+
+
+def test_a_group_submit_goes_to_a_member_that_can_take_it_while_another_loads(grouped, repo):
+    d = grouped
+    provider_of(d, "modal-a").ready = False
+    job = d.submit(cloud_spec(repo, target="modal"))
+    assert job.spec.target == "modal-b" and job.spec.group == "modal"
+
+
+def test_a_submit_to_an_account_still_loading_says_to_try_again(cloud, repo):
+    daemon, provider = cloud
+    provider.ready = False
+    with pytest.raises(Conflict, match="prices for fake are still loading.*try again"):
+        daemon.submit(cloud_spec(repo))
+    provider.ready = True
+    assert daemon.submit(cloud_spec(repo)).state is State.AWAITING
+
+
 def test_submitting_to_a_group_picks_a_member_and_records_both(grouped, repo):
     job = grouped.submit(cloud_spec(repo, target="modal", est_runtime=600))
     assert job.spec.target in ("modal-a", "modal-b")
