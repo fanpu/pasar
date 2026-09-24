@@ -115,9 +115,11 @@ def persist_view(daemon, job: Job) -> dict | None:
     # A job with no attempt at all (rejected or cancelled straight from awaiting) never had a
     # persist dir. Neither did one whose every attempt failed before it ever started a sandbox
     # (`launch_error`: a bad --cwd, a systemd error) — such an attempt is recorded (it counts
-    # against retries) but never actually ran, so it never had anything at the provider either.
+    # against retries) but never actually ran, so it never had anything at the provider either;
+    # nor did one its account refused (`account_unusable`), which never had a sandbox at all.
     attempts = daemon.store.attempts(job.id)
-    never_ran = not attempts or all(a.reason == "launch_error" for a in attempts)
+    never_ran = not attempts or all(a.reason in ("launch_error", "account_unusable")
+                                    for a in attempts)
     gone = remote_deleted or swept is not None or never_ran
     remote_bytes = 0 if gone else measured and measured["remote_bytes"]
     return {

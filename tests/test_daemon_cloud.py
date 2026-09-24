@@ -2511,6 +2511,17 @@ def test_persist_says_nothing_is_at_the_provider_for_a_job_that_failed_before_la
     assert view["remote_bytes"] == 0 and view["sweeps_at"] is None and view["files"] is None
 
 
+def test_persist_says_nothing_is_at_the_provider_for_a_job_its_account_refused(cloud, repo):
+    # Refused before any sandbox existed: nothing saved, same as a launch_error.
+    daemon, provider = cloud
+    provider.refuse = "Workspace ac-1 has exceeded its spend limit"
+    job_id = start(daemon, repo)
+    daemon.tick()
+    assert daemon.job(job_id).reason == "account_unusable"
+    view = persist_of(daemon, job_id)
+    assert view["remote_bytes"] == 0 and view["sweeps_at"] is None and view["files"] is None
+
+
 def test_persist_still_waits_on_a_paused_job_rejected_at_its_reapproval(cloud, repo):
     # A paused job's checkpoint is still at the provider: rejected, it is results to pull.
     daemon, provider = cloud
