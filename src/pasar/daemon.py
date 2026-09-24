@@ -1663,6 +1663,7 @@ class Daemon:
         # Before the unreachable are settled: a group job that never ran, on an account whose
         # provider failed, is moved to one that works rather than left stranded.
         self._rebalance(now)
+        self._reconsider_refused(now)
         self._drop_unreachable(now)
         self._release_settled(now)
         for _, ex in self._cloud_executors():
@@ -2335,7 +2336,12 @@ class Daemon:
         A move always sends it back to a person (`awaiting`, still `account_unusable`), with no
         approval carried over: the one it had was a yes to spending the refusing account's
         owner's credit, and the approve dialog names whose credit pays, so it must not spend
-        somebody else's. The move is written to the machine events like any other (`_move`)."""
+        somebody else's. The move is written to the machine events like any other (`_move`).
+
+        A sibling whose prices have not loaded yet (`_rates_loading`) cannot be judged either
+        way, so when no other sibling takes the job and one is still loading, it is neither
+        moved nor failed: it stays `awaiting` on the account that refused it, saying so, and
+        `_reconsider_refused` asks again on every tick until that sibling's table lands."""
         attempts = self.store.attempts(job.id)
         earlier = [a for a in attempts if a.reason != ACCOUNT_UNUSABLE]
         if earlier:
@@ -2344,7 +2350,12 @@ class Daemon:
             return State.FAILED, summary, None
         tried = {unit[0] for unit in map(parse_unit, (a.unit for a in attempts)) if unit}
         left = [t for t in self.cfg.groups().get(job.spec.group, []) if t.name not in tried]
-        chosen, skipped = self._sibling(job, left)
+        chosen, skipped, loading = self._sibling(job, left)
+        if chosen is None and loading:
+            which = ", ".join(loading)
+            return State.AWAITING, (
+                f"{summary}; prices for {which} are still loading, so it waits here to be "
+                f"moved to another {job.spec.group} account once they have, not failed"), None
         if chosen is None:
             everywhere = "; ".join(a.summary for a in attempts)
             if skipped:
@@ -2378,15 +2389,17 @@ class Daemon:
         return (f"An earlier attempt of it failed for another reason ({reasons}), and a job is "
                 "only moved to another account when its account refused every attempt it had")
 
-    def _sibling(self, job: Job,
-                 members: list[CloudTarget]) -> tuple[CloudTarget | None, list[str]]:
-        """The account `_resolve_group` would pick for `job` among `members`, and why each of
-        the others could not take it (`"name: why"`), which is what a job that ends up with none
-        tells whoever reads its summary. Held to the same rules as a submit, except that the job
-        exists by now, so each account is asked for its real ceiling for it (`_ceiling`), and
-        the money jobs already waiting on each account will need is counted, as `_rebalance`
-        counts it (`_waiting_claims`)."""
+    def _sibling(self, job: Job, members: list[CloudTarget]
+                 ) -> tuple[CloudTarget | None, list[str], list[str]]:
+        """The account `_resolve_group` would pick for `job` among `members`, why each of the
+        others could not take it (`"name: why"`), which is what a job that ends up with none
+        tells whoever reads its summary, and the names of those skipped only for now, because
+        their prices have not loaded yet (`_rates_loading`). Held to the same rules as a submit,
+        except that the job exists by now, so each account is asked for its real ceiling for it
+        (`_ceiling`), and the money jobs already waiting on each account will need is counted,
+        as `_rebalance` counts it (`_waiting_claims`)."""
         skipped: dict[str, str] = {}
+        loading: list[str] = []
         claimed = self._waiting_claims(exclude=job.id)
         priced = self._estimates(job.spec, members)
         fits = []
@@ -2396,6 +2409,9 @@ class Daemon:
                 skipped[t.name] = "no provider on this pasard"
             elif why is not None:
                 skipped[t.name] = f"refusing to launch anything: {why}"
+            elif self._rates_loading(t.name):
+                skipped[t.name] = "its prices are still loading"
+                loading.append(t.name)
             elif t.name not in priced:
                 skipped[t.name] = f"has no price for {job.spec.gpu}"
             elif priced[t.name] > t.max_job_cost + PRICE_TOLERANCE:
@@ -2420,7 +2436,34 @@ class Daemon:
                 left = headroom(self.ledger, t, credit, waiting)
                 skipped[t.name] = (f"only ${left:.2f} left of ${t.monthly_budget:.2f} this month"
                                    + (" after the jobs waiting on it" if waiting else ""))
-        return chosen, [f"{t.name}: {skipped[t.name]}" for t in members if t.name in skipped]
+        return (chosen, [f"{t.name}: {skipped[t.name]}" for t in members if t.name in skipped],
+                loading)
+
+    def _reconsider_refused(self, now: float) -> None:
+        """Settle each refused group job `_after_refusal` left waiting for a sibling's prices to
+        load: once they have, it is moved or failed exactly as it would have been at the
+        refusal. Such a job is known from its records alone — awaiting, `account_unusable`,
+        and still on the account its last attempt was refused by (one already moved is on
+        another, waiting for its approval there) — so a restart loses nothing. Runs every
+        tick, from memory and cached rates only."""
+        for job in self.store.list_jobs([State.AWAITING]):
+            if job.reason != ACCOUNT_UNUSABLE or not job.spec.group or not self._is_cloud(job):
+                continue
+            attempts = self.store.attempts(job.id)
+            if not attempts or attempts[-1].reason != ACCOUNT_UNUSABLE:
+                continue
+            refused_by = parse_unit(attempts[-1].unit)
+            if refused_by is None or refused_by[0] != job.spec.target:
+                continue
+            state, summary, moved = self._after_refusal(job, attempts[-1].summary, now)
+            if state == State.AWAITING and moved is None:
+                continue  # still loading
+            extra: dict = {"spec": moved} if moved is not None else {}
+            if state == State.AWAITING:
+                extra["queue_time"] = now
+            self.store.update_job(job.id, state=state, summary=summary, **extra)
+            self._cloud_ended(job, state)
+            self.changed()
 
     def _waiting_claims(self, exclude: int) -> dict[str, float]:
         """Dollars the cloud jobs waiting on each account (queued or awaiting, other than job

@@ -3736,6 +3736,57 @@ def test_a_refused_job_whose_sibling_is_refusing_too_says_so(grouped, repo):
     assert len(d.store.attempts(job.id)) == 1  # the sibling was never tried: it would refuse
 
 
+def test_a_refused_job_waits_for_a_sibling_whose_prices_are_still_loading(grouped, repo):
+    """Not "modal-b: has no price for H100": modal-b has not loaded its prices yet, which says
+    nothing about whether it can take the job. It waits, and moves once they have."""
+    d = grouped
+    job = approved_group_job(d, repo)
+    assert job.spec.target == "modal-a"
+    refuse_launches_on(d, "modal-a")
+    provider_of(d, "modal-b").ready = False
+    d._rates.clear()
+    for _ in range(3):
+        d.tick()
+    waiting = d.job(job.id)
+    assert waiting.state is State.AWAITING and waiting.reason == "account_unusable"
+    assert waiting.spec.target == "modal-a"
+    assert "modal-a refused to start it" in waiting.summary
+    assert "prices for modal-b are still loading" in waiting.summary
+    assert "has no price" not in waiting.summary
+    assert moves(d) == [] and len(d.store.attempts(job.id)) == 1
+    provider_of(d, "modal-b").ready = True  # its table lands
+    d.tick()
+    moved = d.job(job.id)
+    assert moved.spec.target == "modal-b" and moved.state is State.AWAITING
+    assert "moved to modal-b (bob)" in moved.summary and "still loading" not in moved.summary
+    [event] = moves(d)
+    assert "modal-a (alice)" in event["text"] and "modal-b (bob)" in event["text"]
+    d.approve(job.id)
+    d.tick()
+    assert d.job(job.id).state is State.RUNNING
+    assert parse_unit(d.store.current_attempt(job.id).unit)[0] == "modal-b"
+
+
+def test_a_refused_job_waiting_on_a_sibling_fails_once_its_prices_say_it_cannot(grouped,
+                                                                                repo):
+    d = grouped
+    job = approved_group_job(d, repo)
+    refuse_launches_on(d, "modal-a")
+    provider_of(d, "modal-b").ready = False
+    d._rates.clear()
+    d.tick()
+    d.tick()
+    assert d.job(job.id).state is State.AWAITING
+    spent(d, "modal-b", 29.9)
+    provider_of(d, "modal-b").ready = True
+    d.tick()
+    failed = d.job(job.id)
+    assert failed.state is State.FAILED and failed.spec.target == "modal-a"
+    assert "spend limit" in failed.summary
+    assert "modal-b: only $0.10 left of $30.00 this month" in failed.summary
+    assert moves(d) == []
+
+
 def test_a_job_moved_to_a_pricier_sibling_waits_for_approval_there(make_group, repo):
     """Asked again like any refused job, and approved at the sibling's own price."""
     d = make_group(b={"rates": {"gpu_hour_cost_h100": 9.0}})
