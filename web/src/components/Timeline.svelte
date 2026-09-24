@@ -97,10 +97,12 @@
     }, 200);
     return () => clearTimeout(timer);
   });
+  // The chart is this machine's memory over time: cloud jobs hold none of it, so they aren't drawn.
   const shown = $derived.by(() => {
-    if (history.length === 0) return jobs;
+    const local = jobs.filter((j) => !j.cloud);
+    if (history.length === 0) return local;
     const live = new Set(jobs.map((j) => j.id));
-    return [...jobs, ...history.filter((j) => !live.has(j.id))];
+    return [...local, ...history.filter((j) => !j.cloud && !live.has(j.id))];
   });
 
   // Drag to pan; ctrl/⌘ + wheel (or a trackpad pinch) to zoom; horizontal wheel to pan.

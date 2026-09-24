@@ -8,6 +8,7 @@ import Toast from "../components/Toast.svelte";
 import JobChip from "../components/JobChip.svelte";
 import StatePill from "../components/StatePill.svelte";
 import { GIB, job, status } from "./fixtures";
+import { cloudJob } from "./fixtures/cloud";
 
 describe("dashboard pieces", () => {
   it("header shows the mood", () => {
@@ -50,6 +51,17 @@ describe("dashboard pieces", () => {
     });
     expect(container.querySelectorAll(".pool i").length).toBe(1);
     expect(screen.getByText(/#42 37\.4 GiB/)).toBeInTheDocument();
+  });
+
+  it("leaves cloud jobs out of the pool bar: they run elsewhere", () => {
+    const s = status({ pool: 105 * GIB, reserved: 20 * GIB, free: 85 * GIB });
+    const { container } = render(Tiles, {
+      status: s,
+      jobs: [job({ id: 42, state: "running", limit: 20 * GIB }), job({ id: 43, state: "running", limit: 105 * GIB, cloud: cloudJob() })],
+      gpu: null,
+    });
+    expect(container.querySelectorAll(".pool i").length).toBe(1);
+    expect(screen.queryByText(/#43/)).toBeNull();
   });
 
   it("doesn't compute NaN/Infinity bar widths when the pool is 0", () => {

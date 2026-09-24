@@ -4,6 +4,7 @@ import Timeline from "../components/Timeline.svelte";
 import * as api from "../lib/api";
 import { jobColor } from "../lib/colors";
 import { GIB, job, NOW } from "./fixtures";
+import { cloudJob } from "./fixtures/cloud";
 
 vi.mock("../lib/api", async (importOriginal) => ({
   ...(await importOriginal<typeof import("../lib/api")>()),
@@ -37,6 +38,14 @@ describe("Timeline", () => {
     await fireEvent.keyDown(b, { key: "Enter" });
     expect(onopen).toHaveBeenCalledTimes(2);
     expect(onopen).toHaveBeenCalledWith(42);
+  });
+  it("leaves cloud jobs off the chart: they hold none of this machine's memory", () => {
+    const spans: [number, number | null, null][] = [[NOW - 600, null, null]];
+    const local = job({ id: 42, name: "llama", state: "running", limit: 30 * GIB, spans, projected: [[NOW - 600, NOW + 600]] });
+    const cloud = job({ id: 43, name: "far-away", state: "running", limit: 105 * GIB, spans, projected: [[NOW - 600, NOW + 600]], cloud: cloudJob() });
+    render(Timeline, { jobs: [local, cloud], pool: 105 * GIB, now: NOW, onopen: () => {} });
+    expect(screen.getByRole("button", { name: /#42 llama/ })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /#43 far-away/ })).toBeNull();
   });
   it("shows an empty state", () => {
     render(Timeline, { jobs: [], pool: 105 * GIB, now: NOW, onopen: () => {} });

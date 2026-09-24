@@ -13,7 +13,8 @@
 
   // Stopping jobs are still holding their memory until they actually exit, so they belong in the
   // pool bar too — otherwise it under-counts what's reserved right as a preemption is in flight.
-  const activeJobs = $derived(jobs.filter((j) => j.state === "running" || j.state === "stopping"));
+  // Cloud jobs run elsewhere and hold none of this machine's pool.
+  const activeJobs = $derived(jobs.filter((j) => !j.cloud && (j.state === "running" || j.state === "stopping")));
 
   function reserved(j: JobView): number {
     return Math.max(j.limit, j.usage ?? 0);
