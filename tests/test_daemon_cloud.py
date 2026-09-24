@@ -3521,6 +3521,19 @@ def test_a_refusal_move_is_recorded_where_a_person_can_see_it(grouped, repo):
     assert "modal-a refused to start it" in text and "spend limit" in text
 
 
+def test_a_refused_attempt_is_settled_at_nothing(grouped, repo, clock):
+    """It never ran, so however long the refusal took to read, it cost nothing."""
+    d = grouped
+    job = approved_group_job(d, repo)
+    refuse_launches_on(d, "modal-a")
+    d.tick()
+    clock.advance(120)
+    d.tick()
+    [row] = d.store.cloud_spend_of_job(job.id)
+    assert row["target"] == "modal-a" and row["billed"] == 0.0
+    assert d.ledger.job_spent(job.id) == 0.0
+
+
 def test_a_job_refused_everywhere_fails_and_says_why(grouped, repo):
     d = grouped
     job = approved_group_job(d, repo)

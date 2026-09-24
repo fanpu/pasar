@@ -2045,7 +2045,7 @@ class Daemon:
             reason=reason, summary=summary, log_tail=tail, wasted_work=wasted,
         )
         if self._is_cloud(job):
-            self._settle_spend(job, att, now)
+            self._settle_spend(job, att, now, refused=reason == ACCOUNT_UNUSABLE)
         if st is not None:
             # Never after a status() of None: for a cloud attempt that is already terminal, and
             # the executor has ended and forgotten the sandbox itself.
@@ -2117,7 +2117,7 @@ class Daemon:
                 "UTC. A new job starts over from scratch; this one's checkpoint is pulled home "
                 f"now it has ended (automatically, or `pasar pull {job.id}`)")
 
-    def _settle_spend(self, job: Job, att, now: float) -> None:
+    def _settle_spend(self, job: Job, att, now: float, refused: bool = False) -> None:
         """Write what a cloud attempt really cost, now that its run time is known.
 
         Until here the ledger holds the ceiling from launch — the most the attempt could bill —
@@ -2127,7 +2127,13 @@ class Daemon:
         times the seconds actually run, is not the provider's invoice, but it is within rounding
         of it and it exists now, which the invoice does not — Modal's own figures arrive hours
         later. A provider that can report real billing later writes over this same column.
+
+        An attempt its account `refused` never had a sandbox, so it cost nothing, however long
+        the refusal took to be read: it settles at $0.
         """
+        if refused:
+            self.ledger.settle(job.spec.target, job.id, att.n, 0.0)
+            return
         rate = next((a["hourly_rate"] for a in self.store.approvals(job.id)
                      if a["attempt"] == att.n), None)
         if not rate or att.start_time is None:
