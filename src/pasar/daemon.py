@@ -1843,6 +1843,17 @@ class Daemon:
                 out.append(t)
         return out
 
+    def _prices(self, name: str, job: Job) -> bool:
+        """Whether account `name` can price `job`'s GPU right now, from cached rates."""
+        target = self.cfg.clouds.get(name)
+        if target is None:
+            return False
+        try:
+            self._hourly(target, job.spec.gpu)
+        except (KeyError, ValueError):
+            return False
+        return True
+
     def _move(self, job: Job, chosen: CloudTarget, need: float, here: CloudTarget | None,
               claimed_here: float, now: float) -> None:
         """Point `job` at `chosen`, and say so where a person can see it: in the machine events,
@@ -1854,6 +1865,7 @@ class Daemon:
         who = f" ({chosen.owner})" if chosen.owner else ""
         if here is None:
             why = (self._unreachable(was)[0] if was not in self.executors
+                   else f"{was} can't price {job.spec.gpu} right now" if not self._prices(was, job)
                    else f"this run is over {was}'s max_job_cost")
         elif (bad := self._health(was)) is not None:
             why = f"{was} is refusing to launch anything: {bad}"

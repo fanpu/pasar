@@ -3263,6 +3263,29 @@ def test_a_job_does_not_move_to_an_account_without_a_provider(make_group, repo):
     assert daemon.job(job.id).spec.target == "modal-a"
 
 
+def test_a_job_moved_off_an_account_that_cannot_price_it_says_so(grouped, repo, monkeypatch):
+    """Not "over its max_job_cost": nothing priced it there at all."""
+    job = grouped.submit(cloud_spec(repo, target="modal", est_runtime=3600))
+    assert job.spec.target == "modal-a"
+    monkeypatch.setattr(provider_of(grouped, "modal-a"), "rates", dict)
+    grouped._rates.clear()
+    grouped.tick()
+    moved = grouped.job(job.id)
+    assert moved.spec.target == "modal-b"
+    assert "modal-a can't price H100 right now" in moved.summary
+    assert "max_job_cost" not in moved.summary
+
+
+def test_a_job_moved_off_an_account_whose_job_cap_it_is_over_says_so(grouped, repo):
+    job = grouped.submit(cloud_spec(repo, target="modal", est_runtime=3600))
+    assert job.spec.target == "modal-a"
+    grouped.cfg.clouds["modal-a"] = replace(grouped.cfg.clouds["modal-a"], max_job_cost=1.0)
+    grouped.tick()
+    moved = grouped.job(job.id)
+    assert moved.spec.target == "modal-b"
+    assert "this run is over modal-a's max_job_cost" in moved.summary
+
+
 def test_jobs_submitted_together_are_spread_once_one_account_is_full(grouped, repo):
     """The submit-time choice cannot see jobs that are waiting, only money already spent or held,
     so several quick submits all land on the fullest account; the tick then moves the ones it
