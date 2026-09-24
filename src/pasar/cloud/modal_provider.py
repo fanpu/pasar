@@ -42,6 +42,9 @@ HANDLE_TAG = "pasar_handle"
 TARGET_TAG = "pasar_target"  # how list() tells this target's sandboxes from another target's
 RATE_TTL = 300          # seconds a price list is served from memory before a thread refreshes it
 RATE_RETRY = 30         # seconds after a failed price-list fetch before another is started
+# Seconds after the provider is built before an account none of whose price-list fetches has
+# succeeded stops counting as "still loading" (`rates_ready`): a few `RATE_RETRY` cycles.
+RATE_WARMUP = 180
 EXIT_WAIT = 120         # seconds to keep asking for an exit code after the output stream ends
 EXIT_POLL = 1.0         # seconds between those asks
 JOIN_TIMEOUT = 10       # seconds close() waits for every watcher thread, in total
@@ -180,6 +183,8 @@ class ModalProvider:
         self._rates_at = 0.0
         self._rates_loaded = False  # see `rates_ready`
         self._rates_failed_at: float | None = None  # the last fetch, while fetches keep failing
+        self._rates_error: str | None = None        # and why it failed; see `rates_error`
+        self._built_at = clock()
         self._rates_thread: threading.Thread | None = None
         self._closing = False
         # (why, when) for the last launch this account refused as an account; see `health`.
@@ -641,9 +646,26 @@ class ModalProvider:
         return rates
 
     def rates_ready(self) -> bool:
-        """Whether a fetch of the price list has ever succeeded; see `Provider.rates_ready`."""
+        """Whether a fetch of the price list has ever succeeded, or has kept failing for long
+        enough that waiting for one is no longer worth it; see `Provider.rates_ready`.
+
+        Bounded, because a fetch may never succeed — a token without billing access, a change
+        in Modal's SDK, an outage — and an account whose prices are "still loading" for good
+        would refuse every submit and hold every job it touches. So once a fetch has finished
+        and failed, and `RATE_WARMUP` seconds have passed since this provider was built, the
+        account counts as ready with no table: it cannot price anything, and callers treat it
+        as the real answer it is by then (`rates_error` says why)."""
         with self._lock:
-            return self._rates_loaded
+            if self._rates_loaded:
+                return True
+            failed = self._rates_failed_at is not None
+        return failed and self.clock() - self._built_at >= RATE_WARMUP
+
+    def rates_error(self) -> str | None:
+        """Why the last fetch of the price list failed, while fetches keep failing; None once
+        one succeeds. See `Provider.rates_error`."""
+        with self._lock:
+            return self._rates_error
 
     def _refresh_rates_soon(self) -> None:
         with self._lock:
@@ -664,6 +686,7 @@ class ModalProvider:
             with self._lock:
                 first = self._rates_failed_at is None
                 self._rates_failed_at = self.clock()
+                self._rates_error = f"{type(e).__name__}: {e}"
             if first:
                 log.exception("could not refresh %s's rates; trying again every %ds",
                               self.target.name, RATE_RETRY)
@@ -671,7 +694,7 @@ class ModalProvider:
                 log.warning("could not refresh %s's rates, still: %s", self.target.name, e)
         else:
             with self._lock:
-                self._rates_failed_at = None
+                self._rates_failed_at, self._rates_error = None, None
 
     def credit(self) -> Credit | None:
         """This account's billing summary for the current cycle, as Modal's own books have it.

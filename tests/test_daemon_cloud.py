@@ -17,7 +17,7 @@ import pytest
 from pasar.cloud.base import AccountUnusable
 from pasar.cloud.cost import estimate, hourly_rate
 from pasar.cloud.executor import parse_unit
-from pasar.cloud.modal_provider import ModalProvider
+from pasar.cloud.modal_provider import RATE_WARMUP, ModalProvider
 from pasar.config import CloudTarget, Config
 from pasar.daemon import (
     CLOUD_CREDIT_TTL,
@@ -3018,6 +3018,81 @@ def test_a_submit_to_an_account_still_loading_says_to_try_again(cloud, repo):
     assert daemon.submit(cloud_spec(repo)).state is State.AWAITING
 
 
+BILLING_DOWN = "RuntimeError: billing is down"
+
+
+def test_a_submit_to_an_account_whose_prices_never_load_is_told_why(make_cloud, repo, clock,
+                                                                     tmp_path):
+    """A token without billing access, say: every fetch of the price list fails. Neither "try
+    again in a few seconds" while the provider is still trying, nor "still loading" for ever."""
+    sdk = FakeSDK()
+
+    def down(*, client=None):
+        raise RuntimeError("billing is down")
+
+    sdk.Workspace.from_context = staticmethod(down)
+    target = CloudTarget(name="fake", provider="modal", daily_budget=50.0, monthly_budget=300.0)
+    provider = ModalProvider(target, tmp_path / "modal-state", sdk=sdk, clock=clock)
+    try:
+        daemon, _ = make_cloud(provider=provider)
+        assert wait_until(lambda: provider.rates_error() is not None)  # the first fetch failed
+        with pytest.raises(Conflict) as e:
+            daemon.submit(cloud_spec(repo))
+        assert f"prices for fake have failed to load (fake: {BILLING_DOWN})" in str(e.value)
+        assert "try again in a few seconds" not in str(e.value)
+        clock.advance(RATE_WARMUP)  # long enough: the account is judged without a table
+        with pytest.raises(ValueError) as e:
+            daemon.submit(cloud_spec(repo))
+        assert not isinstance(e.value, Conflict)
+        assert "fake has no price for --gpu H100" in str(e.value)
+        assert f"its price list failed to load: {BILLING_DOWN}" in str(e.value)
+        assert daemon.store.list_jobs() == []
+    finally:
+        provider.close()
+
+
+def test_a_job_moves_off_an_account_whose_prices_never_load_once_it_stops_waiting(grouped, repo):
+    d = grouped
+    spent(d, "modal-b", 5.0)
+    job = approved_group_job(d, repo)
+    assert job.spec.target == "modal-b"
+    b = provider_of(d, "modal-b")
+    b.ready, b.rates_failure = False, BILLING_DOWN
+    d._rates.clear()
+    d.tick()
+    assert d.job(job.id).spec.target == "modal-b"  # still trying: not a reason to move
+    b.ready = True                                   # gave up waiting, with no table
+    d.tick()
+    moved = d.job(job.id)
+    assert moved.spec.target == "modal-a" and moved.reason == "moved"
+    assert (f"modal-b can't price H100 right now (its price list failed to load: "
+            f"{BILLING_DOWN})") in moved.summary
+
+
+def test_a_refused_job_fails_once_its_siblings_prices_never_load(grouped, repo):
+    """Not left awaiting until its approval expires, then cancelled for the wrong reason."""
+    d = grouped
+    job = approved_group_job(d, repo)
+    refuse_launches_on(d, "modal-a")
+    b = provider_of(d, "modal-b")
+    b.ready = False
+    d._rates.clear()
+    d.tick()
+    d.tick()
+    assert d.job(job.id).state is State.AWAITING
+    b.rates_failure = BILLING_DOWN  # the fetches start failing
+    d.tick()
+    waiting = d.job(job.id)
+    assert waiting.state is State.AWAITING
+    assert f"they have failed to load so far: modal-b: {BILLING_DOWN}" in waiting.summary
+    b.ready = True
+    d.tick()
+    failed = d.job(job.id)
+    assert failed.state is State.FAILED and failed.reason == "account_unusable"
+    assert (f"modal-b: has no price for H100 (its price list failed to load: {BILLING_DOWN})"
+            in failed.summary)
+
+
 def test_submitting_to_a_group_picks_a_member_and_records_both(grouped, repo):
     job = grouped.submit(cloud_spec(repo, target="modal", est_runtime=600))
     assert job.spec.target in ("modal-a", "modal-b")
@@ -3794,7 +3869,9 @@ def test_a_refused_job_waits_for_a_sibling_whose_prices_are_still_loading(groupe
     assert waiting.state is State.AWAITING and waiting.reason == "account_unusable"
     assert waiting.spec.target == "modal-a"
     assert "modal-a refused to start it" in waiting.summary
-    assert "prices for modal-b are still loading" in waiting.summary
+    # Both of what a person can do about it: a yes retries the account that refused it.
+    assert ("approve it to retry on modal-a, or wait for it to move to modal-b once its "
+            "prices have loaded") in waiting.summary
     assert "has no price" not in waiting.summary
     assert moves(d) == [] and len(d.store.attempts(job.id)) == 1
     provider_of(d, "modal-b").ready = True  # its table lands
@@ -3922,3 +3999,4 @@ def test_a_waiting_job_moves_off_an_account_refusing_every_launch(grouped, repo)
     moved = grouped.job(job.id)
     assert moved.spec.target == "modal-b" and moved.reason == "moved"
     assert f"modal-a is refusing to launch anything: {SPEND_LIMIT}" in moved.summary
+

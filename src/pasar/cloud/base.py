@@ -251,7 +251,16 @@ class Provider(Protocol):
         """Whether `rates()` has produced this provider's first real price list. Until it has,
         an empty or partial table means only "not loaded yet", not "this account cannot price
         that": the daemon neither caches it nor moves a job, fails one or refuses a submit over
-        it. Read from memory on the daemon's tick, like `rates()`."""
+        it. Read from memory on the daemon's tick, like `rates()`.
+
+        Bounded: a provider whose fetches keep failing says it is ready (with no table) once it
+        has tried for a while, so an account whose prices never load is judged on that, not
+        waited on for ever."""
+
+    def rates_error(self) -> str | None:
+        """Why fetching the price list failed, while it keeps failing, for messages that would
+        otherwise only say "still loading" or "no price"; None when the last fetch worked or
+        none has finished. Read from memory."""
 
     def gpus(self, rates: dict[str, float]) -> list[GpuRow]:
         """This target's GPUs as clean rows, built from `rates` — typically a caller's own

@@ -315,11 +315,38 @@ class Daemon:
             log.exception("%s could not say whether its rates have loaded", name)
             return False
 
-    @staticmethod
-    def _still_loading(names: list[str]) -> str:
-        """Why a submit that needs prices `names` have not loaded yet is refused."""
-        return (f"prices for {', '.join(names)} are still loading on this pasard (it fetches them "
-                "when it starts); try again in a few seconds")
+    def _rates_failure(self, name: str) -> str | None:
+        """Why account `name`'s price list has failed to load, while it keeps failing
+        (`Provider.rates_error`); None when it has not, or cannot say."""
+        ex = self.executors.get(name)
+        if not isinstance(ex, CloudExecutor):
+            return None
+        try:
+            return getattr(ex.provider, "rates_error", lambda: None)()
+        except Exception:
+            log.exception("%s could not say why its rates failed to load", name)
+            return None
+
+    def _no_table(self, name: str) -> str:
+        """What to add to "no price" when that is because `name`'s price list failed to load."""
+        err = self._rates_failure(name)
+        return f" (its price list failed to load: {err})" if err else ""
+
+    def _still_loading(self, names: list[str]) -> str:
+        """Why a submit that needs prices `names` have not loaded yet is refused: still loading,
+        or failing to load so far, with the last error, which no amount of trying again in a
+        few seconds fixes."""
+        failed = {n: err for n in names if (err := self._rates_failure(n))}
+        pending = [n for n in names if n not in failed]
+        parts = []
+        if failed:
+            errors = "; ".join(f"{n}: {err}" for n, err in failed.items())
+            parts.append(f"prices for {', '.join(failed)} have failed to load ({errors}); pasard "
+                         "keeps retrying, but see its log for what is wrong")
+        if pending:
+            parts.append(f"prices for {', '.join(pending)} are still loading on this pasard (it "
+                         "fetches them when it starts); try again in a few seconds")
+        return "; ".join(parts)
 
     def cloud_credit(self, target: CloudTarget) -> Credit | None:
         """What `target`'s provider says the account has used this billing cycle, or None when
@@ -870,7 +897,8 @@ class Daemon:
         except KeyError as e:
             if self._rates_loading(target.name):
                 raise Conflict(self._still_loading([target.name])) from None
-            raise ValueError(f"{spec.target} has no price for --gpu {spec.gpu}: {e}") from None
+            raise ValueError(f"{spec.target} has no price for --gpu {spec.gpu}: {e}"
+                             + self._no_table(target.name)) from None
         est = estimate(rate, spec.est_runtime)
         # The estimate, not the padded ceiling: a job expected to fit under the lifetime cap is
         # let in and held to it by a shorter window, the way `--max-cost` holds one attempt.
@@ -1914,7 +1942,8 @@ class Daemon:
         who = f" ({chosen.owner})" if chosen.owner else ""
         if here is None:
             why = (self._unreachable(was)[0] if was not in self.executors
-                   else f"{was} can't price {job.spec.gpu} right now" if not self._prices(was, job)
+                   else f"{was} can't price {job.spec.gpu} right now{self._no_table(was)}"
+                   if not self._prices(was, job)
                    else f"this run is over {was}'s max_job_cost")
         elif (bad := self._health(was)) is not None:
             why = f"{was} is refusing to launch anything: {bad}"
@@ -2359,7 +2388,9 @@ class Daemon:
         A sibling whose prices have not loaded yet (`_rates_loading`) cannot be judged either
         way, so when no other sibling takes the job and one is still loading, it is neither
         moved nor failed: it stays `awaiting` on the account that refused it, saying so, and
-        `_reconsider_refused` asks again on every tick until that sibling's table lands."""
+        `_reconsider_refused` asks again on every tick until that sibling's table lands (or its
+        provider stops waiting for one, `Provider.rates_ready`). A person may still approve it
+        there in the meantime, to try the refusing account again; the summary says both."""
         attempts = self.store.attempts(job.id)
         earlier = [a for a in attempts if a.reason != ACCOUNT_UNUSABLE]
         if earlier:
@@ -2370,10 +2401,13 @@ class Daemon:
         left = [t for t in self.cfg.groups().get(job.spec.group, []) if t.name not in tried]
         chosen, skipped, loading = self._sibling(job, left)
         if chosen is None and loading:
-            which = ", ".join(loading)
+            which = " or ".join(loading)
+            their = "its" if len(loading) == 1 else "their"
+            failed = "; ".join(f"{n}: {err}" for n in loading if (err := self._rates_failure(n)))
             return State.AWAITING, (
-                f"{summary}; prices for {which} are still loading, so it waits here to be "
-                f"moved to another {job.spec.group} account once they have, not failed"), None
+                f"{summary}; approve it to retry on {job.spec.target}, or wait for it to move to "
+                f"{which} once {their} prices have loaded"
+                + (f" (they have failed to load so far: {failed})" if failed else "")), None
         if chosen is None:
             everywhere = "; ".join(a.summary for a in attempts)
             if skipped:
@@ -2431,7 +2465,7 @@ class Daemon:
                 skipped[t.name] = "its prices are still loading"
                 loading.append(t.name)
             elif t.name not in priced:
-                skipped[t.name] = f"has no price for {job.spec.gpu}"
+                skipped[t.name] = f"has no price for {job.spec.gpu}{self._no_table(t.name)}"
             elif priced[t.name] > t.max_job_cost + PRICE_TOLERANCE:
                 skipped[t.name] = "the run is over its max_job_cost"
             else:
@@ -2475,7 +2509,9 @@ class Daemon:
                 continue
             state, summary, moved = self._after_refusal(job, attempts[-1].summary, now)
             if state == State.AWAITING and moved is None:
-                continue  # still loading
+                if summary != job.summary:  # still loading, or now failing to load
+                    self.store.update_job(job.id, summary=summary)
+                continue
             extra: dict = {"spec": moved} if moved is not None else {}
             if state == State.AWAITING:
                 extra["queue_time"] = now

@@ -556,6 +556,46 @@ def test_a_failing_price_list_is_fetched_again_at_most_every_rate_retry(tmp_path
     assert "billing is down" in failures[1].getMessage()
 
 
+def test_an_account_whose_prices_never_load_stops_counting_as_loading(tmp_path):
+    """A token without billing access, a changed SDK, an outage: a fetch may never succeed, and
+    an account "still loading" for good would refuse every submit and hold every job it
+    touches. Once a fetch has failed and `RATE_WARMUP` has passed, it is ready with no table."""
+    sdk = FakeSDK()
+    now = [1000.0]
+    gate = threading.Event()
+    real = sdk.Workspace.from_context
+    broken = [True]
+
+    def fetch(*, client=None):
+        gate.wait(5)
+        if broken[0]:
+            raise RuntimeError("billing is down")
+        return real(client=client)
+
+    sdk.Workspace.from_context = staticmethod(fetch)
+    p = ModalProvider(_target(), tmp_path / "state", sdk=sdk, clock=lambda: now[0])
+    try:
+        now[0] += modal_provider.RATE_WARMUP
+        assert not p.rates_ready()  # the first fetch has not finished: nothing is known yet
+        assert p.rates_error() is None
+        now[0] -= modal_provider.RATE_WARMUP
+        gate.set()
+        assert _wait(lambda: p.rates_error() is not None and not p._rates_thread.is_alive())
+        assert p.rates_error() == "RuntimeError: billing is down"
+        assert not p.rates_ready()  # failed, but not for long enough yet
+        now[0] += modal_provider.RATE_WARMUP - 1
+        assert not p.rates_ready()
+        now[0] += 1
+        assert p.rates_ready() and p.rates() == {}
+        broken[0] = False           # it recovers, and the next fetch (after the backoff) works
+        now[0] += modal_provider.RATE_RETRY
+        assert _wait(lambda: p.rates().get("gpu_hour_cost_t4") == 0.59)
+        assert p.rates_ready() and p.rates_error() is None
+    finally:
+        gate.set()
+        p.close()
+
+
 def _fresh_rates(p):
     """The price list as a fetch made now would have it, for tests that change the fake's
     rates after the provider has already warmed its table."""
