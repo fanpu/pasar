@@ -126,6 +126,22 @@ def test_mascot_routes(daemon, tmp_path, monkeypatch):
     assert c.get("/mascot/builtin/nope.png").status_code == 404
 
 
+def test_mascot_job_sprite_routes(daemon, tmp_path):
+    custom = tmp_path / "custom"
+    (custom / "jobs").mkdir(parents=True)
+    (custom / "jobs" / "local-running.png").write_bytes(b"\x89PNG")
+    (custom / "jobs" / "secret.png").write_bytes(b"nope")  # not a job sprite name, must 404
+    daemon.cfg.mascot_dir = str(custom)
+    c = TestClient(create_app(daemon, allowed_hosts=["testserver"], webui_dir=tmp_path / "none"))
+    m = c.get("/api/mascot").json()
+    assert m["jobs"]["local"]["running"] == ["/mascot/jobs/local-running.png"]
+    assert m["jobs"]["cloud"] == {}
+    assert c.get("/mascot/jobs/local-running.png").content == b"\x89PNG"
+    assert c.get("/mascot/jobs/secret.png").status_code == 404
+    assert c.get("/mascot/jobs/cloud-idle.png").status_code == 404  # valid name, no file
+    assert c.get("/mascot/jobs/..%2Fsecret.png").status_code == 404
+
+
 def test_jobs_in_time_range(daemon, executor, make_spec):
     c = client_for(daemon)
     t0 = daemon.clock()

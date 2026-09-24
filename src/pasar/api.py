@@ -21,7 +21,7 @@ from pasar import __version__
 from pasar.config import Config
 from pasar.daemon import UNSET, Conflict, Daemon, NotFound
 from pasar.guide import load_guide
-from pasar.mascot import manifest, resolve, resolve_builtin
+from pasar.mascot import manifest, resolve, resolve_builtin, resolve_job
 from pasar.metrics import Prometheus
 from pasar.models import TERMINAL, JobSpec, State
 from pasar.units import parse_duration, parse_size
@@ -413,6 +413,13 @@ def create_app(daemon: Daemon, *, prom: Prometheus | None = None, wake=lambda: N
     @app.get("/mascot/builtin/{filename}")
     async def mascot_builtin(filename: str):
         path = resolve_builtin(filename)
+        if path is None:
+            raise HTTPException(404)
+        return FileResponse(path, headers={"Cache-Control": "max-age=300"})
+
+    @app.get("/mascot/jobs/{filename}")
+    async def mascot_job_file(filename: str):
+        path = resolve_job(Path(cfg.mascot_dir), filename)
         if path is None:
             raise HTTPException(404)
         return FileResponse(path, headers={"Cache-Control": "max-age=300"})
