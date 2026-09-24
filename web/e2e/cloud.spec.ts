@@ -79,6 +79,43 @@ test("reject asks first, and Keep it keeps the job waiting", async ({ page, requ
   expect(await stateOf(request, id)).toBe("cancelled");
 });
 
+// Where the lane screenshots go: the repository's own private/mockups unless told otherwise.
+const MOCKUPS = process.env.PASAR_MOCKUPS ?? path.join(REPO_ROOT, "private/mockups");
+
+function schedule(page: Page) {
+  return page.locator(".sec", { has: page.getByRole("heading", { name: /^Schedule/ }) });
+}
+
+test.describe("cloud lanes", () => {
+  test.use({ viewport: { width: 1400, height: 900 }, deviceScaleFactor: 2 });
+
+  test("the schedule shows each account's attempts in a lane under the chart", async ({ page, request }) => {
+    await page.goto("/");
+    const sec = schedule(page);
+    const lanes = sec.locator("svg.tl g.lane");
+    await expect(lanes).toHaveCount(2, { timeout: 15_000 });
+    await expect(lanes.nth(0)).toContainText("modal-a · First Owner");
+    await expect(lanes.nth(1)).toContainText("modal-b · Second Owner");
+    // Seeded by fake_cloud.py: taken back by the provider, then resumed on a new approval.
+    const resumed = await jobIdByName(request, "resume-ft");
+    await expect(sec.getByRole("button", { name: new RegExp(`^#${resumed} resume-ft on modal-b`) })).toHaveCount(2);
+    // Awaiting jobs have run nothing yet, so they are not drawn.
+    const waiting = await jobIdByName(request, "rlhf-policy");
+    await expect(sec.getByRole("button", { name: new RegExp(`^#${waiting} `) })).toHaveCount(0);
+
+    await sec.screenshot({ path: path.join(MOCKUPS, "cloud-lanes.png") });
+
+    const running = sec.getByRole("button", { name: new RegExp(`^#${resumed} resume-ft on modal-b, running since`) });
+    await running.hover();
+    await expect(page.locator(".tip")).toContainText("Second Owner's account");
+    await expect(page.locator(".tip")).toContainText("spent or held");
+    await sec.screenshot({ path: path.join(MOCKUPS, "cloud-lanes-hover.png") });
+    await running.click();
+    await expect(page).toHaveURL(new RegExp(`/jobs/${resumed}$`));
+    await expect(page.getByRole("dialog")).toBeVisible();
+  });
+});
+
 test.describe("phone width", () => {
   // Same width JobTable's own mobile card view kicks in at; deviceScaleFactor matches a real
   // phone's for the mockup screenshot below.
@@ -101,5 +138,14 @@ test.describe("phone width", () => {
     await page.getByRole("region", { name: "Cloud" }).screenshot({
       path: path.join(REPO_ROOT, "private/mockups/cloud-mobile.png"),
     });
+  });
+
+  test("the cloud lanes fit a phone", async ({ page }) => {
+    await page.goto("/");
+    const sec = schedule(page);
+    await expect(sec.locator("svg.tl g.lane")).toHaveCount(2, { timeout: 15_000 });
+    const box = await sec.boundingBox();
+    expect(box!.width).toBeLessThanOrEqual(390);
+    await sec.screenshot({ path: path.join(MOCKUPS, "cloud-lanes-phone.png") });
   });
 });
