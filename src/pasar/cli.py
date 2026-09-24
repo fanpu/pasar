@@ -474,14 +474,15 @@ def run(args, client: httpx.Client) -> int:
         elif job.get("cloud"):
             c = job["cloud"]
             cap_note = _cap_note(c)
-            print(f"submitted #{job['id']} {job['name']} ({_state(job)}) on {c['target']}")
+            owner = f" ({c['owner']}'s account)" if c.get("owner") else ""
+            print(f"submitted #{job['id']} {job['name']} ({_state(job)}) on {c['target']}{owner}")
             print(f"  estimated {_money(c['estimated_cost'])}, "
                   f"capped at {_money(c['max_cost'])}{cap_note} for this run")
             if c.get("full_seconds") and (c.get("approved_seconds") or 0) < c["full_seconds"]:
                 print(f"  it will be paused after {fmt_duration(c['approved_seconds'])}"
                       f" instead of {fmt_duration(c['full_seconds'])}, to stay under that cap")
-            print(f"  a person has to approve it before it launches: "
-                  f"POST /api/jobs/{job['id']}/approve (no web UI for it yet)")
+            print("  a person has to approve it before it launches: Approve… on the web UI's "
+                  "Cloud card")
         else:
             print(f"submitted #{job['id']} {job['name']} ({_state(job)})")
     elif args.cmd == "ls":

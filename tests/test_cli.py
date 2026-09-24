@@ -253,8 +253,19 @@ def test_submit_on_cloud_prints_cost_and_where_to_approve(client, capsys, cloud_
     assert code == 0
     assert "awaiting" in out.out
     assert "$" in out.out
-    assert "/api/jobs/1/approve" in out.out  # the endpoint, since there is no UI to point at
+    assert "Approve…" in out.out and "web UI" in out.out  # where a person approves it
+    assert "no web UI" not in out.out
     assert cloud_daemon.job(1).state.value == "awaiting"
+
+
+def test_submit_on_cloud_names_whose_account_it_is_on(client, capsys, cloud_daemon, cloud_cwd,
+                                                       monkeypatch):
+    cloud_daemon.cfg.clouds["fake"] = replace(cloud_daemon.cfg.clouds["fake"], owner="alice")
+    monkeypatch.chdir(cloud_cwd)
+    code, out = run(client, capsys, "submit", "--time", "1h", "--on", "fake", "--gpu", "H100",
+                    "--", "python", "-c", "pass")
+    assert code == 0
+    assert "on fake (alice's account)" in out.out.splitlines()[0]
 
 
 def test_submit_on_cloud_rejects_mem_and_requires_gpu(client, capsys, cloud_daemon, cloud_cwd,
