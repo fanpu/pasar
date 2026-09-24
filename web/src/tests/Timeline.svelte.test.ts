@@ -45,7 +45,9 @@ describe("Timeline", () => {
     const cloud = job({ id: 43, name: "far-away", state: "running", limit: 105 * GIB, spans, projected: [[NOW - 600, NOW + 600]], cloud: cloudJob() });
     render(Timeline, { jobs: [local, cloud], pool: 105 * GIB, now: NOW, onopen: () => {} });
     expect(screen.getByRole("button", { name: /#42 llama/ })).toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: /#43 far-away/ })).toBeNull();
+    expect(screen.queryByRole("button", { name: /#43 far-away, running until/ })).toBeNull();
+    // It gets a lane of its own under the chart instead.
+    expect(screen.getByRole("button", { name: /#43 far-away on modal-a/ })).toBeInTheDocument();
   });
   it("shows an empty state", () => {
     render(Timeline, { jobs: [], pool: 105 * GIB, now: NOW, onopen: () => {} });
@@ -180,5 +182,53 @@ describe("Timeline", () => {
     expect(screen.getByText("memory over time")).toBeInTheDocument();
     input.remove();
     dialog.remove();
+  });
+});
+
+describe("Timeline cloud lanes", () => {
+  const running = job({ id: 43, name: "far-away", state: "running", tags: ["sft"], spans: [[NOW - 1800, null, null]], cloud: cloudJob({ target: "modal-b", owner: "Second Owner", approved_seconds: 3600, phase: "running", job_spent: 2.5 }) });
+  const paused = job({ id: 44, name: "resumed", state: "running", spans: [[NOW - 5000, NOW - 4000, "preempted"], [NOW - 1200, null, null]], cloud: cloudJob({ approved_seconds: 3600 }) });
+  const waiting = job({ id: 45, name: "not-yet", state: "awaiting", cloud: cloudJob() });
+
+  it("draws a lane per account under the chart, one bar per attempt, and opens the job on click", async () => {
+    const onopen = vi.fn();
+    const { container } = render(Timeline, { jobs: [running, paused, waiting], pool: 105 * GIB, now: NOW, onopen });
+    const lanes = [...container.querySelectorAll("svg.tl g.lane")];
+    expect(lanes.map((l) => l.getAttribute("data-lane"))).toEqual(["modal-a", "modal-b"]);
+    expect(lanes[1].textContent).toContain("modal-b · Second Owner");
+    expect(screen.getAllByRole("button", { name: /#44 resumed on modal-a/ })).toHaveLength(2);
+    expect(screen.queryByRole("button", { name: /#45 not-yet/ })).toBeNull();
+
+    // The lanes sit below the memory chart's own plot, inside the same svg.
+    const svg = container.querySelector("svg.tl") as SVGSVGElement;
+    const chartHeight = 220;
+    expect(parseFloat(svg.style.height)).toBeGreaterThan(chartHeight);
+    const bar = screen.getByRole("button", { name: /#43 far-away on modal-b, running since/ });
+    const rects = bar.querySelectorAll("rect");
+    for (const r of rects) expect(Number(r.getAttribute("y"))).toBeGreaterThan(chartHeight);
+    // Solid to now, dashed to the end of its approved window, in the job's tag colour.
+    expect(rects[0].getAttribute("stroke-dasharray")).toBe("5 3");
+    expect(rects[1].getAttribute("fill")).toBe(`${jobColor(running)}2e`);
+
+    await fireEvent.click(bar);
+    expect(onopen).toHaveBeenCalledWith(43);
+    await fireEvent.keyDown(bar, { key: "Enter" });
+    expect(onopen).toHaveBeenCalledTimes(2);
+  });
+
+  it("shows the job, account, state and cost on hover", async () => {
+    render(Timeline, { jobs: [running], pool: 105 * GIB, now: NOW, onopen: () => {} });
+    await fireEvent.mouseMove(screen.getByRole("button", { name: /#43 far-away/ }), { clientX: 100, clientY: 300 });
+    const tip = document.querySelector(".tip") as HTMLElement;
+    expect(tip.textContent).toContain("#43 far-away");
+    expect(tip.textContent).toContain("H100 on modal-b · Second Owner's account");
+    expect(tip.textContent).toContain("running");
+    expect(tip.textContent).toContain("$2.50 spent or held");
+  });
+
+  it("has no lanes when no cloud attempt is in view", () => {
+    const { container } = render(Timeline, { jobs: [waiting, job({ id: 1, state: "running", spans: [[NOW - 600, null, null]], projected: [[NOW - 600, NOW + 600]] })], pool: 105 * GIB, now: NOW, onopen: () => {} });
+    expect(container.querySelector("g.lane")).toBeNull();
+    expect((container.querySelector("svg.tl") as SVGSVGElement).style.height).toBe("220px");
   });
 });

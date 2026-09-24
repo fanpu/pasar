@@ -1,7 +1,9 @@
 <script lang="ts">
   import { getJobsBetween } from "../lib/api";
   import { GIB, fmtGib } from "../lib/format";
+  import { money, ownerNote } from "../lib/cloud";
   import { jobColor, mutedJobColor } from "../lib/colors";
+  import { cloudLanes, type Lane, type LaneBar } from "../lib/lanes";
   import { mascot } from "../lib/mascot.svelte";
   import {
     clampWindow, keyStep, layout, liveWindow, LIVE_HISTORY, tickLabel, tickStep, timeTicks, when,
@@ -22,6 +24,8 @@
 
   // Unique per component instance so clipPath ids never collide if several Timelines mount.
   const uid = Math.random().toString(36).slice(2);
+  // The same cloud glyph the job table badges cloud jobs with (24×24 box).
+  const CLOUD_PATH = "M7 18a4 4 0 0 1-.6-7.96 5 5 0 0 1 9.44-2A4.5 4.5 0 0 1 17.5 18H7Z";
 
   // jsdom has no layout, so a measured width of 0 falls back to a sensible default.
   let wrapperWidth = $state(0);
@@ -103,6 +107,13 @@
     if (history.length === 0) return local;
     const live = new Set(jobs.map((j) => j.id));
     return [...local, ...history.filter((j) => !j.cloud && !live.has(j.id))];
+  });
+  // They get a lane per account under it instead, on the same time axis.
+  const cloudShown = $derived.by(() => {
+    const live = jobs.filter((j) => j.cloud);
+    if (history.length === 0) return live;
+    const ids = new Set(jobs.map((j) => j.id));
+    return [...live, ...history.filter((j) => j.cloud && !ids.has(j.id))];
   });
 
   // Drag to pan; ctrl/⌘ + wheel (or a trackpad pinch) to zoom; horizontal wheel to pan.
@@ -256,6 +267,24 @@
   }
 
   const jobsById = $derived(new Map(shown.map((j) => [j.id, j])));
+  const cloudById = $derived(new Map(cloudShown.map((j) => [j.id, j])));
+  const lanes = $derived(cloudLanes(cloudShown, now, t0, t1));
+
+  // Each lane: a header line naming the account, then one row per attempt running at once.
+  const LANE_HEAD = 18, ROW_H = 20, ROW_GAP = 3, LANE_PAD = 6, LANES_GAP = 4;
+  function rowY(top: number, row: number): number {
+    return top + LANE_HEAD + row * (ROW_H + ROW_GAP);
+  }
+  const laneBoxes = $derived.by(() => {
+    let top = height + LANES_GAP;
+    return lanes.map((lane) => {
+      const box = { lane, top, bottom: rowY(top, lane.rows) - ROW_GAP };
+      top = box.bottom + LANE_PAD;
+      return box;
+    });
+  });
+  const lanesTop = $derived(height + LANES_GAP);
+  const svgHeight = $derived(laneBoxes.length ? laneBoxes[laneBoxes.length - 1].bottom + 2 : height);
   const laidOut = $derived(layout(shown, pool, now, t0, t1));
   const isEmpty = $derived(laidOut.length === 0);
   const ticks = $derived(timeTicks(t0, t1, width));
@@ -273,12 +302,40 @@
 
   interface Tip { x: number; y: number; job: JobView; kind: BlockKind; start: number; end: number }
   let tip = $state<Tip | null>(null);
+  interface CloudTip { x: number; y: number; job: JobView; lane: Lane; bar: LaneBar }
+  let ctip = $state<CloudTip | null>(null);
 
   function showTip(e: MouseEvent, job: JobView, kind: BlockKind, start: number, end: number) {
     tip = { x: e.clientX + 14, y: e.clientY + 12, job, kind, start, end };
   }
+  function showCloudTip(e: MouseEvent, job: JobView, lane: Lane, bar: LaneBar) {
+    ctip = { x: e.clientX + 14, y: e.clientY + 12, job, lane, bar };
+  }
   function hideTip() {
     tip = null;
+    ctip = null;
+  }
+
+  function attemptLabel(job: JobView, bar: LaneBar): string {
+    const of = job.spans.length > 1 ? `attempt ${bar.attempt} of ${job.spans.length}` : "";
+    const span = bar.kind === "run"
+      ? `running since ${when(bar.start, now)}${bar.until !== null ? `, approved until ~${when(bar.until, now)}` : ""}`
+      : `ran ${when(bar.start, now)}–${when(bar.end, now)}`;
+    return [span, of].filter(Boolean).join(" · ");
+  }
+  function cloudAria(job: JobView, lane: Lane, bar: LaneBar): string {
+    return `#${job.id} ${job.name} on ${lane.target}, ${attemptLabel(job, bar)}`;
+  }
+  function cloudState(job: JobView, bar: LaneBar): string {
+    if (bar.kind === "past") return `${bar.endKind ?? "ended"} · job ${job.state}`;
+    const phase = job.cloud?.phase;
+    return phase && phase !== job.state ? `${job.state} · ${phase}` : job.state;
+  }
+  function cloudCost(job: JobView): string {
+    const c = job.cloud!;
+    // A live attempt counts at the ceiling reserved for it (see CloudCard's `spentLine`).
+    const live = job.spans.some(([, end]) => end === null);
+    return `${money(c.job_spent)} ${live ? "spent or held" : "spent"}`;
   }
   function open(job: JobView) {
     if (justDragged) return;
@@ -309,7 +366,7 @@
   </h3>
   <div class="tlwrap" bind:clientWidth={wrapperWidth}>
     {#if isEmpty}
-      <div class="tlempty">
+      <div class="tlempty" style="height: {height}px">
         <img src={mascot.pick("hmm")} alt="" width="64" height="64" />
         <p>{following && t1 > now ? "Nothing scheduled." : loading ? "Looking back…" : "Nothing ran in this window."}</p>
       </div>
@@ -317,7 +374,7 @@
     <svg
       class="tl"
       class:dragging
-      style="height: {height}px"
+      style="height: {svgHeight}px"
       bind:this={svgEl}
       role="presentation"
       {onpointerdown}
@@ -384,9 +441,62 @@
           </g>
         {/if}
       {/each}
+      {#each laneBoxes as { lane, top, bottom } (lane.target)}
+        <g class="lane" data-lane={lane.target}>
+          <path d={CLOUD_PATH} transform="translate({L + 1} {top + 2}) scale(0.54)" class="laneic" />
+          <text x={L + 17} y={top + 12} class="lanename">{lane.target}<tspan class="laneowner">{lane.owner ? ` · ${lane.owner}` : ""}</tspan></text>
+          <rect x={L} y={top + LANE_HEAD - 2} width={plotWidth} height={bottom - top - LANE_HEAD + 4} rx="8" class="lanetrack" />
+          {#each ticks as t (t)}
+            <line x1={x(t)} x2={x(t)} y1={top + LANE_HEAD - 2} y2={bottom + 2} class="lanehour" />
+          {/each}
+          {#each lane.bars as bar (`${bar.id}:${bar.attempt}`)}
+            {@const job = cloudById.get(bar.id)}
+            {#if job}
+              {@const X = x(bar.start) + 1}
+              {@const Y = rowY(top, bar.row)}
+              {@const w = Math.max(1.5, x(bar.end) - x(bar.start) - 2)}
+              {@const full = Math.max(w, x(bar.until ?? bar.end) - x(bar.start) - 2)}
+              {@const c = jobColor(job)}
+              {@const muted = mutedJobColor(job)}
+              {@const label = full > 60 ? `#${job.id} ${job.name}` : full > 34 ? `#${job.id}` : ""}
+              {@const clipId = `tl-lclip-${uid}-${job.id}-${bar.attempt}`}
+              <g
+                role="button"
+                tabindex="0"
+                aria-label={cloudAria(job, lane, bar)}
+                class="blk"
+                style={dim?.(job) ? "opacity: 0.25" : undefined}
+                onclick={() => open(job)}
+                onkeydown={(e) => onBlockKeydown(e, job)}
+                onmousemove={(e) => showCloudTip(e, job, lane, bar)}
+                onmouseleave={hideTip}
+              >
+                {#if bar.kind === "run"}
+                  {#if bar.until !== null}
+                    <rect x={X} y={Y} width={full} height={ROW_H} rx={Math.min(7, full / 3)} fill="#ffffff" stroke={c} stroke-width="1.5" stroke-dasharray="5 3" />
+                  {/if}
+                  <rect x={X} y={Y} width={w} height={ROW_H} rx={Math.min(7, w / 3)} fill="{c}2e" stroke={c} stroke-width="1.5" />
+                  <rect x={X} y={Y} width={Math.min(4, w)} height={ROW_H} rx="2" fill={c} />
+                {:else}
+                  <rect x={X} y={Y} width={w} height={ROW_H} rx={Math.min(7, w / 3)} fill={muted.fill} stroke={muted.border} stroke-width="1.5" />
+                {/if}
+                {#if label}
+                  <clipPath id={clipId}>
+                    <rect x={X} y={Y} width={full - 5} height={ROW_H} />
+                  </clipPath>
+                  <text clip-path="url(#{clipId})" x={X + (bar.kind === "run" ? 9 : 7)} y={Y + 14} class="lanelabel" class:past={bar.kind === "past"}>{label}</text>
+                {/if}
+              </g>
+            {/if}
+          {/each}
+        </g>
+      {/each}
       {#if now >= t0 && now <= t1}
         <line x1={x(now)} x2={x(now)} y1={T - 4} y2={height - B} class="nowline" />
         <circle cx={x(now)} cy={T - 4} r="3.5" class="nowdot" />
+        {#if laneBoxes.length}
+          <line x1={x(now)} x2={x(now)} y1={lanesTop + LANE_HEAD - 2} y2={svgHeight - 2} class="nowline" />
+        {/if}
       {/if}
     </svg>
   </div>
@@ -395,10 +505,23 @@
     <span><svg width="22" height="12"><rect x="1" y="1" width="20" height="10" rx="4" fill="#fff" stroke="#8a63d2" stroke-width="1.5" stroke-dasharray="3 2" /></svg>projected</span>
     <span><svg width="22" height="12"><rect x="1" y="1" width="20" height="10" rx="4" fill="#8a63d217" stroke="#8a63d266" stroke-width="1.5" /></svg>finished</span>
     <span><svg width="10" height="14"><rect x="4" y="0" width="2" height="14" fill="#ff8fab" /></svg>now</span>
+    {#if laneBoxes.length}
+      <span><svg width="22" height="12"><rect x="1" y="1" width="20" height="10" rx="4" fill="#fff" stroke="#5b9bd5" stroke-width="1.5" stroke-dasharray="3 2" /><rect x="1" y="1" width="9" height="10" rx="3" fill="#5b9bd52e" stroke="#5b9bd5" stroke-width="1.5" /></svg>cloud: run so far, then approved time</span>
+    {/if}
     <span class="hint mouse">drag or A/D to move · W/S or ctrl + scroll to zoom</span>
     <span class="hint touch">drag to move · pinch to zoom</span>
   </div>
 </div>
+
+{#if ctip}
+  {@const c = ctip.job.cloud!}
+  <div class="tip" style="left: {ctip.x}px; top: {ctip.y}px">
+    <b>#{ctip.job.id} {ctip.job.name}</b><br />
+    <span class="dim">{c.gpu} on {ctip.lane.target}{ownerNote(ctip.lane.owner ?? c.owner)}</span><br />
+    {cloudState(ctip.job, ctip.bar)} · <span class="dim">{attemptLabel(ctip.job, ctip.bar)}</span><br />
+    {cloudCost(ctip.job)}{c.job_cap !== null ? ` · cap ${money(c.job_cap)}` : ""}
+  </div>
+{/if}
 
 {#if tip}
   <div class="tip" style="left: {tip.x}px; top: {tip.y}px">
@@ -423,6 +546,13 @@
   .blklabel.past { fill: var(--ink-2); }
   .blksub { font-size: 11px; font-weight: 700; fill: var(--ink-2); }
   .nowline { stroke: var(--accent); stroke-width: 2; }
+  .laneic { fill: var(--cloud-ic); }
+  .lanename { font-size: 11.5px; font-weight: 900; fill: var(--ink-2); }
+  .laneowner { font-weight: 700; fill: var(--ink-3); }
+  .lanetrack { fill: #fdf7fa; stroke: var(--line); stroke-width: 1; }
+  .lanehour { stroke: #f4eaef; }
+  .lanelabel { font-size: 11.5px; font-weight: 800; fill: var(--ink); }
+  .lanelabel.past { fill: var(--ink-2); }
   .nowdot { fill: var(--accent); }
 
   .tlempty { position: absolute; inset: 0; pointer-events: none; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 8px; color: var(--ink-2); font-weight: 700; }
