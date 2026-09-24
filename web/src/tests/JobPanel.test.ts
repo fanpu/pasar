@@ -427,8 +427,9 @@ describe("JobPanel", () => {
       expect(block.getByText("$5.00")).toBeInTheDocument();
       expect(block.getByText("up to $7.00")).toBeInTheDocument();
       expect(block.getByText("1h52")).toBeInTheDocument(); // dur(6750)
+      expect(block.getByText("spent or held")).toBeInTheDocument();
       expect(block.getByText("$3.20")).toBeInTheDocument();
-      expect(block.getByText("of $10.00")).toBeInTheDocument();
+      expect(block.getByText("of $10.00 job cap")).toBeInTheDocument();
     });
 
     it("shows a needs-more-time fact only when the job's own pace has fallen behind", async () => {
@@ -450,6 +451,26 @@ describe("JobPanel", () => {
       expect(block.queryByRole("button")).toBeNull();
     });
 
+    it("says what one approval buys for an awaiting job, and when it can't be priced", async () => {
+      for (const [approved, expectV] of [[10800, "3h00"], [null, "can't be priced right now"]] as const) {
+        const liveJob = cloudJobView(
+          { id: 201, name: "sweep-wd-3", state: "awaiting" },
+          { approved_seconds: approved, full_seconds: 10800, phase: null },
+        );
+        vi.mocked(api.getJob).mockResolvedValue(jobDetail({ id: 201, name: "sweep-wd-3", state: "awaiting", cloud: liveJob.cloud }));
+        const { container, unmount } = render(JobPanel, {
+          id: 201, live: liveJob, now: NOW, grafanaUrl: null, onclose: noop, onrestartwith: noopRestartWith,
+        });
+        await screen.findByText("sweep-wd-3");
+        const block = within(container.querySelector(".cloudblock")!);
+        expect(block.getByText("one approval buys")).toBeInTheDocument();
+        expect(block.queryByText("approved time")).toBeNull();
+        expect(block.getByText(expectV)).toBeInTheDocument();
+        expect(block.queryByText("not yet approved")).toBeNull();
+        unmount();
+      }
+    });
+
     it("shows a Modal console link only when console_url is set", async () => {
       const withConsole = cloudJobView(
         { id: 263, name: "eval-batch", state: "running", start_time: NOW - 600 },
@@ -464,6 +485,7 @@ describe("JobPanel", () => {
       await screen.findByText("eval-batch");
       const link = within(container.querySelector(".cloudblock")!).getByText("Modal ↗");
       expect(link.closest("a")).toHaveAttribute("href", "https://modal.com/apps/placeholder/eval-batch");
+      expect(link.closest("a")).toHaveAttribute("rel", "noopener noreferrer");
     });
 
     it("shows each persist outcome: pulled, still on target, nothing saved, and a pull error", async () => {
@@ -477,11 +499,27 @@ describe("JobPanel", () => {
         [
           "still-remote",
           cloudPersist({ sweeps_at: NOW + 6 * 86400 }),
-          "at modal-a",
-          "until Sep 27",
+          "at modal-a until Sep 27",
+          "pulling…",
         ],
         ["nothing", cloudPersist(), "nothing saved", ""],
-        ["errored", cloudPersist({ last_error: "network timeout" }), "pull failed", "network timeout"],
+        [
+          "errored",
+          cloudPersist({ sweeps_at: NOW + 6 * 86400, last_error: "network timeout" }),
+          "at modal-a until Sep 27",
+          "pull failed: network timeout",
+        ],
+        // A verified pull whose remote delete then failed still pulled: the card says so, and so
+        // does the panel, rather than "pull failed".
+        [
+          "pulled-left-copy",
+          cloudPersist({
+            bytes: 512 * 1024 * 1024, pulled_to: "/home/agent-3/pasar-pulled/220", sweeps_at: NOW + 6 * 86400,
+            last_error: "could not delete the remote copy",
+          }),
+          "pulled 0.5 GiB",
+          "→ /home/agent-3/pasar-pulled/220 · copy at modal-a until Sep 27",
+        ],
       ];
       for (const [id_, persist, expectV, expectS] of cases) {
         const liveJob = cloudJobView(

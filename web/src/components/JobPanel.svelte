@@ -3,7 +3,7 @@
   import { mascot } from "../lib/mascot.svelte";
   import { dur, fmtGib, gib, hm, metric } from "../lib/format";
   import { jobColor, JOB_COLORS } from "../lib/colors";
-  import { resultSize } from "../lib/cloud";
+  import { money, persistLine } from "../lib/cloud";
   import { eventRows } from "../lib/eventlog";
   import { progressSeries } from "../lib/series";
   import JobChip from "./JobChip.svelte";
@@ -299,33 +299,17 @@
 
   interface CloudFact { l: string; v: string; s: string }
 
-  function money(v: number | null): string {
-    return v === null ? "–" : `$${v.toFixed(2)}`;
-  }
-
-  const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
-  /** "Sep 26"-style label for a sweep/retention date — coarser than `hm` (hour:minute), which
-   * would read oddly for something days away. Uses local getters like the rest of format.ts;
-   * tests run with TZ=UTC so that's equivalent to UTC there. */
-  function dateLabel(ts: number): string {
-    const d = new Date(ts * 1000);
-    return `${MONTHS[d.getMonth()]} ${d.getDate()}`;
-  }
-
-  /** What a finished cloud job's persist dir left behind, in the same four shapes the cloud
-   * card's "recent results" line uses: pulled home, still on the target awaiting the retention
-   * sweep, nothing saved, or the last pull's own error. `null` (job.cloud.persist is `null`)
-   * until the job is terminal, in which case this fact is simply omitted. */
+  /** What a finished cloud job left behind: `persistLine`'s own words, the same line the cloud
+   * card's "recent results" shows, split at its first " → " or " · " into the fact's value and
+   * its smaller line beneath. `null` until the job is terminal (job.cloud.persist is `null`), in
+   * which case this fact is simply omitted. */
   function persistFact(cloud: NonNullable<JobView["cloud"]>): CloudFact | null {
-    const p = cloud.persist;
-    if (p === null) return null;
-    if (p.last_error) return { l: "results", v: "pull failed", s: p.last_error };
-    if (p.pulled_to !== null) {
-      const stillRemote = p.sweeps_at !== null ? ` · still on ${cloud.target} until ${dateLabel(p.sweeps_at)}` : "";
-      return { l: "results", v: `pulled ${resultSize(p.bytes)}`, s: `→ ${p.pulled_to}${stillRemote}` };
-    }
-    if (p.sweeps_at !== null) return { l: "results", v: `at ${cloud.target}`, s: `until ${dateLabel(p.sweeps_at)}` };
-    return { l: "results", v: "nothing saved", s: "" };
+    if (cloud.persist === null) return null;
+    const line = persistLine(cloud.persist, cloud.target);
+    const cut = line.search(/ → | · /);
+    if (cut < 0) return { l: "results", v: line, s: "" };
+    const rest = line.slice(cut + 1);
+    return { l: "results", v: line.slice(0, cut), s: rest.startsWith("· ") ? rest.slice(2) : rest };
   }
 
   /** The cloud facts grid for a cloud job: null for a job that ran locally. No approve/reject or
@@ -339,14 +323,17 @@
       {
         l: "cost",
         v: money(c.estimated_cost),
-        s: c.max_cost !== null ? `up to ${money(c.max_cost)}${c.user_capped ? " · your cap" : ""}` : "estimate unavailable",
+        s: c.max_cost !== null ? `up to ${money(c.max_cost)}${c.user_capped ? " · your cap" : ""}` : "can't be priced right now",
       },
       {
-        l: "approved time",
-        v: c.approved_seconds !== null ? dur(c.approved_seconds) : "not yet approved",
+        // `approved_seconds` is what one approval buys at today's price; `null` means it can't be
+        // priced right now, not that the job hasn't been approved.
+        l: job.state === "awaiting" ? "one approval buys" : "approved time",
+        v: c.approved_seconds !== null ? dur(c.approved_seconds) : "can't be priced right now",
         s: c.full_seconds !== null && c.full_seconds !== c.approved_seconds ? `of ${dur(c.full_seconds)} total` : "",
       },
-      { l: "job cap spent", v: money(c.job_spent), s: c.job_cap !== null ? `of ${money(c.job_cap)}` : "" },
+      // A live attempt counts at its reserved ceiling (see the card's "spent or held").
+      { l: "spent or held", v: money(c.job_spent), s: c.job_cap !== null ? `of ${money(c.job_cap)} job cap` : "no job cap" },
       { l: "phase", v: c.phase ?? "–", s: "" },
     ];
     if (c.needs_more_time !== null) {
@@ -494,7 +481,7 @@
             {/each}
           </div>
           {#if cloud.console_url}
-            <a href={cloud.console_url} target="_blank" rel="noopener">Modal ↗</a>
+            <a href={cloud.console_url} target="_blank" rel="noopener noreferrer">Modal ↗</a>
           {/if}
         </div>
       {/if}
