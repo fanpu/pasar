@@ -172,6 +172,10 @@ def cloud_view(daemon, job: Job, pace=_UNKNOWN) -> dict | None:
 
     `blocked` is why an approved job is still queued rather than launched, if the last pass said.
 
+    `owner`/`group` say whose credit the job runs on and which group (if any) its target belongs
+    to, so a job detail view can say "running on An's Modal account" — both `None` once the
+    target is no longer configured, like `job_cap`.
+
     `persist` is what the job left behind once it finished: see `persist_view`."""
     if job.spec.target == LOCAL:
         return None
@@ -203,6 +207,8 @@ def cloud_view(daemon, job: Job, pace=_UNKNOWN) -> dict | None:
         "approved_seconds": approved_seconds,
         "full_seconds": full_seconds,
         "job_cap": target.max_job_cost if target is not None else None,
+        "owner": target.owner if target is not None else None,
+        "group": target.group if target is not None else None,
         "job_spent": daemon.ledger.job_spent(job.id),
         "console_url": unit.console_url if unit is not None else None,
         # Extra seconds this attempt's own pace (see `pasar.cloud.pace.needs_more_time`) projects
@@ -316,30 +322,47 @@ def cloud_status_view(daemon, now: float, projection: dict) -> dict:
     target's volume: the last measurement a pull took of each whose remote copy neither a pull
     nor the retention sweep has deleted yet. A floor from pasard's records, not a live size:
     running and paused jobs' checkpoints are there too, uncounted, and a provider bills storage
-    whether or not anything is running."""
+    whether or not anything is running.
+
+    Targets are listed by `group` (ungrouped ones first), then in the order they appear in the
+    config — a Python `sorted()` on `group` alone is stable, so it never needs to also sort on
+    name to keep each group's own members in the order they were written. `pasar cloud` reads
+    this order as-is rather than re-sorting.
+
+    `left`/`exhausted` are the smaller of what the daily and the monthly budget still allow —
+    the same two figures `cloud.lane.decide_cloud` gates a launch against — so `left` is what a
+    job may still cost here right now and `exhausted` is whether the budget gate would already
+    block one. Not the provider's own credit figure (Task 6), which this view does not read."""
     held: dict[str, list[int]] = {}
     for job_id, size in daemon.store.held_remote().items():
         job = daemon.store.get_job(job_id)
         if job is not None:
             held.setdefault(job.spec.target, []).append(size)
     targets = []
-    for name, target in sorted(daemon.cfg.clouds.items()):
+    for name, target in sorted(daemon.cfg.clouds.items(), key=lambda kv: kv[1].group):
         committed = daemon.ledger.committed(name)
         running = sum(1 for j in daemon.store.list_jobs(ACTIVE) if j.spec.target == name)
+        spent_today = daemon.ledger.settled_day(name) + committed
+        spent_month = daemon.ledger.settled_month(name) + committed
+        left = max(0.0, min(target.daily_budget - spent_today, target.monthly_budget - spent_month))
         targets.append({
             "name": name,
             "provider": target.provider,
-            # Whose account pays for this target, for the web UI's approve dialog to say so.
+            # Whose account pays for this target, and which group (if any) it belongs to, for
+            # the web UI's approve dialog and `pasar cloud`'s OWNER/GROUP columns.
             "owner": target.owner,
+            "group": target.group,
             "configured": name in daemon.executors,
             "daily_budget": target.daily_budget,
             "monthly_budget": target.monthly_budget,
-            "spent_today": daemon.ledger.settled_day(name) + committed,
-            "spent_month": daemon.ledger.settled_month(name) + committed,
+            "spent_today": spent_today,
+            "spent_month": spent_month,
             "committed": committed,
             "max_running": target.max_running,
             "max_job_cost": target.max_job_cost,
             "running": running,
+            "left": left,
+            "exhausted": left <= 0,
             "rates": daemon.cloud_rates(target),
             "known_stored_bytes": sum(held.get(name, [])),
             "known_stored_jobs": len(held.get(name, [])),

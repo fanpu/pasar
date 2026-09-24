@@ -164,6 +164,17 @@ class FakeClient:
         self.token_secret = token_secret
 
 
+class FakeBillingSummary:
+    """Stands in for the object `Workspace.from_context(...).billing.summary()` returns: only
+    the fields `pasar.cloud.check` reads."""
+
+    def __init__(self, metered_cost=0.0, billed_cost=0.0, start=None, end=None):
+        self.metered_cost = metered_cost
+        self.billed_cost = billed_cost
+        self.start = start
+        self.end = end
+
+
 class FakeApp:
     app_id = "ap-1"
 
@@ -292,12 +303,27 @@ class FakeSDK:
         self.volume_clients = []
         self.workspace_clients = []
         self.list_clients = []
+        # -- pasar.cloud.check's own surface (Task 0/8's repeatable survey), keyed by token_id
+        # like `clients` above.
+        self.verify_calls: list[tuple[str, tuple]] = []
+        self.verify_errors: dict[str, str] = {}       # token_id -> why Client.verify refuses
+        self.workspace_names: dict[str, str] = {}      # token_id -> Workspace.from_context.name
+        self.billing_summaries: dict[str, FakeBillingSummary] = {}  # token_id -> its summary
+        self.billing_errors: dict[str, str] = {}       # token_id -> why billing.summary() fails
+        self.config = type("Config", (), {"config": {"server_url": "https://fake.modal.test"}})()
         sdk = self
 
         class Client:
             @staticmethod
             def from_credentials(token_id, token_secret):
                 return sdk.clients.setdefault(token_id, FakeClient(token_id, token_secret))
+
+            @staticmethod
+            def verify(server_url, credentials):
+                token_id, _ = credentials
+                sdk.verify_calls.append((server_url, credentials))
+                if token_id in sdk.verify_errors:
+                    raise RuntimeError(sdk.verify_errors[token_id])
 
         class Sandbox:
             @staticmethod
@@ -339,9 +365,19 @@ class FakeSDK:
             @staticmethod
             def from_context(*, client=None):
                 sdk.workspace_clients.append(client)
+                token_id = getattr(client, "token_id", None)
+                name = sdk.workspace_names.get(token_id, token_id)
+
+                def summary():
+                    if token_id in sdk.billing_errors:
+                        raise RuntimeError(sdk.billing_errors[token_id])
+                    return sdk.billing_summaries.get(token_id, FakeBillingSummary())
 
                 class _W:
-                    billing = type("B", (), {"rates": staticmethod(lambda: dict(sdk.rates_value))})
+                    pass
+                _W.name = name
+                _W.billing = type("B", (), {"rates": staticmethod(lambda: dict(sdk.rates_value)),
+                                            "summary": staticmethod(summary)})
                 return _W()
 
         class Types:
