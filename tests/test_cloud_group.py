@@ -10,12 +10,9 @@ from pasar.models import Attempt, JobSpec
 from tests.fakes import FakeClock
 
 
-def _target(name, monthly, daily=None, owner="", max_running=2):
-    return CloudTarget(
-        name=name, provider=name,
-        daily_budget=daily if daily is not None else monthly,
-        monthly_budget=monthly, owner=owner, max_running=max_running,
-    )
+def _target(name, monthly, owner="", max_running=2):
+    return CloudTarget(name=name, provider=name, daily_budget=monthly, monthly_budget=monthly,
+                       owner=owner, max_running=max_running)
 
 
 def _spec():
@@ -37,12 +34,13 @@ def ledger(store, clock):
     return Ledger(store, clock)
 
 
-def _run(store, ledger, clock, target, estimated, attempt=1):
-    """Record a running attempt against `target`, with a real job and attempt behind it so
-    `committed()`/`settled_month()` see it as genuinely open. Returns the job id."""
+def _run(store, ledger, clock, target, estimated):
+    """Record a running attempt (always the job's first) against `target`, with a real job and
+    attempt behind it so `committed()`/`settled_month()` see it as genuinely open. Returns the
+    job id."""
     job_id = store.insert_job(_spec(), 1000, clock(), None)
-    store.insert_attempt(Attempt(job_id, attempt, f"cloud:{target}:sb-{job_id}", clock()))
-    ledger.record(target, job_id, attempt, estimated)
+    store.insert_attempt(Attempt(job_id, 1, f"cloud:{target}:sb-{job_id}", clock()))
+    ledger.record(target, job_id, 1, estimated)
     return job_id
 
 

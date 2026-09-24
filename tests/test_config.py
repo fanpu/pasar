@@ -280,16 +280,34 @@ def test_a_groups_members_must_share_a_provider(tmp_path):
         """)
 
 
-def test_a_group_named_after_something_that_is_not_a_provider_fails_clearly(tmp_path):
-    """A group's provider defaults to the group's own name; when nobody sets `provider =`
-    explicitly and that name is not a real provider, loading must say so plainly rather than
-    silently building a target for a provider that does not exist."""
-    with pytest.raises(ValueError, match="group 'burst' defaults to unknown provider 'burst'"):
-        _write(tmp_path, """
-            [clouds.a]
-            group = "burst"
-            budget = { monthly = 30.0 }
-            [clouds.b]
-            group = "burst"
-            budget = { monthly = 30.0 }
-        """)
+def test_a_group_named_after_something_that_is_not_a_provider_still_loads(tmp_path):
+    """A group's provider defaults to the group's own name, and that name is not always a real
+    provider pasar has — but that is a cloud-only mistake, and load_config must not take the
+    whole daemon, local GPU scheduling included, down over it. `build_providers` is where this
+    is caught and named (see test_cloud_providers.py); loading only has to mark the target so
+    that later warning can say where the provider name came from."""
+    cfg = _write(tmp_path, """
+        [clouds.a]
+        group = "burst"
+        budget = { monthly = 30.0 }
+        [clouds.b]
+        group = "burst"
+        budget = { monthly = 30.0 }
+    """)
+    assert cfg.clouds["a"].provider == "burst" and cfg.clouds["a"].provider_from_group
+    assert cfg.clouds["b"].provider == "burst" and cfg.clouds["b"].provider_from_group
+
+
+def test_provider_from_group_is_false_once_provider_is_set_explicitly(tmp_path):
+    cfg = _write(tmp_path, """
+        [clouds.a]
+        group = "burst"
+        provider = "modal"
+        budget = { monthly = 30.0 }
+    """)
+    assert cfg.clouds["a"].provider == "modal" and not cfg.clouds["a"].provider_from_group
+
+
+def test_provider_from_group_is_false_without_a_group(tmp_path):
+    cfg = _write(tmp_path, "[clouds.solo]\nbudget = { monthly = 5.0 }\n")
+    assert cfg.clouds["solo"].provider == "solo" and not cfg.clouds["solo"].provider_from_group

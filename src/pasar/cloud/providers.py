@@ -37,8 +37,18 @@ def build_providers(cfg: Config, data_dir: Path) -> dict[str, object]:
     for name, target in cfg.clouds.items():
         factory = _FACTORIES.get(target.provider)
         if factory is None:
-            log.warning("cloud target %s asks for provider %r, which pasar does not have; "
-                        "jobs cannot be submitted to it", name, target.provider)
+            if target.provider_from_group:
+                # Nobody set `provider =` on any member, so the group's own name stood in for
+                # it — and that name is not a provider pasar has. Say exactly what to change,
+                # since "provider %r" alone would point at the group name, not the fix.
+                known = ", ".join(sorted(_FACTORIES)) or "a real provider"
+                log.warning("cloud target %s inherited provider %r from group %r, which pasar "
+                            "does not have; jobs cannot be submitted to it — set provider = on "
+                            "every member of group %r (e.g. %s)", name, target.provider,
+                            target.group, target.group, known)
+            else:
+                log.warning("cloud target %s asks for provider %r, which pasar does not have; "
+                            "jobs cannot be submitted to it", name, target.provider)
             continue
         try:
             providers[name] = factory(target, Path(data_dir) / "cloud" / name)

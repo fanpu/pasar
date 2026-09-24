@@ -1,18 +1,16 @@
 """Which of several interchangeable accounts a cloud job should go to.
 
 A group's members differ only in whose credit pays and how much of it is left, so the choice is
-about money and nothing else. It is made against the same ledger the budget gate reads, so an
-account this picks is one the gate will also let the job launch on.
+about money and nothing else. It is made against the same ledger the budget gate reads, but only
+checks the monthly budget — the gate also checks the daily one, so it can still refuse the
+account this module picks.
 """
 
-import logging
 from collections.abc import Callable
 from dataclasses import dataclass
 
 from pasar.cloud.cost import Ledger
 from pasar.config import CloudTarget
-
-log = logging.getLogger(__name__)
 
 
 def headroom(ledger: Ledger, target: CloudTarget) -> float:
@@ -25,12 +23,18 @@ def headroom(ledger: Ledger, target: CloudTarget) -> float:
 
 def choose(members: list[CloudTarget], ledger: Ledger, need: float,
            running: Callable[[str], int]) -> CloudTarget | None:
-    """The fullest account that can still pay for the whole run, or None if none can.
+    """The fullest account, by monthly headroom, that can still pay for the whole run, or None if
+    none can. Only the monthly budget is checked; the launch-time gate also checks the daily one,
+    so it may still refuse the account this returns.
 
     Packing rather than spreading: each account has its own image cache and its own volumes, so
     a job moved to a fresh account pays a fresh environment build out of credit meant for
     compute, and a job that pauses can only ever resume on the account that holds its
     checkpoint. Concentrating the work keeps both of those cheap.
+
+    `running` must return an int for every member of `members`, not just the ones it expects to
+    matter — `choose` calls it on every account that still fits before it can know which of them
+    a free slot will decide between.
     """
     fits = [t for t in members if headroom(ledger, t) >= need]
     if not fits:

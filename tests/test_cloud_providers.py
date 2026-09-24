@@ -28,6 +28,21 @@ def test_an_unknown_provider_is_skipped_not_fatal(tmp_path, caplog):
     assert "skypilot" in caplog.text
 
 
+def test_a_groups_inherited_unknown_provider_is_skipped_with_a_named_hint(tmp_path, caplog):
+    """A group named after something that is not a real provider only shows up once nobody sets
+    `provider =` on any member: config loading lets it through — a cloud-only typo must not take
+    pasard's local GPU scheduling down with it — so it falls to building providers to say so,
+    naming the group and the fix rather than just the unhelpful inherited provider name."""
+    a = CloudTarget(name="a", provider="burst", daily_budget=5.0, monthly_budget=50.0,
+                     group="burst", provider_from_group=True)
+    b = CloudTarget(name="b", provider="burst", daily_budget=5.0, monthly_budget=50.0,
+                     group="burst", provider_from_group=True)
+    providers = build_providers(_cfg(a=a, b=b), tmp_path)
+    assert providers == {}
+    assert "group 'burst'" in caplog.text
+    assert "set provider =" in caplog.text
+
+
 def test_a_provider_that_will_not_import_is_skipped_with_a_usable_message(tmp_path, caplog,
                                                                          monkeypatch):
     monkeypatch.setattr("pasar.cloud.providers._MODAL", _raising)
