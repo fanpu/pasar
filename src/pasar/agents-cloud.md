@@ -253,9 +253,10 @@ run at once.
 
 OWNER says whose credit a target spends; GROUP is the group (if any) it belongs to. A job's own
 `cloud` object carries the same two fields, so a job detail view can say whose account it ran on.
-MONTH ends in `(budget exhausted)` once pasar's own budget for the target is spent, and in
-`(credit exhausted)` once the provider's own books say the account's free allowance is gone (only
-where pasard has read them). In `--json`, a target's `budget_exhausted` is the first,
+TODAY or MONTH ends in `(budget exhausted)` once pasar's own daily or monthly budget for the
+target is spent, and MONTH in `(credit exhausted)` once the provider's own books say the account's
+free allowance is gone (only where pasard has read them). In `--json`, a target's
+`budget_exhausted` is the first (either budget),
 `credit_exhausted`, `credit_used` and `credit_as_of` the second; the credit fields are `null`
 when pasard doesn't know.
 

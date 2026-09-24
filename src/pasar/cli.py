@@ -270,8 +270,12 @@ def print_cloud(body: dict) -> None:
         for t in targets:
             today = f"{_money(t['spent_today'])} / {_money(t['daily_budget'])}"
             month = f"{_money(t['spent_month'])} / {_money(t['monthly_budget'])}"
-            # pasar's own budget, then the provider's own books where pasard has read them.
-            if t.get("budget_exhausted"):
+            # pasar's own budgets, each under its own column (the lane gates on both, and
+            # `budget_exhausted` is whichever runs out first), then the provider's own books
+            # where pasard has read them.
+            if t["spent_today"] >= t["daily_budget"]:
+                today += " (budget exhausted)"
+            if t["spent_month"] >= t["monthly_budget"]:
                 month += " (budget exhausted)"
             if t.get("credit_exhausted"):
                 month += " (credit exhausted)"

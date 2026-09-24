@@ -402,6 +402,33 @@ def test_cloud_command_says_when_the_providers_own_books_say_credit_is_exhausted
     assert t["budget_exhausted"] is False
 
 
+def _cloud_row(client, capsys):
+    code, out = run(client, capsys, "cloud")
+    assert code == 0
+    header, row = out.out.splitlines()[:2]
+    today, month = header.index("TODAY"), header.index("MONTH")
+    return row[today:month], row[month:header.index("JOB CAP")]
+
+
+def test_cloud_command_puts_a_spent_daily_budget_under_today(client, capsys, cloud_daemon,
+                                                             cloud_cwd, monkeypatch):
+    """$50 spent today is all of the day's budget but a sixth of the month's."""
+    monkeypatch.chdir(cloud_cwd)
+    cloud_daemon.ledger.record("fake", 99, 1, estimated=50.0, billed=50.0)
+    today, month = _cloud_row(client, capsys)
+    assert "(budget exhausted)" in today and "exhausted" not in month
+
+
+def test_cloud_command_puts_a_spent_monthly_budget_under_month(client, capsys, cloud_daemon,
+                                                               cloud_cwd, monkeypatch):
+    monkeypatch.chdir(cloud_cwd)
+    cloud_daemon.cfg.clouds["fake"] = replace(cloud_daemon.cfg.clouds["fake"],
+                                              monthly_budget=40.0)
+    cloud_daemon.ledger.record("fake", 99, 1, estimated=45.0, billed=45.0)
+    today, month = _cloud_row(client, capsys)
+    assert "(budget exhausted)" in month and "exhausted" not in today
+
+
 def _write_cloud_config(tmp_path, monkeypatch, **kw):
     """A `~/.config/pasar/config.toml` with one `[clouds.modal-a]` block, for `pasar cloud
     check` -- which reads pasar's own config file directly, never the daemon."""
