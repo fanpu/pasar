@@ -300,6 +300,55 @@ def test_extending_refuses_to_exceed_max_cost(cloud_daemon, cloud_provider, clou
     assert cloud_provider.stopped == []
 
 
+def capped_and_lagging(daemon, cloud_provider, cloud_cwd, clock):
+    rate = hourly_rate(cloud_provider.rates(), "h100", 1)
+    job_id = start(daemon, cloud_cwd, max_cost=estimate(rate, 900) + 0.5)
+    lag_the_job(daemon, clock, job_id)
+    return job_id, rate
+
+
+def test_a_person_can_raise_max_cost_and_extend_in_one_step(cloud_daemon, cloud_provider,
+                                                            cloud_cwd, clock):
+    daemon = cloud_daemon
+    job_id, rate = capped_and_lagging(daemon, cloud_provider, cloud_cwd, clock)
+    old = daemon.job(job_id).spec.max_cost
+    with pytest.raises(Conflict, match="web UI"):  # the refusal says where it can be raised
+        daemon.approve(job_id, extend=True)
+    new = estimate(rate, 900 + 1100 * 1.1) + 0.5
+
+    job = daemon.approve(job_id, extend=True, max_cost=new)
+    assert job.spec.max_cost == pytest.approx(new)
+    assert daemon.store.approvals(job_id)[0]["max_cost"] > old
+    text = f"--max-cost raised from ${old:.2f} to ${new:.2f} by a person in the web UI"
+    assert [e["payload"]["text"] for e in daemon.store.events(job_id)
+            if e["kind"] == "max_cost_raised"] == [text]
+    assert any(e["text"] == f"job {job_id} {text}" for e in daemon.store.machine_events())
+
+
+def test_raising_max_cost_never_lowers_it_and_sticks_only_if_the_extension_does(
+        cloud_daemon, cloud_provider, cloud_cwd, clock):
+    daemon = cloud_daemon
+    job_id, _ = capped_and_lagging(daemon, cloud_provider, cloud_cwd, clock)
+    old = daemon.job(job_id).spec.max_cost
+    with pytest.raises(Conflict, match="never lowered"):
+        daemon.approve(job_id, extend=True, max_cost=old - 0.1)
+    with pytest.raises(Conflict, match="max-cost"):  # raised, but not far enough to cover it
+        daemon.approve(job_id, extend=True, max_cost=old + 0.1)
+    assert daemon.job(job_id).spec.max_cost == old
+    assert not [e for e in daemon.store.events(job_id) if e["kind"] == "max_cost_raised"]
+
+
+def test_raising_max_cost_cannot_reach_past_the_jobs_lifetime_cap(cloud_daemon, cloud_provider,
+                                                                  cloud_cwd, clock):
+    daemon = cloud_daemon
+    job_id, rate = capped_and_lagging(daemon, cloud_provider, cloud_cwd, clock)
+    daemon.cfg.clouds["fake"].max_job_cost = estimate(rate, 900) + 1.0
+    old = daemon.job(job_id).spec.max_cost
+    with pytest.raises(Conflict, match="max_job_cost"):
+        daemon.approve(job_id, extend=True, max_cost=estimate(rate, 900) + 5.0)
+    assert daemon.job(job_id).spec.max_cost == old
+
+
 def test_extending_refuses_to_exceed_the_jobs_lifetime_cap(cloud_daemon, cloud_provider,
                                                            cloud_cwd, clock):
     # The same refusal as --max-cost's, for the cap nobody passed on the command line: the

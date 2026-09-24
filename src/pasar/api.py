@@ -296,10 +296,11 @@ def create_app(daemon: Daemon, *, prom: Prometheus | None = None, wake=lambda: N
     # tells agents never to call this — a person is meant to see the price before it launches.
     # `extend=1` is the same verb aimed at a different job: a *running* attempt whose own pace
     # projects it past its approved run time (`daemon.needs_more_time`), raising its ceiling
-    # instead of admitting it to the queue. See `Daemon._extend`.
+    # instead of admitting it to the queue. See `Daemon._extend`. `max_cost` is the person
+    # raising the job's own --max-cost on the way (never lowering it, never past max_job_cost).
     @app.post("/api/jobs/{job_id}/approve")
-    async def approve(job_id: int, extend: bool = False):
-        job = daemon.approve(job_id, extend=extend)
+    async def approve(job_id: int, extend: bool = False, max_cost: float | None = None):
+        job = daemon.approve(job_id, extend=extend, max_cost=max_cost)
         wake()
         return view(job)
 

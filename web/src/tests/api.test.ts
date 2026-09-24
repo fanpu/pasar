@@ -65,6 +65,11 @@ describe("api", () => {
     expect(f.mock.calls[0][0]).toBe("/api/jobs/3/approve");
     expect(f.mock.calls[0][1].method).toBe("POST");
   });
+  it("sends a raised --max-cost as max_cost", async () => {
+    const f = mockFetch(200, {});
+    await approve(3, true, 6.95);
+    expect(f.mock.calls[0][0]).toBe("/api/jobs/3/approve?extend=1&max_cost=6.95");
+  });
   it("approves with extend=1 to raise a running job's ceiling", async () => {
     const f = mockFetch(200, { id: 3, state: "running" });
     await approve(3, true);

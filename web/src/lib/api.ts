@@ -75,9 +75,11 @@ export function cancelJob(id: number): Promise<JobView> {
   return request("POST", `/api/jobs/${id}/cancel`);
 }
 /** Approves a cloud job's cost so it can start (or resume) — or, with `extend`, raises a
- * *running* job's approved ceiling to cover what `needs_more_time` says it now needs. */
-export function approve(id: number, extend = false): Promise<JobView> {
-  return request("POST", `/api/jobs/${id}/approve${extend ? "?extend=1" : ""}`);
+ * *running* job's approved ceiling to cover what `needs_more_time` says it now needs. `maxCost`
+ * raises the job's own --max-cost on the way (a person's call only; never lowers it). */
+export function approve(id: number, extend = false, maxCost?: number): Promise<JobView> {
+  const q = [extend ? "extend=1" : "", maxCost === undefined ? "" : `max_cost=${maxCost}`].filter(Boolean);
+  return request("POST", `/api/jobs/${id}/approve${q.length ? `?${q.join("&")}` : ""}`);
 }
 export function reject(id: number): Promise<JobView> {
   return request("POST", `/api/jobs/${id}/reject`);

@@ -691,8 +691,9 @@ class Daemon:
                 raise Conflict(
                     f"job {job_id} would need ${new_cost:.2f} to cover its current pace, above "
                     f"the ${job.spec.max_cost:.2f} --max-cost it was submitted with; that cap is "
-                    "what is binding, so it cannot be extended past it — submit it again with a "
-                    "higher --max-cost if it should be allowed to run longer")
+                    "what is binding, so it cannot be extended past it — a person can raise it in the "
+                    "web UI's dialog for this job (up to what max_job_cost leaves), or submit it "
+                    "again with a higher --max-cost if it should be allowed to run longer")
             raise Conflict(
                 f"job {job_id} would need ${new_cost:.2f} to cover its current pace, but only "
                 f"${self._job_left(job, target, att.n):.2f} of the ${target.max_job_cost:.2f} "
@@ -935,16 +936,69 @@ class Daemon:
                 + "\n".join(lines)
                 + "\nsubmit to one by name with --on <account> to queue for it anyway")
 
-    def approve(self, job_id: int, extend: bool = False) -> Job:
+    def approve(self, job_id: int, extend: bool = False,
+                max_cost: float | None = None) -> Job:
         """Let one attempt run, at today's price. Approval is per attempt: a paused or reclaimed
         job comes back here rather than straight to the queue. The row records the price only —
         the estimate and the ceiling the launch is held to — because pasard has no
         authentication and there is nobody to name as the approver.
 
         `extend=True` is a different action on the same verb: it raises the *running* attempt's
-        ceiling instead of approving a new one. See `_extend`."""
-        if extend:
-            return self._extend(job_id)
+        ceiling instead of approving a new one. See `_extend`.
+
+        `max_cost` is a person, in the web UI's dialog, raising the job's own `--max-cost` on
+        the way through (`_raise_max_cost`). It only ever raises it, never past what the job's
+        lifetime cap (`max_job_cost`) leaves, and it sticks only if the approval or extension it
+        rides on goes through; every other check is exactly as without it."""
+        if max_cost is None:
+            return self._extend(job_id) if extend else self._approve(job_id)
+        job = self.job(job_id)
+        old = self._raise_max_cost(job, max_cost, extend)
+        self.store.update_job(job_id, spec=replace(job.spec, max_cost=max_cost))
+        try:
+            result = self._extend(job_id) if extend else self._approve(job_id)
+        except BaseException:
+            self.store.update_job(job_id, spec=job.spec)
+            raise
+        if max_cost > old + PRICE_TOLERANCE:
+            text = (f"--max-cost raised from ${old:.2f} to ${max_cost:.2f} by a person in the "
+                    "web UI")
+            now = self.clock()
+            att = self.store.current_attempt(job_id)
+            n = att.n if extend and att is not None else self._pricing_attempt(result)
+            self.store.add_event(job_id, n, now, "max_cost_raised", None,
+                                 {"from": old, "to": max_cost, "text": text})
+            self.store.add_machine_event(now, "max_cost_raised", f"job {job_id} {text}")
+        return self.job(job_id)
+
+    def _raise_max_cost(self, job: Job, max_cost: float, extend: bool) -> float:
+        """Check a person's raise of `job`'s `--max-cost` to `max_cost`, returning the old figure.
+        Refused if the job has no `--max-cost` (nothing to raise: its lifetime cap is what binds,
+        and that is the user's, in pasard's config), if it would lower it, or if it would let one
+        attempt spend past what the job's lifetime cap leaves (`_job_left`)."""
+        if not self._is_cloud(job):
+            raise Conflict(f"job {job.id} is not a cloud job, so it has no --max-cost")
+        old = job.spec.max_cost
+        if old is None:
+            raise Conflict(f"job {job.id} was submitted without --max-cost, so there is none to "
+                           "raise; what bounds it is max_job_cost, set in pasard's config")
+        if not max_cost >= old - PRICE_TOLERANCE:
+            raise Conflict(f"--max-cost ${max_cost:.2f} is below job {job.id}'s current "
+                           f"${old:.2f}; it can only be raised here, never lowered")
+        target = self.cfg.clouds.get(job.spec.target)
+        if target is None:
+            raise Conflict(f"job {job.id} runs on {job.spec.target}, which is not configured")
+        att = self.store.current_attempt(job.id)
+        n = att.n if extend and att is not None else None
+        left = self._job_left(job, target, n)
+        if max_cost > left + PRICE_TOLERANCE:
+            raise Conflict(
+                f"--max-cost ${max_cost:.2f} is more than the ${left:.2f} left for job {job.id} "
+                f"under the ${target.max_job_cost:.2f} one job may spend on {target.name} "
+                "(max_job_cost); that limit is raised by the user, in pasard's config, not here")
+        return old
+
+    def _approve(self, job_id: int) -> Job:
         job = self.job(job_id)
         if job.state != State.AWAITING:
             raise Conflict(f"job {job_id} is {job.state}, not awaiting approval")

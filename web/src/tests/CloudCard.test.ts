@@ -309,6 +309,26 @@ describe("ApproveDialog", () => {
     expect(api.approve).not.toHaveBeenCalled();
   });
 
+  it("offers to raise a capped job's --max-cost to what its pace needs, and sends that figure", async () => {
+    vi.mocked(api.approve).mockResolvedValue(needsTime[0]);
+    const job = { ...needsTime[0], cloud: { ...needsTime[0].cloud!, user_capped: true, max_cost: 6, job_cap: 10, job_spent: 6, approved_seconds: 3600, needs_more_time: 600 } };
+    render(ApproveDialog, { props: { job, target: cloudTarget(), extend: true, onclose: () => {} } });
+    expect(screen.getByText(/Raise this job's --max-cost to/)).toBeInTheDocument();
+    expect(screen.getByRole("spinbutton")).toHaveValue(7.1); // 6 × (3600 + 600 × 1.1) / 3600
+    await fireEvent.click(screen.getByRole("button", { name: "Raise to $7.10 · give more time" }));
+    await waitFor(() => expect(api.approve).toHaveBeenCalledWith(job.id, true, 7.1));
+  });
+
+  it("shows the raise field once the server says --max-cost is what binds", async () => {
+    vi.mocked(api.approve).mockRejectedValueOnce(new ApiError(409, "job 212 would need $6.95 to cover its current pace, above the $6.00 --max-cost it was submitted with"));
+    const job = { ...needsTime[0], cloud: { ...needsTime[0].cloud!, user_capped: false, max_cost: 6, job_cap: 10, job_spent: 6 } };
+    render(ApproveDialog, { props: { job, target: cloudTarget(), extend: true, onclose: () => {} } });
+    expect(screen.queryByRole("spinbutton")).toBeNull();
+    await fireEvent.click(screen.getByRole("button", { name: /^Give more time/ }));
+    await fireEvent.click(await screen.findByRole("button", { name: "Raise to $6.95 · give more time" }));
+    await waitFor(() => expect(api.approve).toHaveBeenLastCalledWith(job.id, true, 6.95));
+  });
+
   it("names the submitter's own --max-cost when that is what shortens the run", () => {
     const capped = { ...awaitingFresh, cloud: { ...awaitingFresh.cloud!, user_capped: true, approved_seconds: 3600, full_seconds: 10800 } };
     render(ApproveDialog, { props: { job: capped, target: cloudTarget(), onclose: () => {} } });

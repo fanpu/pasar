@@ -341,6 +341,13 @@ def test_approve_then_reject_endpoints(client, cloud_daemon, cloud_cwd):
     assert r.status_code == 409
 
 
+def test_approve_passes_max_cost_through(client, cloud_daemon, cloud_cwd):
+    job_id = submit_cloud(client, cloud_cwd).json()["id"]  # submitted without --max-cost
+    r = client.post(f"/api/jobs/{job_id}/approve?max_cost=5")
+    assert r.status_code == 409 and "without --max-cost" in r.json()["detail"]
+    assert cloud_daemon.job(job_id).state == "awaiting"
+
+
 def test_submit_rejects_an_unconfigured_target(client, daemon, cloud_cwd):
     # daemon (not cloud_daemon) has no cloud target at all: submit fails outright, before
     # anything exists to approve.

@@ -25,8 +25,33 @@
   const gpu = $derived(gpuOn(target, c.gpu));
   const capLeft = $derived(c.job_cap === null ? null : Math.max(0, c.job_cap - c.job_spent));
 
+  // Raising the job's own --max-cost, when that is what binds (or the server said so). The most
+  // it can go to is what the job cap leaves this attempt: an extension's own reservation is
+  // already in `job_spent`, so it counts back in.
+  let serverNeeds = $state<number | null>(null);
+  let edited = $state<number | null>(null);
+  const raiseShown = $derived(c.max_cost !== null && (c.user_capped || serverNeeds !== null));
+  const raiseMax = $derived(capLeft === null ? null : capLeft + (extend ? (c.max_cost ?? 0) : 0));
+  const suggested = $derived.by(() => {
+    if (c.max_cost === null) return null;
+    let need = serverNeeds;
+    if (need === null && c.approved_seconds) {
+      const secs = extend ? (c.needs_more_time === null ? null : c.approved_seconds + c.needs_more_time * 1.1) : c.full_seconds;
+      if (secs !== null) need = (c.max_cost * secs) / c.approved_seconds;
+    }
+    if (need === null) return c.max_cost;
+    need = Math.ceil(need * 100) / 100;
+    return Math.max(c.max_cost, raiseMax === null ? need : Math.min(need, Math.floor(raiseMax * 100) / 100));
+  });
+  const raiseTo = $derived(edited ?? suggested);
+  const raise = $derived.by(() => {
+    if (!raiseShown || raiseTo === null || c.max_cost === null || !(raiseTo > c.max_cost + 0.005)) return null;
+    return raiseMax === null ? raiseTo : Math.min(raiseTo, raiseMax);
+  });
+
   const title = $derived(extend ? `Give #${job.id} ${job.name} more time?` : `Approve #${job.id} ${job.name}?`);
   const label = $derived.by(() => {
+    if (raise !== null) return `Raise to ${money(raise)} · ${extend ? "give more time" : "approve"}`;
     // `job_spent` already holds this attempt's reservation, so what is left under the cap is the
     // most an extension can add; without a cap there's no ceiling to show, and no extension.
     if (extend) return capLeft === null ? "Give more time" : `Give more time · up to ${money(capLeft)} more`;
@@ -54,12 +79,17 @@
     error = null;
     try {
       // The toast says what the daemon agreed to, from its answer, not what this dialog showed.
-      const after = await api.approve(job.id, extend);
+      const after = raise === null ? await api.approve(job.id, extend) : await api.approve(job.id, extend, raise);
       const ceiling = money(after.cloud?.max_cost);
       ondone(extend ? `#${job.id} got more time · up to ${ceiling}` : `#${job.id} approved · up to ${ceiling}`);
       onclose();
     } catch (e) {
       error = e instanceof Error ? e.message : String(e);
+      const m = /would need \$([\d.]+).*--max-cost/.exec(error);
+      if (m) {
+        serverNeeds = parseFloat(m[1]);
+        edited = null;
+      }
     } finally {
       busy = false;
     }
@@ -112,6 +142,14 @@
     <p class="mnote">Results it saves come home to pasar's pull directory when it finishes.</p>
   {/if}
 
+  {#if raiseShown}
+    <label class="raise">
+      Raise this job's --max-cost to $<input type="number" step="0.01" min={c.max_cost} max={raiseMax}
+        value={raiseTo} oninput={(e) => { const v = parseFloat(e.currentTarget.value); edited = Number.isFinite(v) ? v : null; }} />
+      {#if raiseMax !== null}<span class="dim">(the job cap allows up to {money(raiseMax)})</span>{/if}
+    </label>
+  {/if}
+
   {#if gone && !busy}<p class="err" role="status">{gone}</p>{/if}
   {#if error}<p class="err" role="alert">{error}</p>{/if}
   <div class="macts">
@@ -130,5 +168,8 @@
   .macts .btn { flex: 1; }
   /* The worst-case figure reads as one phrase: give it the room rather than wrap it. */
   .macts .btn.primary { flex: 2; white-space: nowrap; }
+  .raise { display: block; font-size: 12.5px; font-weight: 800; margin: 10px 0 0; }
+  .raise input { width: 6em; font: inherit; }
+  .raise .dim { font-weight: 700; color: var(--ink-2); }
   .btn:disabled { opacity: .6; cursor: default; }
 </style>
