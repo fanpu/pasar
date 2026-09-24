@@ -2490,6 +2490,19 @@ def test_persist_says_nothing_is_at_the_provider_for_a_job_that_never_launched(c
     assert view["remote_bytes"] == 0 and view["sweeps_at"] is None and view["files"] is None
 
 
+def test_persist_says_nothing_is_at_the_provider_for_a_job_that_failed_before_launching(
+        cloud, repo):
+    # A launch_error attempt is recorded (it counts against retries) but never started a
+    # sandbox, so it never had anything at the provider to pull or sweep, same as having no
+    # attempt at all.
+    daemon, provider = cloud
+    provider.fail_launch = "no capacity"
+    job_id = start(daemon, repo)
+    assert daemon.job(job_id).reason == "launch_error"
+    view = persist_of(daemon, job_id)
+    assert view["remote_bytes"] == 0 and view["sweeps_at"] is None and view["files"] is None
+
+
 def test_persist_still_waits_on_a_paused_job_rejected_at_its_reapproval(cloud, repo):
     # A paused job's checkpoint is still at the provider: rejected, it is results to pull.
     daemon, provider = cloud

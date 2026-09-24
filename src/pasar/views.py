@@ -100,7 +100,7 @@ def persist_view(daemon, job: Job) -> dict | None:
     deleted (0 bytes when a pull had already emptied it). `sweeps_at` is when that sweep may
     delete what is left — `cloud_retention_days` after the job finished — and is `None` once
     nothing is (the landed pull deleted the remote copy, or the sweep already ran, or the job
-    never launched and so never had anything there).
+    never had a running attempt to leave anything at the provider).
     `last_error` is the latest pull's own error, if it had one: why a pull was skipped or failed,
     or that a verified pull could not then delete the remote copy."""
     if job.state not in TERMINAL:
@@ -112,8 +112,12 @@ def persist_view(daemon, job: Job) -> dict | None:
     measured = next((p for p in reversed(pulls) if p["remote_bytes"] is not None), None)
     swept = daemon.store.cloud_swept(job.id)
     remote_deleted = bool(landed.get("remote_deleted"))
-    # A job rejected or cancelled before it ever launched never had a persist dir at all.
-    never_ran = daemon.store.current_attempt(job.id) is None
+    # A job with no attempt at all (rejected or cancelled straight from awaiting) never had a
+    # persist dir. Neither did one whose every attempt failed before it ever started a sandbox
+    # (`launch_error`: a bad --cwd, a systemd error) — such an attempt is recorded (it counts
+    # against retries) but never actually ran, so it never had anything at the provider either.
+    attempts = daemon.store.attempts(job.id)
+    never_ran = not attempts or all(a.reason == "launch_error" for a in attempts)
     gone = remote_deleted or swept is not None or never_ran
     remote_bytes = 0 if gone else measured and measured["remote_bytes"]
     return {
