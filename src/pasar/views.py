@@ -170,6 +170,8 @@ def cloud_view(daemon, job: Job, pace=_UNKNOWN) -> dict | None:
     while it's the current entry in `daemon.cloud_units`); pasar doesn't persist it, so it reads
     as `None` once an attempt has ended, even if the provider's own console still works.
 
+    `blocked` is why an approved job is still queued rather than launched, if the last pass said.
+
     `persist` is what the job left behind once it finished: see `persist_view`."""
     if job.spec.target == LOCAL:
         return None
@@ -189,6 +191,8 @@ def cloud_view(daemon, job: Job, pace=_UNKNOWN) -> dict | None:
     approved_seconds, full_seconds = window if window else (None, None)
     target = daemon.cfg.clouds.get(job.spec.target)
     unit = daemon.cloud_units.get(job.id)
+    decision = daemon.cloud_decisions.get(job.spec.target)
+    blocked = decision.blocked.get(job.id) if job.state == State.QUEUED and decision else None
     return {
         "target": job.spec.target,
         "gpu": job.spec.gpu,
@@ -208,6 +212,10 @@ def cloud_view(daemon, job: Job, pace=_UNKNOWN) -> dict | None:
         # — there is nothing to reset by hand. A caller that has already asked (and filtered on
         # the answer) passes it in rather than paying for the same handful of queries twice.
         "needs_more_time": daemon.needs_more_time(job) if pace is _UNKNOWN else pace,
+        # What keeps an approved, queued job from launching on the last scheduling pass:
+        # "budget" or "concurrency" (the target's `max_running`); `None` for any other job, or
+        # one the last pass would have launched. In memory only, like the pass itself.
+        "blocked": blocked,
         "persist": persist_view(daemon, job),
     }
 

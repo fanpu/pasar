@@ -762,6 +762,18 @@ def test_concurrency_cap_holds_the_rest_of_the_queue(make_cloud, repo):
     assert len(provider.boxes) == 1
 
 
+def test_a_queued_cloud_job_says_what_holds_it_back(make_cloud, repo):
+    # The cloud card shows an approved job still waiting to launch, and why, from this.
+    daemon, _ = make_cloud(max_running=1)
+    first = start(daemon, repo)
+    second = daemon.submit(cloud_spec(repo))
+    assert cloud_view(daemon, daemon.job(second.id))["blocked"] is None  # awaiting: not queued yet
+    daemon.approve(second.id)
+    daemon.tick()
+    assert cloud_view(daemon, daemon.job(second.id))["blocked"] == "concurrency"
+    assert cloud_view(daemon, daemon.job(first))["blocked"] is None  # running
+
+
 # ---- startup and strays
 
 def test_reconcile_adopts_running_cloud_attempts(make_cloud, repo):
