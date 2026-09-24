@@ -195,11 +195,18 @@ describe("CloudCard", () => {
 });
 
 describe("ApproveDialog", () => {
-  it("says plainly when the job can't be priced, with no dollar figure on the button", () => {
+  beforeEach(() => {
+    vi.mocked(api.approve).mockReset();
+  });
+
+  it("won't approve a job it can't price: no one may approve a worst case they never saw", async () => {
     const unpriced = { ...awaitingFresh, cloud: { ...awaitingFresh.cloud!, estimated_cost: null, max_cost: null, approved_seconds: null } };
     render(ApproveDialog, { props: { job: unpriced, target: cloudTarget(), onclose: () => {} } });
     expect(screen.getByText("can't be priced right now")).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Approve" })).toBeInTheDocument();
+    const confirm = screen.getByRole("button", { name: "Approve" });
+    expect(confirm).toBeDisabled();
+    await fireEvent.click(confirm);
+    expect(api.approve).not.toHaveBeenCalled();
   });
 
   it("leaves the account out when the target is no longer listed", () => {

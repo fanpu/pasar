@@ -28,10 +28,15 @@
     return c.max_cost === null ? "Approve" : `Approve · up to ${money(c.max_cost)}`;
   });
 
+  // Nothing may be approved without its worst case on the button: a price that couldn't be had
+  // (the rate cache's last fetch failed, say) would otherwise approve at one nobody saw.
+  const unpriced = $derived(!extend && c.max_cost === null);
+
   let busy = $state(false);
   let error = $state<string | null>(null);
 
   async function confirm(): Promise<void> {
+    if (busy || unpriced) return;
     busy = true;
     error = null;
     try {
@@ -95,7 +100,7 @@
   {#if error}<p class="err" role="alert">{error}</p>{/if}
   <div class="macts">
     <button class="btn" type="button" disabled={busy} onclick={onclose}>Cancel</button>
-    <button class="btn primary" type="button" disabled={busy} onclick={confirm}>{label}</button>
+    <button class="btn primary" type="button" disabled={busy || unpriced} onclick={confirm}>{label}</button>
   </div>
 </Modal>
 
