@@ -3470,7 +3470,7 @@ def refuse_launches_on(daemon, name, why=SPEND_LIMIT):
 
 
 def approved_group_job(daemon, repo, **kw):
-    job = daemon.submit(cloud_spec(repo, target="modal", est_runtime=600, **kw))
+    job = daemon.submit(cloud_spec(repo, **{"target": "modal", "est_runtime": 600, **kw}))
     daemon.approve(job.id)
     return job
 
@@ -3618,6 +3618,25 @@ def test_a_refused_job_whose_sibling_is_out_of_budget_says_so(grouped, repo):
     assert after.state is State.FAILED
     assert "spend limit" in after.summary
     assert f"{other}: only $0.10 left of $30.00 this month" in after.summary
+
+
+def test_a_refused_job_counts_the_jobs_already_waiting_on_its_sibling(grouped, repo):
+    """The same money `_rebalance` counts: modal-b has $30 by its ledger, but three jobs named to
+    it are waiting for three times $7.92 of that, which leaves too little for this one's $7.92."""
+    d = grouped
+    for _ in range(3):
+        d.submit(cloud_spec(repo, target="modal-b", est_runtime=3600))
+    job = approved_group_job(d, repo, est_runtime=3600)
+    assert job.spec.target == "modal-a"
+    refuse_launches_on(d, "modal-a")
+    for _ in range(3):
+        d.tick()
+    after = d.job(job.id)
+    assert after.spec.target == "modal-a" and after.state is State.FAILED
+    left = 30.0 - 3 * estimate(H100_RATE, 5400)
+    assert (f"modal-b: only ${left:.2f} left of $30.00 this month after the jobs waiting on it"
+            in after.summary)
+    assert moves(d) == []
 
 
 def test_a_refused_job_whose_sibling_is_refusing_too_says_so(grouped, repo):

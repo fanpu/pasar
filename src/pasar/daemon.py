@@ -2341,8 +2341,11 @@ class Daemon:
         """The account `_resolve_group` would pick for `job` among `members`, and why each of
         the others could not take it (`"name: why"`), which is what a job that ends up with none
         tells whoever reads its summary. Held to the same rules as a submit, except that the job
-        exists by now, so each account is asked for its real ceiling for it (`_ceiling`)."""
+        exists by now, so each account is asked for its real ceiling for it (`_ceiling`), and
+        the money jobs already waiting on each account will need is counted, as `_rebalance`
+        counts it (`_waiting_claims`)."""
         skipped: dict[str, str] = {}
+        claimed = self._waiting_claims(exclude=job.id)
         priced = self._estimates(job.spec, members)
         fits = []
         for t in members:
@@ -2364,14 +2367,30 @@ class Daemon:
             fits = []
         if fits:
             chosen = choose(fits, self.ledger, need, self._running_on,
-                            credit=self._credit_named, health=self._health)
+                            credit=self._credit_named, claimed=claimed, health=self._health)
         if chosen is None:
-            for r in shortfall(fits, self.ledger, credit=self._credit_named):
-                credit = self._credit_named(r.name)
-                skipped[r.name] = ("out of credit, its provider says"
-                                   if credit is not None and credit.exhausted
-                                   else f"only ${r.left:.2f} left of ${r.budget:.2f} this month")
+            for t in fits:
+                credit = self._credit_named(t.name)
+                if credit is not None and credit.exhausted:
+                    skipped[t.name] = "out of credit, its provider says"
+                    continue
+                waiting = claimed.get(t.name, 0.0)
+                left = headroom(self.ledger, t, credit, waiting)
+                skipped[t.name] = (f"only ${left:.2f} left of ${t.monthly_budget:.2f} this month"
+                                   + (" after the jobs waiting on it" if waiting else ""))
         return chosen, [f"{t.name}: {skipped[t.name]}" for t in members if t.name in skipped]
+
+    def _waiting_claims(self, exclude: int) -> dict[str, float]:
+        """Dollars the cloud jobs waiting on each account (queued or awaiting, other than job
+        `exclude`) will need: the money `_rebalance` counts as already spoken for, which neither
+        the ledger nor the provider's books can see yet."""
+        claimed: dict[str, float] = {}
+        for j in self.store.list_jobs([State.QUEUED, State.AWAITING]):
+            target = self.cfg.clouds.get(j.spec.target)
+            if j.id == exclude or target is None or not self._is_cloud(j):
+                continue
+            claimed[target.name] = claimed.get(target.name, 0.0) + self._need(target, j)
+        return claimed
 
     def _launch(self, job: Job, now: float) -> None:
         prior = self.store.attempts(job.id)
