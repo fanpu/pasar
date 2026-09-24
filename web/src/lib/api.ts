@@ -75,9 +75,15 @@ export function cancelJob(id: number): Promise<JobView> {
   return request("POST", `/api/jobs/${id}/cancel`);
 }
 /** Approves a cloud job's cost so it can start (or resume) — or, with `extend`, raises a
- * *running* job's approved ceiling to cover what `needs_more_time` says it now needs. */
-export function approve(id: number, extend = false): Promise<JobView> {
-  return request("POST", `/api/jobs/${id}/approve${extend ? "?extend=1" : ""}`);
+ * *running* job's approved ceiling to cover what `needs_more_time` says it now needs. `target`
+ * is the account the person was shown: a group job can move to another before it launches, and
+ * the daemon refuses (409) rather than spend a different person's credit on this yes. */
+export function approve(id: number, extend = false, target?: string): Promise<JobView> {
+  const q = new URLSearchParams();
+  if (extend) q.set("extend", "1");
+  if (target !== undefined) q.set("target", target);
+  const qs = q.toString();
+  return request("POST", `/api/jobs/${id}/approve${qs ? `?${qs}` : ""}`);
 }
 export function reject(id: number): Promise<JobView> {
   return request("POST", `/api/jobs/${id}/reject`);

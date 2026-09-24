@@ -858,14 +858,26 @@ class Daemon:
                 + "\n".join(lines)
                 + "\nsubmit to one by name with --on <account> to queue for it anyway")
 
-    def approve(self, job_id: int, extend: bool = False) -> Job:
+    def approve(self, job_id: int, extend: bool = False, target: str | None = None) -> Job:
         """Let one attempt run, at today's price. Approval is per attempt: a paused or reclaimed
         job comes back here rather than straight to the queue. The row records the price only —
         the estimate and the ceiling the launch is held to — because pasard has no
         authentication and there is nobody to name as the approver.
 
         `extend=True` is a different action on the same verb: it raises the *running* attempt's
-        ceiling instead of approving a new one. See `_extend`."""
+        ceiling instead of approving a new one. See `_extend`.
+
+        `target` is the account the person approving was shown, when the caller knows it (the
+        approve dialog sends it). A group job that has not launched can move between showing
+        and clicking (`_rebalance`), and a yes given for one person's credit must not spend
+        another's, so a mismatch is refused and the job left as it is."""
+        if target is not None:
+            now_on = self.job(job_id).spec.target
+            if now_on != target:
+                on = self.cfg.clouds.get(now_on)
+                who = f" ({on.owner})" if on is not None and on.owner else ""
+                raise Conflict(f"job {job_id} moved to {now_on}{who} since this was shown; "
+                               "look again")
         if extend:
             return self._extend(job_id)
         job = self.job(job_id)

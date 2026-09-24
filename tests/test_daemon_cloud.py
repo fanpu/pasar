@@ -3147,6 +3147,21 @@ def test_a_job_that_never_ran_and_fits_nowhere_else_is_still_said_to_be_stranded
     assert any(e["kind"] == "target_gone" and f"job {job.id}" in e["text"] for e in events)
 
 
+def test_approving_checks_the_account_the_person_was_shown(grouped, repo):
+    """The approve dialog names whose credit pays; a move between showing it and the click
+    must not turn a yes for alice's credit into spending bob's."""
+    job = grouped.submit(cloud_spec(repo, target="modal", est_runtime=3600))
+    spent(grouped, "modal-a", 25.0)
+    grouped.tick()  # moved to modal-b while the dialog still said modal-a
+    with pytest.raises(Conflict) as e:
+        grouped.approve(job.id, target="modal-a")
+    assert str(e.value) == (f"job {job.id} moved to modal-b (bob) since this was shown; "
+                            "look again")
+    assert grouped.job(job.id).state == State.AWAITING
+    assert grouped.store.approvals(job.id) == []
+    assert grouped.approve(job.id, target="modal-b").state == State.QUEUED
+
+
 def test_a_job_that_cannot_be_priced_is_left_alone(grouped, repo, monkeypatch):
     job = grouped.submit(cloud_spec(repo, target="modal", est_runtime=3600))
     spent(grouped, "modal-a", 25.0)

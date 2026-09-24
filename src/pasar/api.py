@@ -297,9 +297,11 @@ def create_app(daemon: Daemon, *, prom: Prometheus | None = None, wake=lambda: N
     # `extend=1` is the same verb aimed at a different job: a *running* attempt whose own pace
     # projects it past its approved run time (`daemon.needs_more_time`), raising its ceiling
     # instead of admitting it to the queue. See `Daemon._extend`.
+    # `target` is the account the approver was shown: a group job can move to another before
+    # it launches, and a yes for one person's credit is refused rather than spent on another's.
     @app.post("/api/jobs/{job_id}/approve")
-    async def approve(job_id: int, extend: bool = False):
-        job = daemon.approve(job_id, extend=extend)
+    async def approve(job_id: int, extend: bool = False, target: str | None = None):
+        job = daemon.approve(job_id, extend=extend, target=target)
         wake()
         return view(job)
 

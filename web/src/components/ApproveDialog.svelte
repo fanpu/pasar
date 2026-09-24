@@ -54,7 +54,9 @@
     error = null;
     try {
       // The toast says what the daemon agreed to, from its answer, not what this dialog showed.
-      const after = await api.approve(job.id, extend);
+      // The account it showed goes with the yes: if the job has moved to another since, the
+      // daemon refuses rather than spend somebody else's credit.
+      const after = await api.approve(job.id, extend, c.target);
       const ceiling = money(after.cloud?.max_cost);
       ondone(extend ? `#${job.id} got more time · up to ${ceiling}` : `#${job.id} approved · up to ${ceiling}`);
       onclose();
